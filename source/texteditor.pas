@@ -494,6 +494,9 @@ begin
   end;
 
   if FullText <> '' then begin
+    // 若用户已在截断值上开始编辑，不覆盖其修改
+    if MemoText.Modified then
+      Exit;
     FIsTruncated := wasTruncated;
     MemoText.BeginUpdate;
     try
