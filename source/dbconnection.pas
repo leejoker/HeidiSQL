@@ -835,6 +835,7 @@ type
     procedure Query(SQL: String; DoStoreResult: Boolean=False; LogCategory: TDBLogCategory=lcSQL); override;
     function Ping(Reconnect: Boolean): Boolean; override;
     function GetCreateCode(Obj: TDBObject): String; override;
+    procedure Drop(Obj: TDBObject); override;
     function ConnectionInfo: TStringList; override;
     property Client: TRedisClient read FClient;
     property LastResultCount: Int64 read FLastResultCount write FLastResultCount;
@@ -11860,6 +11861,12 @@ begin
   Result := SUnsupported;
 end;
 
+procedure TRedisConnection.Drop(Obj: TDBObject);
+begin
+  // Redis 删除键用 DEL，不是 SQL 的 DROP TABLE
+  Query('DEL ' + Obj.Name);
+end;
+
 function TRedisConnection.ConnectionInfo: TStringList;
 begin
   Result := inherited ConnectionInfo;
@@ -12556,7 +12563,13 @@ end;
 
 function TRedisQuery.ColIsKeyPart(Column: Integer): Boolean;
 begin
-  Result := False;
+  // 键列（标识列）不可在网格内编辑
+  // string: col 0 = key 名（不可编辑），col 1 = value（可编辑）
+  // hash:   col 0 = field（不可编辑），col 1 = value（可编辑）
+  // list:   col 0 = index（不可编辑），col 1 = value（可编辑）
+  // zset:   col 0 = member（不可编辑），col 1 = score（可编辑）
+  // set:    col 0 = member（不可编辑，仅增删行）
+  Result := (Column = 0);
 end;
 
 function TRedisQuery.IsNull(Column: Integer): Boolean;
