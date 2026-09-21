@@ -12692,9 +12692,10 @@ begin
             if i = 0 then begin
               // field 改名
               DoCmd(['HDEL', FKey, fieldVal]);
-              DoCmd(['HSET', FKey, Cell.NewText, Row[1].OldText]);
+              DoCmd(['HSET', FKey, Cell.NewText, Row[1].NewText]);
             end else if i = 1 then begin
-              DoCmd(['HSET', FKey, fieldVal, Cell.NewText]);
+              if not Row[0].Modified then
+                DoCmd(['HSET', FKey, fieldVal, Cell.NewText]);
             end;
           end
           else if FKeyType = 'list' then begin
@@ -12712,7 +12713,8 @@ begin
               DoCmd(['ZREM', FKey, oldMember]);
               DoCmd(['ZADD', FKey, scoreVal, Cell.NewText]);
             end else if i = 1 then begin
-              DoCmd(['ZADD', FKey, Cell.NewText, oldMember]);
+              if not Row[0].Modified then
+                DoCmd(['ZADD', FKey, Cell.NewText, oldMember]);
             end;
           end;
         end;
