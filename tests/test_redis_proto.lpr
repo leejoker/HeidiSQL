@@ -28,6 +28,61 @@ begin
   Result := TEncoding.UTF8.GetBytes(s);
 end;
 
+{ BytesToString: copy TBytes verbatim into a RawByteString (no encoding
+  conversion) so byte-level equality comparisons are exact. }
+function BytesToString(const Data: TBytes): RawByteString;
+begin
+  if Length(Data) = 0 then
+    Result := ''
+  else begin
+    SetLength(Result, Length(Data));
+    Move(Data[0], Result[1], Length(Data));
+  end;
+end;
+
+{ TestCommandSerialization: verify that commands emitted by the edit path
+  serialize to correct RESP bytes, including SET/HSET/ZADD and UTF-8 key
+  names checked at the byte level. }
+procedure TestCommandSerialization;
+var
+  Data: TBytes;
+  Got: RawByteString;
+  Expected: RawByteString;
+  KeyBytes, ValBytes: RawByteString;
+begin
+  // SET key value
+  Data := RedisSerializeCommand(['SET', 'mykey', 'myvalue']);
+  Got := BytesToString(Data);
+  Expected := '*3'#13#10'$3'#13#10'SET'#13#10'$5'#13#10'mykey'#13#10'$7'#13#10'myvalue'#13#10;
+  Check('serialize SET mykey myvalue', Got = Expected);
+
+  // HSET key field value
+  Data := RedisSerializeCommand(['HSET', 'myhash', 'f1', 'v1']);
+  Got := BytesToString(Data);
+  Expected := '*4'#13#10'$4'#13#10'HSET'#13#10'$6'#13#10'myhash'#13#10'$2'#13#10'f1'#13#10'$2'#13#10'v1'#13#10;
+  Check('serialize HSET myhash f1 v1', Got = Expected);
+
+  // ZADD key score member
+  Data := RedisSerializeCommand(['ZADD', 'myzset', '3.14', 'm1']);
+  Got := BytesToString(Data);
+  Expected := '*4'#13#10'$4'#13#10'ZADD'#13#10'$6'#13#10'myzset'#13#10'$4'#13#10'3.14'#13#10'$2'#13#10'm1'#13#10;
+  Check('serialize ZADD myzset 3.14 m1', Got = Expected);
+
+  // UTF-8 key names. Build both the expected bytes and the input string from
+  // explicit byte escapes so the test is independent of how the source file
+  // literal is encoded (mirrors the existing byte-check approach).
+  //   U+952E (jian/key)   = E9 94 AE  (3 bytes)
+  //   U+503C (zhi/value)  = E5 80 BC  (3 bytes)
+  KeyBytes := '' + #$E9 + #$94 + #$AE;
+  ValBytes := '' + #$E5 + #$80 + #$BC;
+  Check('serialize UTF-8 key byte-length', (Length(KeyBytes) = 3) and (Length(ValBytes) = 3));
+  Data := RedisSerializeCommand(['SET', string(KeyBytes), string(ValBytes)]);
+  Got := BytesToString(Data);
+  Expected := '*3'#13#10'$3'#13#10'SET'#13#10'$3'#13#10 + KeyBytes + #13#10 +
+              '$3'#13#10 + ValBytes + #13#10;
+  Check('serialize UTF-8 key', Got = Expected);
+end;
+
 procedure CheckReply(const Name: string; const Data: TBytes; ExpectedKind: TRedisReplyKind;
   const ExpectedStr: string; ExpectedInt: Int64 = 0);
 var
@@ -155,6 +210,9 @@ begin
   got := RedisSerializeCommand([]);
   s := TEncoding.UTF8.GetString(got);
   Check('serialize empty command', s = '*0' + #13#10);
+
+  // --- Task 11: command serialization (SET/HSET/ZADD + UTF-8 keys) ---
+  TestCommandSerialization;
 
   // --- Task 3: RESP2 解析 ---
   CheckReply('simple string', Bytes('+OK' + #13#10), rkString, 'OK');
