@@ -871,7 +871,7 @@ type
       procedure SetColumnOrgNames(Value: TStringList);
       procedure SetDBObject(Value: TDBObject);
       procedure CreateUpdateRow;
-      function GetKeyColumns: TTableColumnList;
+      function GetKeyColumns: TTableColumnList; virtual;
       function GridQuery(QueryType, QueryBody: String): String;
     public
       constructor Create(AOwner: TComponent); override;
@@ -901,17 +901,17 @@ type
       function IsFunction(Column: Integer): Boolean;
       function HasResult: Boolean; virtual; abstract;
       function GetWhereClause: String;
-      procedure CheckEditable;
+      procedure CheckEditable; virtual;
       function IsEditable: Boolean;
-      procedure DeleteRow;
-      function InsertRow: Int64;
+      procedure DeleteRow; virtual;
+      function InsertRow: Int64; virtual;
       procedure SetCol(Column: Integer; NewText: String; Null: Boolean; IsFunction: Boolean);
-      function EnsureFullRow(Refresh: Boolean): Boolean;
+      function EnsureFullRow(Refresh: Boolean): Boolean; virtual;
       function HasFullData: Boolean;
       function Modified(Column: Integer): Boolean; overload;
       function Modified: Boolean; overload;
       function Inserted: Boolean;
-      function SaveModifications: Boolean;
+      function SaveModifications: Boolean; virtual;
       function DatabaseName: String; virtual; abstract;
       function TableName: String; overload;
       function TableName(Column: Integer): String; overload; virtual; abstract;
