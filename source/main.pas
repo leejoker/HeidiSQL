@@ -11356,6 +11356,9 @@ begin
   Conn := Results.Connection;
   // Allow editing, or leave readonly mode
   AllowEdit := Results.IsEditable;
+  // Redis: 键列（标识列）不可在网格内编辑，直接返回不创建编辑器
+  if (Conn.Parameters.NetTypeGroup = ngRedis) and Results.ColIsKeyPart(ResultCol) then
+    Exit;
   TblColumn := Results.ColAttributes(ResultCol);
 
   // Find foreign key values
