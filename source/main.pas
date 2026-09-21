@@ -289,6 +289,11 @@ type
     actInsertFiles: TAction;
     actExportTables: TAction;
     actDropObjects: TAction;
+    actRedisRename: TAction;
+    actRedisExpire: TAction;
+    actRedisPersist: TAction;
+    actRedisTTL: TAction;
+    actRedisNewKey: TAction;
     actLoadSQL: TAction;
     menuConnections: TPopupMenu;
     menuFeaturetracker: TMenuItem;
@@ -512,6 +517,13 @@ type
     menuEditObject: TMenuItem;
     menuCreateObject: TMenuItem;
     menuDeleteObject: TMenuItem;
+    menuRedisRename: TMenuItem;
+    menuRedisExpire: TMenuItem;
+    menuRedisPersist: TMenuItem;
+    menuRedisTTL: TMenuItem;
+    menuRedisCopyKeyName: TMenuItem;
+    menuRedisSeparator: TMenuItem;
+    menuRedisNewKey: TMenuItem;
     menuMaintenance2: TMenuItem;
     menuEmptyTables: TMenuItem;
     menuCreateDB: TMenuItem;
@@ -889,6 +901,12 @@ type
     procedure actDataLastExecute(Sender: TObject);
     procedure actDataPostChangesExecute(Sender: TObject);
     procedure actDropObjectsExecute(Sender: TObject);
+    procedure actRedisRenameExecute(Sender: TObject);
+    procedure actRedisExpireExecute(Sender: TObject);
+    procedure actRedisPersistExecute(Sender: TObject);
+    procedure actRedisTTLExecute(Sender: TObject);
+    procedure actRedisNewKeyExecute(Sender: TObject);
+    procedure menuRedisCopyKeyNameClick(Sender: TObject);
     procedure actEmptyTablesExecute(Sender: TObject);
     procedure actExportSettingsExecute(Sender: TObject);
     procedure actFlushExecute(Sender: TObject);
@@ -1479,7 +1497,7 @@ uses
   FileInfo, winpeimagereader, elfreader, machoreader, About, data_sorting, column_selection, loaddata, editvar,
   copytable, csv_detector, exportgrid, usermanager, rolemanagerpg, reformatter, connections, sqlhelp, updatecheck,
   insertfiles, texteditor, preferences, table_editor, view, routine_editor, trigger_editor, event_editor, grideditlinks,
-  crashdialog, selectdbobject;
+  crashdialog, selectdbobject, redis_newkey, redisclient;
 
 {$R *.lfm}
 
@@ -8084,6 +8102,14 @@ begin
     actCreateEvent.Enabled := IsDb or IsObject or (Obj.GroupType = lntEvent);
     actDropObjects.Enabled := IsObject or
       (IsDb and not Obj.Connection.Parameters.IsAnySQLite);
+    // Redis 键操作菜单可见性
+    actRedisRename.Visible := (Obj.Connection.Parameters.NetTypeGroup = ngRedis) and IsObject;
+    actRedisExpire.Visible := (Obj.Connection.Parameters.NetTypeGroup = ngRedis) and IsObject;
+    actRedisPersist.Visible := (Obj.Connection.Parameters.NetTypeGroup = ngRedis) and IsObject;
+    actRedisTTL.Visible := (Obj.Connection.Parameters.NetTypeGroup = ngRedis) and IsObject;
+    menuRedisCopyKeyName.Visible := (Obj.Connection.Parameters.NetTypeGroup = ngRedis) and IsObject;
+    actRedisNewKey.Visible := (Obj.Connection.Parameters.NetTypeGroup = ngRedis) and (IsDb or (Obj.NodeType = lntNone));
+    menuRedisSeparator.Visible := (Obj.Connection.Parameters.NetTypeGroup = ngRedis);
     actDetachDatabase.Visible := Obj.Connection.Parameters.IsAnySQLite;
     actDetachDatabase.Enabled := actDetachDatabase.Visible and (Obj.NodeType = lntDb);
     actCopyTable.Enabled := Obj.NodeType in [lntTable, lntView];
@@ -8108,6 +8134,14 @@ begin
     actCreateTrigger.Enabled := True;
     actCreateEvent.Enabled := True;
     actDropObjects.Enabled := ListTables.SelectedCount > 0;
+    // Redis 菜单在 ListTables 视图中隐藏
+    actRedisRename.Visible := False;
+    actRedisExpire.Visible := False;
+    actRedisPersist.Visible := False;
+    actRedisTTL.Visible := False;
+    menuRedisCopyKeyName.Visible := False;
+    actRedisNewKey.Visible := False;
+    menuRedisSeparator.Visible := False;
     actDetachDatabase.Visible := False;
     actEmptyTables.Enabled := True;
     actQueryTable.Enabled := Assigned(Obj) and (Obj.NodeType in [lntTable, lntView]);
@@ -8126,6 +8160,239 @@ begin
     actCreateFunction.Enabled := actCreateFunction.Enabled and Conn.Has(frCreateFunction);
     actCreateTrigger.Enabled := actCreateTrigger.Enabled and Conn.Has(frCreateTrigger);
     actCreateEvent.Enabled := actCreateEvent.Enabled and Conn.Has(frCreateEvent);
+  end;
+end;
+
+
+procedure TMainForm.actRedisRenameExecute(Sender: TObject);
+var
+  Obj: TDBObject;
+  NewName, OldName: String;
+  ExistsReply: TRedisValue;
+  Conn: TRedisConnection;
+  FocusObj: TDBObject;
+begin
+  Obj := ActiveDBObj;
+  if (Obj = nil) or (Obj.Connection.Parameters.NetTypeGroup <> ngRedis) then Exit;
+  OldName := Obj.Name;
+  NewName := OldName;
+  if not InputQuery(_('Rename key'), _('New key name:'), NewName) then Exit;
+  if (NewName = '') or (NewName = OldName) then Exit;
+  Conn := Obj.Connection as TRedisConnection;
+  // 检查目标键是否已存在
+  try
+    ExistsReply := Conn.Client.Execute(['EXISTS', NewName]);
+    try
+      if (ExistsReply <> nil) and (ExistsReply.Kind = rkInteger) and (ExistsReply.Int > 0) then begin
+        if MessageDialog(f_('Key "%s" already exists. Overwrite?', [NewName]),
+          mtCriticalConfirmation, [mbOK, mbCancel]) <> mrOK then
+          Exit;
+      end;
+    finally
+      ExistsReply.Free;
+    end;
+    Conn.Client.Execute(['RENAME', OldName, NewName]).Free;
+    // 刷新键树：清除该库缓存并重建，聚焦重命名后的键
+    FocusObj := TDBObject.Create(Conn);
+    try
+      FocusObj.Assign(Obj);
+      FocusObj.Name := NewName;
+      RefreshTree(FocusObj);
+    finally
+      FocusObj.Free;
+    end;
+    LogSQL(f_('Renamed key "%s" to "%s"', [OldName, NewName]), lcInfo);
+  except
+    on E: ERedisError do
+      ErrorDialog(E.Message);
+  end;
+end;
+
+
+procedure TMainForm.actRedisExpireExecute(Sender: TObject);
+var
+  Obj: TDBObject;
+  SecondsStr: String;
+  Seconds: Int64;
+  Conn: TRedisConnection;
+  Reply: TRedisValue;
+begin
+  Obj := ActiveDBObj;
+  if (Obj = nil) or (Obj.Connection.Parameters.NetTypeGroup <> ngRedis) then Exit;
+  SecondsStr := '3600';
+  if not InputQuery(_('Set TTL'), _('Seconds (-1 = never expire):'), SecondsStr) then Exit;
+  Seconds := StrToInt64Def(SecondsStr, -1);
+  Conn := Obj.Connection as TRedisConnection;
+  try
+    if Seconds < 0 then begin
+      Conn.Client.Execute(['PERSIST', Obj.Name]).Free;
+      LogSQL(f_('Removed TTL from key "%s"', [Obj.Name]), lcInfo);
+    end else begin
+      Reply := Conn.Client.Execute(['EXPIRE', Obj.Name, IntToStr(Seconds)]);
+      try
+        if (Reply <> nil) and (Reply.Kind = rkInteger) and (Reply.Int = 0) then
+          ErrorDialog(f_('Key "%s" does not exist.', [Obj.Name]));
+      finally
+        Reply.Free;
+      end;
+      LogSQL(f_('Set TTL %d on key "%s"', [Seconds, Obj.Name]), lcInfo);
+    end;
+  except
+    on E: ERedisError do
+      ErrorDialog(E.Message);
+  end;
+end;
+
+
+procedure TMainForm.actRedisPersistExecute(Sender: TObject);
+var
+  Obj: TDBObject;
+  Conn: TRedisConnection;
+begin
+  Obj := ActiveDBObj;
+  if (Obj = nil) or (Obj.Connection.Parameters.NetTypeGroup <> ngRedis) then Exit;
+  Conn := Obj.Connection as TRedisConnection;
+  try
+    Conn.Client.Execute(['PERSIST', Obj.Name]).Free;
+    LogSQL(f_('Removed TTL from key "%s"', [Obj.Name]), lcInfo);
+  except
+    on E: ERedisError do
+      ErrorDialog(E.Message);
+  end;
+end;
+
+
+procedure TMainForm.actRedisTTLExecute(Sender: TObject);
+var
+  Obj: TDBObject;
+  Conn: TRedisConnection;
+  Reply: TRedisValue;
+  TtlVal: Int64;
+  Msg: String;
+begin
+  Obj := ActiveDBObj;
+  if (Obj = nil) or (Obj.Connection.Parameters.NetTypeGroup <> ngRedis) then Exit;
+  Conn := Obj.Connection as TRedisConnection;
+  try
+    Reply := Conn.Client.Execute(['TTL', Obj.Name]);
+    try
+      if (Reply <> nil) and (Reply.Kind = rkInteger) then begin
+        TtlVal := Reply.Int;
+        case TtlVal of
+          -1: Msg := f_('Key "%s" has no expiration.', [Obj.Name]);
+          -2: Msg := f_('Key "%s" does not exist.', [Obj.Name]);
+        else
+          Msg := f_('Key "%s" TTL: %d seconds', [Obj.Name, TtlVal]);
+        end;
+        MessageDialog(Msg, mtInformation, [mbOK]);
+      end;
+    finally
+      Reply.Free;
+    end;
+  except
+    on E: ERedisError do
+      ErrorDialog(E.Message);
+  end;
+end;
+
+
+procedure TMainForm.menuRedisCopyKeyNameClick(Sender: TObject);
+var
+  Obj: TDBObject;
+begin
+  Obj := ActiveDBObj;
+  if (Obj = nil) or (Obj.Connection.Parameters.NetTypeGroup <> ngRedis) then Exit;
+  Clipboard.AsText := Obj.Name;
+end;
+
+
+procedure TMainForm.actRedisNewKeyExecute(Sender: TObject);
+var
+  Obj: TDBObject;
+  Conn: TRedisConnection;
+  Frm: TfrmRedisNewKey;
+  KeyName, KeyType, InitialValue: String;
+  Lines: TStringList;
+  i: Integer;
+  SpacePos: Integer;
+  Field, Val, Member, Score: String;
+  FocusObj: TDBObject;
+begin
+  Obj := ActiveDBObj;
+  if (Obj = nil) or (Obj.Connection.Parameters.NetTypeGroup <> ngRedis) then Exit;
+  Conn := Obj.Connection as TRedisConnection;
+  Frm := TfrmRedisNewKey.Create(Self);
+  Lines := TStringList.Create;
+  try
+    Frm.SetConnection(Conn);
+    if Frm.ShowModal <> mrOK then Exit;
+    KeyName := Frm.GetKeyName;
+    KeyType := Frm.GetKeyType;
+    InitialValue := Frm.GetInitialValue;
+    // TStringList 自动处理 #13#10 / #10 换行，比 String.Split 的混合分隔符更可靠
+    Lines.Text := InitialValue;
+    try
+      // FPC {$mode delphi} 不支持 case-on-string，用 if/else if 链
+      if KeyType = 'string' then begin
+        Conn.Client.Execute(['SET', KeyName, InitialValue]).Free;
+      end else if KeyType = 'hash' then begin
+        for i := 0 to Lines.Count - 1 do begin
+          if Trim(Lines[i]) = '' then Continue;
+          SpacePos := Pos(' ', Lines[i]);
+          if SpacePos > 0 then begin
+            Field := Trim(Copy(Lines[i], 1, SpacePos - 1));
+            Val := Trim(Copy(Lines[i], SpacePos + 1));
+          end else begin
+            Field := Trim(Lines[i]);
+            Val := '';
+          end;
+          Conn.Client.Execute(['HSET', KeyName, Field, Val]).Free;
+        end;
+      end else if KeyType = 'list' then begin
+        for i := 0 to Lines.Count - 1 do begin
+          if Trim(Lines[i]) = '' then Continue;
+          Conn.Client.Execute(['RPUSH', KeyName, Lines[i]]).Free;
+        end;
+      end else if KeyType = 'set' then begin
+        for i := 0 to Lines.Count - 1 do begin
+          if Trim(Lines[i]) = '' then Continue;
+          Conn.Client.Execute(['SADD', KeyName, Lines[i]]).Free;
+        end;
+      end else if KeyType = 'zset' then begin
+        for i := 0 to Lines.Count - 1 do begin
+          if Trim(Lines[i]) = '' then Continue;
+          SpacePos := Pos(' ', Lines[i]);
+          if SpacePos > 0 then begin
+            Member := Trim(Copy(Lines[i], 1, SpacePos - 1));
+            Score := Trim(Copy(Lines[i], SpacePos + 1));
+          end else begin
+            Member := Trim(Lines[i]);
+            Score := '0';
+          end;
+          Conn.Client.Execute(['ZADD', KeyName, Score, Member]).Free;
+        end;
+      end;
+      // 刷新键树使新键可见
+      if Obj.Database <> '' then begin
+        FocusObj := TDBObject.Create(Conn);
+        try
+          FocusObj.Assign(Obj);
+          FocusObj.Name := KeyName;
+          FocusObj.NodeType := lntTable;
+          RefreshTree(FocusObj);
+        finally
+          FocusObj.Free;
+        end;
+      end else
+        RefreshTree;
+      LogSQL(f_('Created new %s key "%s"', [KeyType, KeyName]), lcInfo);
+    except
+      on E: ERedisError do
+        ErrorDialog(E.Message);
+    end;
+  finally
+    Lines.Free;
+    Frm.Free;
   end;
 end;
 

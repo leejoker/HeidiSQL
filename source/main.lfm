@@ -4159,6 +4159,36 @@ object MainForm: TMainForm
       ImageIndex = 131
       OnExecute = actDropObjectsExecute
     end
+    object actRedisRename: TAction
+      Category = 'Database'
+      Caption = 'Rename key'
+      Hint = 'Rename Redis key'
+      OnExecute = actRedisRenameExecute
+    end
+    object actRedisExpire: TAction
+      Category = 'Database'
+      Caption = 'Set TTL...'
+      Hint = 'Set key expiration'
+      OnExecute = actRedisExpireExecute
+    end
+    object actRedisPersist: TAction
+      Category = 'Database'
+      Caption = 'Remove TTL'
+      Hint = 'Remove key expiration'
+      OnExecute = actRedisPersistExecute
+    end
+    object actRedisTTL: TAction
+      Category = 'Database'
+      Caption = 'View TTL'
+      Hint = 'Show remaining TTL'
+      OnExecute = actRedisTTLExecute
+    end
+    object actRedisNewKey: TAction
+      Category = 'Database'
+      Caption = 'New key...'
+      Hint = 'Create new Redis key'
+      OnExecute = actRedisNewKeyExecute
+    end
     object actCreateView: TAction
       Category = 'Database'
       Caption = 'View'
@@ -20332,6 +20362,28 @@ object MainForm: TMainForm
     end
     object menuDeleteObject: TMenuItem
       Action = actDropObjects
+    end
+    object menuRedisRename: TMenuItem
+      Action = actRedisRename
+    end
+    object menuRedisExpire: TMenuItem
+      Action = actRedisExpire
+    end
+    object menuRedisPersist: TMenuItem
+      Action = actRedisPersist
+    end
+    object menuRedisTTL: TMenuItem
+      Action = actRedisTTL
+    end
+    object menuRedisCopyKeyName: TMenuItem
+      Caption = 'Copy key name'
+      OnClick = menuRedisCopyKeyNameClick
+    end
+    object menuRedisSeparator: TMenuItem
+      Caption = '-'
+    end
+    object menuRedisNewKey: TMenuItem
+      Action = actRedisNewKey
     end
     object Attach1: TMenuItem
       Action = actAttachDatabase
