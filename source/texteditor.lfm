@@ -141,6 +141,24 @@ object frmTextEditor: TfrmTextEditor
         Style = tbsDropDown
         OnClick = btnCustomizeHighlighterClick
       end
+      object btnImages: TToolButton
+        Left = 248
+        Top = 0
+        Caption = 'Images'
+        Hint = 'Preview base64 images in this value'
+        ImageIndex = 47
+        OnClick = btnImagesClick
+        Visible = False
+      end
+      object btnRawData: TToolButton
+        Left = 271
+        Top = 0
+        Caption = 'Raw'
+        Hint = 'Fetch full raw data and format'
+        ImageIndex = 51
+        OnClick = btnRawDataClick
+        Visible = False
+      end
     end
     object comboHighlighter: TComboBox
       AnchorSideLeft.Control = tlbStandard

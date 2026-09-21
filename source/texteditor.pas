@@ -61,6 +61,8 @@ type
     N1: TMenuItem;
     ToolButton1: TToolButton;
     btnCustomizeHighlighter: TToolButton;
+    btnImages: TToolButton;
+    btnRawData: TToolButton;
     popupHighlighter: TPopupMenu;
     menuCustomizeHighlighter: TMenuItem;
     menuFormatCodeOnce: TMenuItem;
@@ -82,6 +84,8 @@ type
     procedure btnCustomizeHighlighterClick(Sender: TObject);
     procedure menuFormatCodeOnceClick(Sender: TObject);
     procedure menuAlwaysFormatCodeClick(Sender: TObject);
+    procedure btnImagesClick(Sender: TObject);
+    procedure btnRawDataClick(Sender: TObject);
   private
     { Private declarations }
     FModified: Boolean;
@@ -102,14 +106,10 @@ type
     FImgData: array of String;
     FImgTypes: array of String;
     FRawJson: String;  // 已拉取的原始 JSON 数据，供图片预览使用
-    btnImages: TToolButton;
-    btnRawData: TToolButton;
     procedure SetModified(NewVal: Boolean);
     procedure CustomizeHighlighterChanged(Sender: TObject);
     procedure TimerLazyLoadTimer(Sender: TObject);
     procedure DoAutoDetectAndFormat;
-    procedure btnImagesClick(Sender: TObject);
-    procedure btnRawDataClick(Sender: TObject);
     procedure ImageSaveClick(Sender: TObject);
     procedure ImageDblClick(Sender: TObject);
   public
@@ -296,25 +296,7 @@ begin
   FLazyLoadTimer.Interval := 50;
   FLazyLoadTimer.OnTimer := TimerLazyLoadTimer;
 
-  // 图片预览按钮（动态添加到工具栏）
-  btnImages := TToolButton.Create(tlbStandard);
-  btnImages.Parent := tlbStandard;
-  btnImages.Style := tbsButton;
-  btnImages.Caption := _('🖼 Images');
-  btnImages.Hint := _('Preview base64 images in this value');
-  btnImages.ShowHint := True;
-  btnImages.OnClick := btnImagesClick;
-  btnImages.Visible := False;
-
-  // 原始数据按钮
-  btnRawData := TToolButton.Create(tlbStandard);
-  btnRawData.Parent := tlbStandard;
-  btnRawData.Style := tbsButton;
-  btnRawData.Caption := '📄 Raw';
-  btnRawData.Hint := _('Fetch full raw data and format');
-  btnRawData.ShowHint := True;
-  btnRawData.OnClick := btnRawDataClick;
-  btnRawData.Visible := False;
+  // btnImages 和 btnRawData 已在设计时添加到 .lfm，无需动态创建
 
   if AppSettings.ReadBool(asMemoEditorMaximized) then
     WindowState := wsMaximized;
