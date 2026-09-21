@@ -384,6 +384,8 @@ type
     ListTables: TVirtualStringTree;
     Refresh1: TMenuItem;
     pnlDataTop: TPanel;
+    pnlRedisInfo: TPanel;
+    lblRedisInfo: TLabel;
     pnlQueryMemo: TPanel;
     SynSQLSynUsed: TSynSQLSyn;
     SynMemoQuery: TSynMemo;
@@ -1358,6 +1360,7 @@ type
     procedure AutoCalcColWidth(Tree: TVirtualStringTree; Column: TColumnIndex);
     procedure AsyncRepaintGrid(Data: PtrInt);
     procedure PlaceObjectEditor(Obj: TDBObject);
+    procedure UpdateRedisInfoBar(Obj: TDBObject);
     procedure SetTabCaption(PageIndex: Integer; Text: String);
     function ConfirmTabClose(PageIndex: Integer; AppIsClosing: Boolean): Boolean;
     function ConfirmTabClear(PageIndex: Integer; AppIsClosing: Boolean): Boolean;
@@ -8397,6 +8400,98 @@ begin
 end;
 
 
+procedure TMainForm.UpdateRedisInfoBar(Obj: TDBObject);
+var
+  Conn: TRedisConnection;
+  TypeReply, TtlReply, SizeReply, MemReply: TRedisValue;
+  KeyType, InfoText: String;
+  TtlVal: Int64;
+  SizeVal: Int64;
+begin
+  if (Obj = nil) or (Obj.Connection.Parameters.NetTypeGroup <> ngRedis)
+    or (Obj.NodeType <> lntTable) then begin
+    pnlRedisInfo.Visible := False;
+    Exit;
+  end;
+  Conn := Obj.Connection as TRedisConnection;
+  pnlRedisInfo.Visible := True;
+  InfoText := '';
+  try
+    // TYPE
+    TypeReply := Conn.Client.Execute(['TYPE', Obj.Name]);
+    try
+      if (TypeReply <> nil) and (TypeReply.Kind in [rkString, rkBulk]) then
+        KeyType := TypeReply.Str
+      else
+        KeyType := 'unknown';
+      InfoText := 'TYPE: ' + KeyType;
+    finally
+      TypeReply.Free;
+    end;
+
+    // SIZE (按类型)
+    SizeVal := 0;
+    if KeyType = 'string' then
+      SizeReply := Conn.Client.Execute(['STRLEN', Obj.Name])
+    else if KeyType = 'hash' then
+      SizeReply := Conn.Client.Execute(['HLEN', Obj.Name])
+    else if KeyType = 'list' then
+      SizeReply := Conn.Client.Execute(['LLEN', Obj.Name])
+    else if KeyType = 'set' then
+      SizeReply := Conn.Client.Execute(['SCARD', Obj.Name])
+    else if KeyType = 'zset' then
+      SizeReply := Conn.Client.Execute(['ZCARD', Obj.Name])
+    else
+      SizeReply := nil;
+    if SizeReply <> nil then begin
+      try
+        if (SizeReply <> nil) and (SizeReply.Kind = rkInteger) then
+          SizeVal := SizeReply.Int;
+      finally
+        SizeReply.Free;
+      end;
+    end;
+    InfoText := InfoText + ' | SIZE: ' + IntToStr(SizeVal);
+
+    // TTL
+    TtlReply := Conn.Client.Execute(['TTL', Obj.Name]);
+    try
+      if (TtlReply <> nil) and (TtlReply.Kind = rkInteger) then begin
+        TtlVal := TtlReply.Int;
+        if TtlVal = -1 then
+          InfoText := InfoText + ' | TTL: ' + _('never expires')
+        else if TtlVal = -2 then
+          InfoText := InfoText + ' | TTL: ' + _('key not found')
+        else
+          InfoText := InfoText + ' | TTL: ' + IntToStr(TtlVal) + 's';
+      end;
+    finally
+      TtlReply.Free;
+    end;
+
+    // MEMORY USAGE (Redis 4.0+)
+    try
+      MemReply := Conn.Client.Execute(['MEMORY', 'USAGE', Obj.Name]);
+      try
+        if (MemReply <> nil) and (MemReply.Kind = rkInteger) then
+          InfoText := InfoText + ' | MEMORY: ' + FormatNumber(MemReply.Int)
+        else
+          InfoText := InfoText + ' | MEMORY: N/A';
+      finally
+        MemReply.Free;
+      end;
+    except
+      InfoText := InfoText + ' | MEMORY: N/A';
+    end;
+
+    lblRedisInfo.Caption := InfoText;
+  except
+    on E: ERedisError do
+      lblRedisInfo.Caption := _('Error: ') + E.Message;
+  end;
+end;
+
+
 procedure TMainForm.popupFilterPopup(Sender: TObject);
 var
   SQLFuncs: TSQLFunctionList;
@@ -10492,6 +10587,12 @@ begin
       and (FActiveDbObj.NodeType in [lntTable..lntEvent, lntColumn])
       and (FActiveDbObj.Connection.Parameters.NetTypeGroup <> ngRedis);
     tabData.TabVisible := (FActiveDbObj <> nil) and (FActiveDbObj.NodeType in [lntTable, lntView, lntColumn]);
+    if (FActiveDbObj <> nil)
+      and (FActiveDbObj.Connection.Parameters.NetTypeGroup = ngRedis)
+      and (FActiveDbObj.NodeType = lntTable) then
+      UpdateRedisInfoBar(FActiveDbObj)
+    else
+      pnlRedisInfo.Visible := False;
   end;
 
   // Store click history item

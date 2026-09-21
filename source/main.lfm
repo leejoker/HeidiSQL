@@ -2276,6 +2276,25 @@ object MainForm: TMainForm
               OnClick = btnDataClick
             end
           end
+          object pnlRedisInfo: TPanel
+            Left = 0
+            Height = 20
+            Top = 26
+            Width = 615
+            Align = alTop
+            Alignment = taLeftJustify
+            BevelOuter = bvNone
+            BorderWidth = 2
+            TabOrder = 5
+            Visible = False
+            object lblRedisInfo: TLabel
+              Left = 4
+              Height = 16
+              Top = 2
+              Width = 100
+              Caption = ''
+            end
+          end
           object pnlFilter: TPanel
             Left = 0
             Height = 79
