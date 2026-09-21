@@ -15,7 +15,8 @@ uses
   RegExpr, process, Pipes, SQLDB, LConvEncoding,
   {$IFDEF HASMSSQL}MSSQLConn, SQLDBLib, DB, {$ENDIF}
   generic_types, lazaruscompat,
-  dbstructures, dbstructures.mysql, dbstructures.mssql, dbstructures.postgresql, dbstructures.sqlite, dbstructures.interbase;
+  dbstructures, dbstructures.mysql, dbstructures.mssql, dbstructures.postgresql, dbstructures.sqlite, dbstructures.interbase,
+  dbstructures.redis, redisclient;
 
 
 type
@@ -809,6 +810,36 @@ type
       function GetTableForeignKeys(Table: TDBObject): TForeignKeyList; override;
   end;}
 
+  { TRedisConnection — Redis 键值存储连接。复用 TDBConnection 生命周期/日志/线程,
+    但 Query() 把 SQL 字符串解释为空格分词的 RESP 命令。不实现 SQL 表/列/键方法
+    (抛 SNotImplemented),UI 门控确保不调用。键树/值查看器在阶段 3。 }
+  TRedisConnection = class(TDBConnection)
+  private
+    FClient: TRedisClient;
+    FLastResultCount: Int64;
+  protected
+    procedure SetActive(Value: Boolean); override;
+    procedure DoAfterConnect; override;
+    function GetThreadId: Int64; override;
+    function GetLastErrorCode: Cardinal; override;
+    function GetLastErrorMsg: String; override;
+    function GetAllDatabases: TStringList; override;
+    procedure FetchDbObjects(db: String; var Cache: TDBObjectList); override;
+    function GetTableColumns(Table: TDBObject): TTableColumnList; override;
+    function GetTableKeys(Table: TDBObject): TTableKeyList; override;
+    function GetTableForeignKeys(Table: TDBObject): TForeignKeyList; override;
+    function GetLastResults: TDBQueryList; override;
+  public
+    constructor Create(AOwner: TComponent); override;
+    destructor Destroy; override;
+    procedure Query(SQL: String; DoStoreResult: Boolean=False; LogCategory: TDBLogCategory=lcSQL); override;
+    function Ping(Reconnect: Boolean): Boolean; override;
+    function GetCreateCode(Obj: TDBObject): String; override;
+    function ConnectionInfo: TStringList; override;
+    property Client: TRedisClient read FClient;
+    property LastResultCount: Int64 read FLastResultCount write FLastResultCount;
+  end;
+
 
   { TDBQuery }
 
@@ -987,6 +1018,43 @@ type
       function HasResult: Boolean; override;
       function DatabaseName: String; override;
       function TableName(Column: Integer): String; overload; override;
+  end;
+
+  { TRedisQuery — 把 TRedisValue 回复适配为 TDBQuery 列/行接口。
+    标量->单行单列; array->多行单列。只读(不支持网格编辑)。 }
+  TRedisQuery = class(TDBQuery)
+  private
+    FConn: TRedisConnection;
+    FReply: TRedisValue;
+    FColNames: TStringList;
+    FKey: String;       // 当前查询的 Redis key 名
+    FKeyType: String;  // 当前 key 的类型 (hash/string/list/set/zset)
+  protected
+    procedure SetRecNo(Value: Int64); override;
+  public
+    constructor Create(AOwner: TComponent); override;
+    destructor Destroy; override;
+    procedure Execute(AddResult: Boolean=False; UseRawResult: Integer=-1); override;
+    function Col(Column: Integer; IgnoreErrors: Boolean=False): String; overload; override;
+    function ColIsPrimaryKeyPart(Column: Integer): Boolean; override;
+    function ColIsUniqueKeyPart(Column: Integer): Boolean; override;
+    function ColIsKeyPart(Column: Integer): Boolean; override;
+    function IsNull(Column: Integer): Boolean; overload; override;
+    function HasResult: Boolean; override;
+    function DatabaseName: String; override;
+    function TableName(Column: Integer): String; overload; override;
+    // 按需获取某个 field 的完整值（懒加载）
+    function GetFullValue(RecNo: Int64; Column: Integer): String;
+    // 获取某个 field 的字节长度（不传输完整值）
+    function GetValueLength(RecNo: Int64): Int64;
+    // 获取 JSON 值中 base64 图片的数量
+    function GetImageCount(RecNo: Int64): Integer;
+    // 获取第 ImageIndex 张图片的 base64 数据和媒体类型
+    function GetImageData(RecNo: Int64; ImageIndex: Integer; out MediaType: String): String;
+    // 获取原始完整值（不截断，大值可能很慢）
+    function GetRawValue(RecNo: Int64): String;
+    property RedisKey: String read FKey;
+    property RedisKeyType: String read FKeyType;
   end;
 
   {TInterbaseQuery = class(TDBQuery)
@@ -1507,6 +1575,8 @@ begin
       Result := TPgConnection.Create(AOwner);
     ngSQLite:
       Result := TSQLiteConnection.Create(AOwner);
+    ngRedis:
+      Result := TRedisConnection.Create(AOwner);
     //ngInterbase:
     //  Result := TInterbaseConnection.Create(AOwner);
     else
@@ -1529,6 +1599,8 @@ begin
       Result := TPGQuery.Create(Connection);
     ngSQLite:
       Result := TSQLiteQuery.Create(Connection);
+    ngRedis:
+      Result := TRedisQuery.Create(Connection);
     //ngInterbase:
     //  Result := TInterbaseQuery.Create(Connection);
     else
@@ -1571,6 +1643,11 @@ begin
       ntInterbase_Local:        Result := PrefixInterbase+' (Local, experimental)';
       ntFirebird_TCPIP:         Result := PrefixFirebird+' (TCP/IP, experimental)';
       ntFirebird_Local:         Result := PrefixFirebird+' (Local, experimental)';
+      ntRedis_TCPIP:            Result := 'Redis (TCP/IP)';
+      ntRedis_SSHtunnel:        Result := 'Redis (SSH tunnel)';
+      ntRedis_TLS:              Result := 'Redis (TLS)';
+      ntRedis_Sentinel:         Result := 'Redis (Sentinel, not yet implemented)';
+      ntRedis_Cluster:          Result := 'Redis (Cluster, not yet implemented)';
     end;
   end
   else begin
@@ -1593,6 +1670,7 @@ begin
       end;
       ngSQLite:                        Result := PrefixSqlite;
       ngInterbase:                     Result := PrefixInterbase;
+      ngRedis:                         Result := 'Redis';
     end;
   end;
 end;
@@ -1611,6 +1689,8 @@ begin
       Result := ngSQLite;
     ntInterbase_TCPIP, ntInterbase_Local, ntFirebird_TCPIP, ntFirebird_Local:
       Result := ngInterbase;
+    ntRedis_TCPIP, ntRedis_SSHtunnel, ntRedis_TLS, ntRedis_Sentinel, ntRedis_Cluster:
+      Result := ngRedis;
     else begin
       // Return default net group here. Raising an exception lets the app die for some reason.
       // Reproduction: click drop-down button on "Database(s)" session setting
@@ -1623,7 +1703,7 @@ end;
 
 function TConnectionParameters.SshSupport: Boolean;
 begin
-  Result := FNetType in [ntMySQL_SSHtunnel, ntMySQL_RDS, ntPgSQL_SSHtunnel, ntMSSQL_TCPIP];
+  Result := FNetType in [ntMySQL_SSHtunnel, ntMySQL_RDS, ntPgSQL_SSHtunnel, ntMSSQL_TCPIP, ntRedis_SSHtunnel];
 end;
 
 
@@ -1785,7 +1865,8 @@ begin
     ngInterbase: begin
       Result := 203;
       if IsFirebird then Result := 204;
-    end
+    end;
+    ngRedis: Result := ICONINDEX_SERVER;
     else Result := ICONINDEX_SERVER;
   end;
 end;
@@ -1803,6 +1884,7 @@ begin
     ngMSSQL: Result := 0; // => autodetection by driver (previously 1433)
     ngPgSQL: Result := 5432;
     ngInterbase: Result := 3050;
+    ngRedis: Result := REDIS_DEFAULT_PORT;
     else Result := 0;
   end;
 end;
@@ -1815,6 +1897,7 @@ begin
     ngMSSQL: Result := 'sa';
     ngPgSQL: Result := 'postgres';
     ngInterbase: Result := 'sysdba';
+    ngRedis: Result := '';
     else Result := '';
   end;
 end;
@@ -1863,7 +1946,7 @@ end;
 
 function TConnectionParameters.DefaultSshActive: Boolean;
 begin
-  Result := FNetType in [ntMySQL_SSHtunnel, ntMySQL_RDS, ntPgSQL_SSHtunnel];
+  Result := FNetType in [ntMySQL_SSHtunnel, ntMySQL_RDS, ntPgSQL_SSHtunnel, ntRedis_SSHtunnel];
 end;
 
 
@@ -3177,6 +3260,8 @@ begin
       FSqlProvider := TSQLiteProvider.Create(FParameters.NetType);
     ngInterbase:
       FSqlProvider := TInterbaseProvider.Create(FParameters.NetType);
+    ngRedis:
+      FSqlProvider := TRedisProvider.Create(FParameters.NetType);
     else
       raise Exception.CreateFmt(_(MsgUnhandledNetType), [Integer(FParameters.NetType)]);
   end;
@@ -4613,7 +4698,7 @@ begin
   Result := 0;
   rx := TRegExpr.Create;
   case FParameters.NetTypeGroup of
-    ngMySQL, ngPgSQL, ngSQLite, ngInterbase: begin
+    ngMySQL, ngPgSQL, ngSQLite, ngInterbase, ngRedis: begin
       rx.Expression := '(\d+)\.(\d+)(\.(\d+))?';
       if rx.Exec(FServerVersionUntouched) then begin
         Result := StrToIntDef(rx.Match[1], 0) *10000 +
@@ -4655,7 +4740,7 @@ var
   major, minor, build: Integer;
 begin
   case FParameters.NetTypeGroup of
-    ngMySQL, ngPgSQL, ngSQLite, ngInterbase: begin
+    ngMySQL, ngPgSQL, ngSQLite, ngInterbase, ngRedis: begin
       v := IntToStr(ServerVersionInt);
       major := StrToIntDef(Copy(v, 1, Length(v)-4), 0);
       minor := StrToIntDef(Copy(v, Length(v)-3, 2), 0);
@@ -5070,6 +5155,11 @@ begin
       c4 := '''';
       EscChar := '\';
       Result := escChars(Text, EscChar, c1, c2, c3, c4);
+    end;
+
+    ngRedis: begin
+      // Redis 不使用 SQL 转义,直接返回原文(Quote 由调用方控制)
+      Result := Text;
     end;
 
     else Result := '';
@@ -6727,6 +6817,8 @@ begin
       Result := Length(TSQLiteConnection(Self).LastRawResults);
     //ngInterbase:
     //  Result := Length(TInterbaseConnection(Self).LastRawResults);
+    ngRedis:
+      Result := TRedisConnection(Self).LastResultCount;
     else
       raise Exception.CreateFmt(_(MsgUnhandledNetType), [Integer(Parameters.NetType)]);
   end;
@@ -7893,6 +7985,11 @@ begin
     ngInterbase: begin
       // No support for limit nor offset
       Result := Result + QueryBody;
+    end;
+    ngRedis: begin
+      // Redis 不使用 SQL LIMIT,直接返回完整 SELECT 语句（保持 "SELECT ..." 开头,
+      // 让 TRedisQuery.Execute 能识别并提取 key 名）
+      Result := QueryType + ' ' + QueryBody;
     end;
   end;
 end;
@@ -11464,6 +11561,1029 @@ begin
   Dialog.Free;
 end;
 
+
+{ TRedisConnection }
+
+constructor TRedisConnection.Create(AOwner: TComponent);
+begin
+  inherited Create(AOwner);
+  FClient := TRedisClient.Create;
+end;
+
+destructor TRedisConnection.Destroy;
+begin
+  FClient.Free;
+  inherited Destroy;
+end;
+
+procedure TRedisConnection.SetActive(Value: Boolean);
+var
+  infoReply: TRedisValue;
+  dbNum: Integer;
+begin
+  if Value = FActive then Exit;
+  if Value then begin
+    DoBeforeConnect;  // 创建 FSqlProvider + 日志
+    try
+      // 从会话参数解析逻辑库编号（用户在"数据库"字段填的，如 "1"）
+      dbNum := StrToIntDef(Trim(Parameters.AllDatabasesStr), REDIS_DEFAULT_DB);
+      FClient.Connect(Parameters.Hostname, Parameters.Port,
+        Parameters.Username, Parameters.Password, dbNum);
+      FActive := True;
+      // 获取版本信息
+      try
+        infoReply := FClient.Execute(['INFO', 'server']);
+        try
+          FServerVersionUntouched := infoReply.Str;
+        finally
+          infoReply.Free;
+        end;
+      except
+        // INFO 失败不致命
+      end;
+      DoAfterConnect;
+    except
+      on E: ERedisError do begin
+        FActive := False;
+        raise EDbError.Create(E.Message);
+      end;
+    end;
+  end else begin
+    FClient.Disconnect;
+    FActive := False;
+  end;
+end;
+
+procedure TRedisConnection.DoAfterConnect;
+begin
+  // 跳过基类的 SQL 特定逻辑（Datatypes 枚举、SQL 函数加载、时区等），
+  // 只做 UI 需要的最小后连接工作。
+  if FSqlProvider <> nil then
+    FSqlProvider.ServerVersion := ServerVersionInt;
+  // QuoteIdent 等方法访问 FSQLFunctions.Names，必须创建一个空实例避免 AV
+  FSQLFunctions := TSQLFunctionList.Create(Self, '');
+  AppSettings.SessionPath := FParameters.SessionPath;
+  AppSettings.WriteString(asServerVersionFull, FServerVersionUntouched);
+  FParameters.ServerVersion := FServerVersionUntouched;
+  Log(lcInfo, f_('Connected. Thread-ID: %d', [ThreadId]));
+  if Assigned(FOnConnected) then
+    FOnConnected(Self, FDatabase);
+  if FParameters.KeepAlive > 0 then begin
+    FKeepAliveTimer.Interval := FParameters.KeepAlive * 1000;
+    FKeepAliveTimer.OnTimer := KeepAliveTimerEvent;
+  end;
+end;
+
+function TRedisConnection.GetTableColumns(Table: TDBObject): TTableColumnList;
+var
+  Col: TTableColumn;
+  dt: TDBDatatype;
+  typeReply: TRedisValue;
+  keyType: String;
+begin
+  Result := TTableColumnList.Create(True);
+
+  // 构造一个文本类型（不依赖 FDatatypes 数组）
+  dt.Index := dbdtVarchar;
+  dt.Name := 'text';
+  dt.Category := dtcText;
+  dt.HasLength := False;
+  dt.HasBinary := False;
+  dt.HasDefault := False;
+  dt.LoadPart := False;
+
+  // 查 key 类型，按类型返回列
+  keyType := 'string';
+  try
+    typeReply := FClient.Execute(['TYPE', Table.Name]);
+    try
+      if (typeReply <> nil) and (typeReply.Kind in [rkString, rkBulk]) then
+        keyType := typeReply.Str;
+    finally
+      typeReply.Free;
+    end;
+  except
+    // 查类型失败，默认 string
+  end;
+
+  if keyType = 'hash' then begin
+    Col := TTableColumn.Create(Self);
+    Col.Name := 'field'; Col.OldName := 'field';
+    Col.DataType := dt; Col.AllowNull := False;
+    Result.Add(Col);
+    Col := TTableColumn.Create(Self);
+    Col.Name := 'value'; Col.OldName := 'value';
+    Col.DataType := dt; Col.AllowNull := True;
+    Result.Add(Col);
+  end
+  else if keyType = 'zset' then begin
+    Col := TTableColumn.Create(Self);
+    Col.Name := 'member'; Col.OldName := 'member';
+    Col.DataType := dt; Col.AllowNull := False;
+    Result.Add(Col);
+    Col := TTableColumn.Create(Self);
+    Col.Name := 'score'; Col.OldName := 'score';
+    Col.DataType := dt; Col.AllowNull := True;
+    Result.Add(Col);
+  end
+  else if keyType = 'list' then begin
+    Col := TTableColumn.Create(Self);
+    Col.Name := 'index'; Col.OldName := 'index';
+    Col.DataType := dt; Col.AllowNull := False;
+    Result.Add(Col);
+    Col := TTableColumn.Create(Self);
+    Col.Name := 'value'; Col.OldName := 'value';
+    Col.DataType := dt; Col.AllowNull := True;
+    Result.Add(Col);
+  end
+  else if keyType = 'set' then begin
+    Col := TTableColumn.Create(Self);
+    Col.Name := 'member'; Col.OldName := 'member';
+    Col.DataType := dt; Col.AllowNull := False;
+    Result.Add(Col);
+  end
+  else begin
+    // string / none / 其他
+    Col := TTableColumn.Create(Self);
+    Col.Name := 'key'; Col.OldName := 'key';
+    Col.DataType := dt; Col.AllowNull := False;
+    Result.Add(Col);
+    Col := TTableColumn.Create(Self);
+    Col.Name := 'value'; Col.OldName := 'value';
+    Col.DataType := dt; Col.AllowNull := True;
+    Result.Add(Col);
+  end;
+end;
+
+function TRedisConnection.GetTableKeys(Table: TDBObject): TTableKeyList;
+begin
+  // Redis 无关系键概念，返回空列表
+  Result := TTableKeyList.Create(True);
+end;
+
+function TRedisConnection.GetTableForeignKeys(Table: TDBObject): TForeignKeyList;
+begin
+  // Redis 无外键概念，返回空列表
+  Result := TForeignKeyList.Create(True);
+end;
+
+function TRedisConnection.GetLastResults: TDBQueryList;
+var
+  r: TRedisQuery;
+begin
+  // Redis: 只创建一个查询结果（不像 SQL 那样有多个 result set）
+  Result := TDBQueryList.Create(False);
+  r := TRedisQuery(Parameters.CreateQuery(Self));
+  r.SQL := FLastQuerySQL;
+  try
+    r.Execute(False, 0);
+  except
+    on E: EDbError do begin
+      r.Free;
+      raise;
+    end;
+  end;
+  Result.Add(r);
+end;
+
+function TRedisConnection.GetThreadId: Int64;
+begin
+  Result := 0;
+end;
+
+function TRedisConnection.GetLastErrorCode: Cardinal;
+begin
+  Result := 0;
+end;
+
+function TRedisConnection.GetLastErrorMsg: String;
+begin
+  Result := FClient.LastError;
+end;
+
+function TRedisConnection.GetAllDatabases: TStringList;
+var
+  i: Integer;
+begin
+  Result := TStringList.Create;
+  for i := 0 to 15 do
+    Result.Add('db' + IntToStr(i));
+end;
+
+procedure TRedisConnection.FetchDbObjects(db: String; var Cache: TDBObjectList);
+var
+  dbNum: Integer;
+  cursor: Int64;
+  v, keyList: TRedisValue;
+  keyName: String;
+  obj: TDBObject;
+  i: Integer;
+  done: Boolean;
+begin
+  // 从 "db0".."db15" 解析逻辑库编号
+  dbNum := StrToIntDef(StringReplace(db, 'db', '', [rfReplaceAll, rfIgnoreCase]), 0);
+  try
+    FClient.SelectDb(dbNum);
+  except
+    // 可能已在该库，忽略
+  end;
+
+  // SCAN 循环: SCAN cursor COUNT 200
+  // 返回 [cursor, [key1, key2, ...]]
+  cursor := 0;
+  done := False;
+  while not done do begin
+    v := FClient.Execute(['SCAN', IntToStr(cursor), 'COUNT', '200']);
+    try
+      if (v = nil) or (v.Kind <> rkArray) or (Length(v.Items) < 2) then
+        Break;
+      // cursor = Items[0] (bulk string 形式的数字)
+      if v.Items[0] <> nil then
+        cursor := StrToInt64Def(v.Items[0].Str, 0)
+      else
+        cursor := 0;
+      // key list = Items[1] (array of bulk strings)
+      keyList := v.Items[1];
+      if (keyList <> nil) and (keyList.Kind in [rkArray, rkSet]) then begin
+        for i := 0 to High(keyList.Items) do begin
+          if keyList.Items[i] = nil then Continue;
+          keyName := keyList.Items[i].Str;
+          obj := TDBObject.Create(Self);
+          obj.Database := db;
+          obj.Name := keyName;
+          obj.NodeType := lntTable;
+          obj.Engine := 'Redis';
+          Cache.Add(obj);
+        end;
+      end;
+      if cursor = 0 then
+        done := True;
+    finally
+      v.Free;
+    end;
+  end;
+end;
+
+procedure TRedisConnection.Query(SQL: String; DoStoreResult: Boolean=False; LogCategory: TDBLogCategory=lcSQL);
+var
+  v: TRedisValue;
+begin
+  Log(lcSQL, SQL);
+  FLastQuerySQL := SQL;
+  FLastQueryDuration := GetTickCount64;
+  try
+    v := FClient.Execute(SQL);
+  except
+    on E: ERedisError do
+      raise EDbError.Create(E.Message);
+  end;
+  try
+    if (v <> nil) and (v.Kind in [rkArray, rkSet, rkPush]) then
+      FLastResultCount := Length(v.Items)
+    else
+      FLastResultCount := 1;
+    FRowsAffected := FLastResultCount;
+  finally
+    v.Free;
+  end;
+end;
+
+function TRedisConnection.Ping(Reconnect: Boolean): Boolean;
+begin
+  if Reconnect and not FActive then
+    SetActive(True);
+  Result := FActive and FClient.Ping;
+end;
+
+function TRedisConnection.GetCreateCode(Obj: TDBObject): String;
+begin
+  Result := SUnsupported;
+end;
+
+function TRedisConnection.ConnectionInfo: TStringList;
+begin
+  Result := inherited ConnectionInfo;
+  Result.Add('Redis ' + FServerVersionUntouched);
+end;
+
+
+{ TRedisQuery }
+
+constructor TRedisQuery.Create(AOwner: TComponent);
+begin
+  inherited Create(AOwner);
+  FConn := AOwner as TRedisConnection;
+  FColNames := TStringList.Create;
+end;
+
+destructor TRedisQuery.Destroy;
+begin
+  FReply.Free;
+  FColNames.Free;
+  inherited Destroy;
+end;
+
+procedure TRedisQuery.Execute(AddResult: Boolean=False; UseRawResult: Integer=-1);
+var
+  p, i, j: Integer;
+  s, keyName, cmd: String;
+  inQuote: Boolean;
+  typeReply, valReply: TRedisValue;
+  keyType: String;
+  lenReply: TRedisValue;
+  keyLen: Int64;
+  scanCursor: Int64;
+  scanDone: Boolean;
+  scanReply, scanKeyList: TRedisValue;
+  maxRows: Integer;
+  fieldNames: TStringList;
+  evalArgs: TStringArray;
+  evalResult: TRedisValue;
+  vItem: TRedisValue;
+  strReply: TRedisValue;
+  rangeReply: TRedisValue;
+begin
+  FReply.Free;
+  FReply := nil;
+  FColNames.Clear;
+  FColumnNames.Clear;
+
+  // 判断 SQL 来源：
+  // - "SELECT ... FROM <db>.<key>"  → 数据网格请求，提取 key 名，按类型取值
+  // - 其他 → 直接按空格分词执行为 Redis 命令
+  s := Trim(FSQL);
+  if Pos('SELECT', UpperCase(s)) = 1 then begin
+    // 数据网格查询：从 FROM 子句提取最后一个引号内的标识符作为 key 名
+    keyName := '';
+    inQuote := False;
+    p := Pos('FROM', UpperCase(s));
+    if p > 0 then begin
+      for i := p to Length(s) do begin
+        if s[i] = FConn.QuoteChar then begin
+          if inQuote then begin
+            keyName := Copy(s, p + 1, i - p - 1);
+          end else begin
+            p := i;
+          end;
+          inQuote := not inQuote;
+        end;
+      end;
+    end;
+    keyName := StringReplace(keyName, FConn.QuoteChar, '', [rfReplaceAll]);
+
+    // 先查 TYPE，再按类型取值
+    try
+      typeReply := FConn.Client.Execute(['TYPE', keyName]);
+      try
+        if (typeReply <> nil) and (typeReply.Kind in [rkString, rkBulk]) then
+          keyType := typeReply.Str
+        else
+          keyType := 'none';
+      finally
+        typeReply.Free;
+      end;
+    except
+      on E: ERedisError do
+        raise EDbError.Create(E.Message);
+    end;
+
+    maxRows := 1000;  // 数据网格最多加载的行数
+    FKey := keyName;
+    FKeyType := keyType;
+
+    if keyType = 'string' then begin
+      FColNames.Add('key'); FColumnNames.Add('key');
+      FColNames.Add('value'); FColumnNames.Add('value');
+      // 用 GETRANGE 只取前 256 字节，避免加载完整大 string
+      try
+        rangeReply := FConn.Client.Execute(['GETRANGE', keyName, '0', IntToStr(GRIDMAXDATA - 1)]);
+        try
+          FReply := TRedisValue.Create(rkArray);
+          SetLength(FReply.Items, 2);
+          FReply.Items[0] := TRedisValue.Create(rkBulk);
+          FReply.Items[0].Str := keyName;
+          if (rangeReply <> nil) and (rangeReply.Kind in [rkBulk, rkString]) then
+            FReply.Items[1] := TRedisValue.Create(rkBulk)
+          else
+            FReply.Items[1] := TRedisValue.Create(rkNull);
+          if (rangeReply <> nil) and (rangeReply.Kind in [rkBulk, rkString]) then
+            FReply.Items[1].Str := rangeReply.Str;
+        finally
+          rangeReply.Free;
+        end;
+      except
+        on E: ERedisError do
+          raise EDbError.Create(E.Message);
+      end;
+    end
+    else if keyType = 'hash' then begin
+      FColNames.Add('field'); FColumnNames.Add('field');
+      FColNames.Add('value'); FColumnNames.Add('value');
+
+      // Step 1: HSCAN ... NOVALUES 获取 field 名（不加载 value）
+      fieldNames := TStringList.Create;
+      try
+        scanCursor := 0;
+        scanDone := False;
+        try
+          while not scanDone do begin
+            scanReply := FConn.Client.Execute(['HSCAN', keyName, IntToStr(scanCursor), 'NOVALUES']);
+            try
+              if (scanReply = nil) or (scanReply.Kind <> rkArray) or (Length(scanReply.Items) < 2) then
+                Break;
+              if scanReply.Items[0] <> nil then
+                scanCursor := StrToInt64Def(scanReply.Items[0].Str, 0)
+              else
+                scanCursor := 0;
+              scanKeyList := scanReply.Items[1];
+              if (scanKeyList <> nil) and (scanKeyList.Kind in [rkArray, rkSet]) then begin
+                for j := 0 to High(scanKeyList.Items) do begin
+                  if scanKeyList.Items[j] <> nil then
+                    fieldNames.Add(scanKeyList.Items[j].Str);
+                end;
+              end;
+              if scanCursor = 0 then
+                scanDone := True;
+              if fieldNames.Count >= maxRows then
+                scanDone := True;
+            finally
+              scanReply.Free;
+            end;
+          end;
+        except
+          // HSCAN NOVALUES 不支持（Redis < 7.4），回退到 HKEYS
+          on E: ERedisError do begin
+            fieldNames.Clear;
+            scanReply := FConn.Client.Execute(['HKEYS', keyName]);
+            try
+              if (scanReply <> nil) and (scanReply.Kind in [rkArray, rkSet]) then begin
+                for j := 0 to High(scanReply.Items) do begin
+                  if scanReply.Items[j] <> nil then
+                    fieldNames.Add(scanReply.Items[j].Str);
+                end;
+              end;
+            finally
+              scanReply.Free;
+            end;
+          end;
+        end;
+
+        // Step 2: EVAL Lua 脚本批量获取每个 field 的前 256 字节（服务端截断）
+        FReply := TRedisValue.Create(rkArray);
+        if fieldNames.Count > 0 then begin
+          SetLength(evalArgs, 4 + fieldNames.Count);
+          evalArgs[0] := 'EVAL';
+          evalArgs[1] := 'local r={} for i=1,#ARGV do local v=redis.call(''HGET'',KEYS[1],ARGV[i]) if v then if #v>256 then r[i]=string.sub(v,1,256) else r[i]=v end else r[i]=false end end return r';
+          evalArgs[2] := '1';
+          evalArgs[3] := keyName;
+          for i := 0 to fieldNames.Count - 1 do
+            evalArgs[4 + i] := fieldNames[i];
+          try
+            evalResult := FConn.Client.Execute(evalArgs);
+            try
+              if (evalResult <> nil) and (evalResult.Kind in [rkArray, rkSet]) then begin
+                for i := 0 to fieldNames.Count - 1 do begin
+                  // field
+                  vItem := TRedisValue.Create(rkBulk);
+                  vItem.Str := fieldNames[i];
+                  SetLength(FReply.Items, Length(FReply.Items) + 1);
+                  FReply.Items[High(FReply.Items)] := vItem;
+                  // value (truncated)
+                  vItem := TRedisValue.Create(rkBulk);
+                  if (i < Length(evalResult.Items)) and (evalResult.Items[i] <> nil)
+                    and (evalResult.Items[i].Kind <> rkNull) then
+                    vItem.Str := evalResult.Items[i].Str;
+                  SetLength(FReply.Items, Length(FReply.Items) + 1);
+                  FReply.Items[High(FReply.Items)] := vItem;
+                end;
+              end;
+            finally
+              evalResult.Free;
+            end;
+          except
+            on E: ERedisError do begin
+              // EVAL 失败（可能被禁用），回退到逐个 HGET + 客户端截断
+              for i := 0 to fieldNames.Count - 1 do begin
+                vItem := TRedisValue.Create(rkBulk);
+                vItem.Str := fieldNames[i];
+                SetLength(FReply.Items, Length(FReply.Items) + 1);
+                FReply.Items[High(FReply.Items)] := vItem;
+                try
+                  strReply := FConn.Client.Execute(['HGET', keyName, fieldNames[i]]);
+                  vItem := TRedisValue.Create(rkBulk);
+                  if (strReply <> nil) and (strReply.Kind in [rkBulk, rkString]) then begin
+                    if Length(strReply.Str) > GRIDMAXDATA then
+                      vItem.Str := Copy(strReply.Str, 1, GRIDMAXDATA)
+                    else
+                      vItem.Str := strReply.Str;
+                  end;
+                  strReply.Free;
+                except
+                  vItem := TRedisValue.Create(rkNull);
+                end;
+                SetLength(FReply.Items, Length(FReply.Items) + 1);
+                FReply.Items[High(FReply.Items)] := vItem;
+              end;
+            end;
+          end;
+        end;
+      finally
+        fieldNames.Free;
+      end;
+    end
+    else if keyType = 'list' then begin
+      FColNames.Add('index'); FColumnNames.Add('index');
+      FColNames.Add('value'); FColumnNames.Add('value');
+      keyLen := 0;
+      try
+        lenReply := FConn.Client.Execute(['LLEN', keyName]);
+        try
+          if (lenReply <> nil) and (lenReply.Kind = rkInteger) then
+            keyLen := lenReply.Int;
+        finally
+          lenReply.Free;
+        end;
+      except
+      end;
+      if keyLen > maxRows then
+        cmd := 'LRANGE ' + keyName + ' 0 ' + IntToStr(maxRows - 1)
+      else
+        cmd := 'LRANGE ' + keyName + ' 0 -1';
+    end
+    else if keyType = 'set' then begin
+      FColNames.Add('member'); FColumnNames.Add('member');
+      keyLen := 0;
+      try
+        lenReply := FConn.Client.Execute(['SCARD', keyName]);
+        try
+          if (lenReply <> nil) and (lenReply.Kind = rkInteger) then
+            keyLen := lenReply.Int;
+        finally
+          lenReply.Free;
+        end;
+      except
+      end;
+      if keyLen > maxRows then
+        cmd := 'SSCAN ' + keyName + ' 0 COUNT ' + IntToStr(maxRows)
+      else
+        cmd := 'SMEMBERS ' + keyName;
+    end
+    else if keyType = 'zset' then begin
+      FColNames.Add('member'); FColumnNames.Add('member');
+      FColNames.Add('score'); FColumnNames.Add('score');
+      keyLen := 0;
+      try
+        lenReply := FConn.Client.Execute(['ZCARD', keyName]);
+        try
+          if (lenReply <> nil) and (lenReply.Kind = rkInteger) then
+            keyLen := lenReply.Int;
+        finally
+          lenReply.Free;
+        end;
+      except
+      end;
+      if keyLen > maxRows then
+        cmd := 'ZRANGE ' + keyName + ' 0 ' + IntToStr(maxRows - 1) + ' WITHSCORES'
+      else
+        cmd := 'ZRANGE ' + keyName + ' 0 -1 WITHSCORES';
+    end
+    else begin
+      // stream / none / 其他
+      FColNames.Add('value'); FColumnNames.Add('value');
+      cmd := 'GET ' + keyName;
+    end;
+  end else begin
+    // 直接 Redis 命令
+    FColNames.Add('value'); FColumnNames.Add('value');
+    cmd := s;
+  end;
+
+  // 如果 FReply 还没有赋值（string/hash 之外的路徑），执行命令获取回复
+  if FReply = nil then begin
+    try
+      FReply := FConn.Client.Execute(cmd);
+    except
+      on E: ERedisError do
+        raise EDbError.Create(E.Message);
+    end;
+  end;
+
+  if (FReply <> nil) and (FReply.Kind in [rkArray, rkSet, rkPush]) then begin
+    // hash: 返回 2*N 个元素 = N 行 field/value 对
+    if (FColNames.Count >= 2) and (FColNames[0] = 'field') and (FColNames[1] = 'value') then
+      FRecordCount := Length(FReply.Items) div 2
+    else
+      FRecordCount := Length(FReply.Items);
+  end else
+    FRecordCount := 1;
+  FRecNo := 0;
+  FEof := FRecordCount = 0;
+end;
+
+function TRedisQuery.Col(Column: Integer; IgnoreErrors: Boolean=False): String;
+var
+  pairIdx: Integer;
+  isHash: Boolean;
+begin
+  Result := '';
+  if FReply = nil then Exit;
+
+  // 标量回复 (string/integer/etc): 单行
+  if not (FReply.Kind in [rkArray, rkSet, rkPush]) then begin
+    if FRecNo = 0 then begin
+      if FReply.Kind = rkInteger then
+        Result := IntToStr(FReply.Int)
+      else if FReply.Kind = rkBoolean then
+        Result := IfThen(FReply.Int = 1, 'true', 'false')
+      else
+        Result := FReply.Str;
+    end;
+    Exit;
+  end;
+
+  // 数组类回复
+  if (FRecNo < 0) or (FRecNo >= Length(FReply.Items)) then Exit;
+
+  // 判断是否为 hash 结构（偶数长度且列名含 field/value）
+  isHash := (FColNames.Count >= 2) and (FColNames[0] = 'field') and (FColNames[1] = 'value')
+    and (Length(FReply.Items) mod 2 = 0);
+
+  if isHash then begin
+    pairIdx := FRecNo * 2;
+    if Column = 0 then begin
+      if pairIdx < Length(FReply.Items) then
+        Result := FReply.Items[pairIdx].Str;
+    end else begin
+      if pairIdx + 1 < Length(FReply.Items) then
+        Result := FReply.Items[pairIdx + 1].Str;
+    end;
+    Exit;
+  end;
+
+  // 其他数组 (list/set/zset): 每行一个元素，客户端截断
+  if FReply.Items[FRecNo] = nil then Exit;
+  if FReply.Items[FRecNo].Kind = rkInteger then
+    Result := IntToStr(FReply.Items[FRecNo].Int)
+  else
+    Result := FReply.Items[FRecNo].Str;
+  if Length(Result) > GRIDMAXDATA then
+    Result := Copy(Result, 1, GRIDMAXDATA);
+end;
+
+function TRedisQuery.GetFullValue(RecNo: Int64; Column: Integer): String;
+var
+  pairIdx: Integer;
+  fieldName: String;
+  v: TRedisValue;
+  strLenReply: TRedisValue;
+  fullLen: Int64;
+  evalArgs: TStringArray;
+  evalResult: TRedisValue;
+begin
+  // 按需从 Redis 获取完整值（懒加载）
+  // 对于大值，使用 Lua cjson 在服务端截断超长字符串，避免传输 6MB+ base64 数据
+  Result := '';
+  if FKey = '' then Exit;
+  try
+    if FKeyType = 'string' then begin
+      // 先检查大小
+      fullLen := 0;
+      try
+        strLenReply := FConn.Client.Execute(['STRLEN', FKey]);
+        try
+          if (strLenReply <> nil) and (strLenReply.Kind = rkInteger) then
+            fullLen := strLenReply.Int;
+        finally
+          strLenReply.Free;
+        end;
+      except
+      end;
+      if fullLen > 100*1024 then begin
+        // 大值: 用 Lua cjson 截断超长字符串后返回
+        SetLength(evalArgs, 4);
+        evalArgs[0] := 'EVAL';
+        evalArgs[1] := 'local v=redis.call(''GET'',KEYS[1]) local d=cjson.decode(v) local function t(o) if type(o)==''string'' then if #o>200 then return string.sub(o,1,100)..''...(''..#o..'' chars)'' end return o elseif type(o)==''table'' then local r={} for k,val in pairs(o) do r[k]=t(val) end return r end return o end return cjson.encode(t(d))';
+        evalArgs[2] := '1';
+        evalArgs[3] := FKey;
+        evalResult := FConn.Client.Execute(evalArgs);
+        try
+          if (evalResult <> nil) and (evalResult.Kind in [rkBulk, rkString]) then
+            Result := evalResult.Str;
+        finally
+          evalResult.Free;
+        end;
+      end else begin
+        v := FConn.Client.Execute(['GET', FKey]);
+        try
+          if (v <> nil) and (v.Kind in [rkBulk, rkString]) then
+            Result := v.Str;
+        finally
+          v.Free;
+        end;
+      end;
+    end
+    else if FKeyType = 'hash' then begin
+      if FReply = nil then Exit;
+      pairIdx := RecNo * 2;
+      if (pairIdx < 0) or (pairIdx >= Length(FReply.Items)) then Exit;
+      if FReply.Items[pairIdx] = nil then Exit;
+      fieldName := FReply.Items[pairIdx].Str;
+      // 先检查大小
+      fullLen := 0;
+      try
+        strLenReply := FConn.Client.Execute(['HSTRLEN', FKey, fieldName]);
+        try
+          if (strLenReply <> nil) and (strLenReply.Kind = rkInteger) then
+            fullLen := strLenReply.Int;
+        finally
+          strLenReply.Free;
+        end;
+      except
+      end;
+      if fullLen > 100*1024 then begin
+        // 大值: 用 Lua cjson 截断超长字符串后返回
+        SetLength(evalArgs, 5);
+        evalArgs[0] := 'EVAL';
+        evalArgs[1] := 'local v=redis.call(''HGET'',KEYS[1],ARGV[1]) local d=cjson.decode(v) local function t(o) if type(o)==''string'' then if #o>200 then return string.sub(o,1,100)..''...(''..#o..'' chars)'' end return o elseif type(o)==''table'' then local r={} for k,val in pairs(o) do r[k]=t(val) end return r end return o end return cjson.encode(t(d))';
+        evalArgs[2] := '1';
+        evalArgs[3] := FKey;
+        evalArgs[4] := fieldName;
+        evalResult := FConn.Client.Execute(evalArgs);
+        try
+          if (evalResult <> nil) and (evalResult.Kind in [rkBulk, rkString]) then
+            Result := evalResult.Str;
+        finally
+          evalResult.Free;
+        end;
+      end else begin
+        v := FConn.Client.Execute(['HGET', FKey, fieldName]);
+        try
+          if (v <> nil) and (v.Kind in [rkBulk, rkString]) then
+            Result := v.Str;
+        finally
+          v.Free;
+        end;
+      end;
+    end
+    else if FKeyType = 'list' then begin
+      v := FConn.Client.Execute(['LINDEX', FKey, IntToStr(RecNo)]);
+      try
+        if (v <> nil) and (v.Kind in [rkBulk, rkString]) then
+          Result := v.Str;
+      finally
+        v.Free;
+      end;
+    end
+    else if (FKeyType = 'set') or (FKeyType = 'zset') then begin
+      Result := Col(Column);
+      Exit;
+    end;
+  except
+    on E: ERedisError do
+      raise EDbError.Create(E.Message);
+  end;
+end;
+
+function TRedisQuery.GetValueLength(RecNo: Int64): Int64;
+var
+  pairIdx: Integer;
+  fieldName: String;
+  v: TRedisValue;
+begin
+  // 获取某个值的字节长度（不传输完整值），用于加载前提示
+  Result := 0;
+  if FKey = '' then Exit;
+  try
+    if FKeyType = 'string' then begin
+      v := FConn.Client.Execute(['STRLEN', FKey]);
+      try
+        if (v <> nil) and (v.Kind = rkInteger) then
+          Result := v.Int;
+      finally
+        v.Free;
+      end;
+    end
+    else if FKeyType = 'hash' then begin
+      if FReply = nil then Exit;
+      pairIdx := RecNo * 2;
+      if (pairIdx < 0) or (pairIdx >= Length(FReply.Items)) then Exit;
+      if FReply.Items[pairIdx] = nil then Exit;
+      fieldName := FReply.Items[pairIdx].Str;
+      v := FConn.Client.Execute(['HSTRLEN', FKey, fieldName]);
+      try
+        if (v <> nil) and (v.Kind = rkInteger) then
+          Result := v.Int;
+      finally
+        v.Free;
+      end;
+    end
+    else if FKeyType = 'list' then begin
+      v := FConn.Client.Execute(['LLEN', FKey]);
+      try
+        if (v <> nil) and (v.Kind = rkInteger) then
+          Result := v.Int;
+      finally
+        v.Free;
+      end;
+    end;
+  except
+  end;
+end;
+
+function TRedisQuery.GetImageCount(RecNo: Int64): Integer;
+var
+  pairIdx: Integer;
+  fieldName: String;
+  v: TRedisValue;
+  evalArgs: TStringArray;
+begin
+  Result := 0;
+  if FKey = '' then Exit;
+  try
+    if FKeyType = 'hash' then begin
+      if FReply = nil then Exit;
+      pairIdx := RecNo * 2;
+      if (pairIdx < 0) or (pairIdx >= Length(FReply.Items)) then Exit;
+      if FReply.Items[pairIdx] = nil then Exit;
+      fieldName := FReply.Items[pairIdx].Str;
+      SetLength(evalArgs, 5);
+      evalArgs[0] := 'EVAL';
+      evalArgs[1] := 'local v=redis.call(''HGET'',KEYS[1],ARGV[1]) local d=cjson.decode(v) local n=0 local function f(o) if type(o)==''table'' then if o.type==''base64'' and o.data then n=n+1 end for k,v in pairs(o) do f(v) end end end f(d) return n';
+      evalArgs[2] := '1';
+      evalArgs[3] := FKey;
+      evalArgs[4] := fieldName;
+      v := FConn.Client.Execute(evalArgs);
+      try
+        if (v <> nil) and (v.Kind = rkInteger) then
+          Result := v.Int;
+      finally
+        v.Free;
+      end;
+    end
+    else if FKeyType = 'string' then begin
+      SetLength(evalArgs, 4);
+      evalArgs[0] := 'EVAL';
+      evalArgs[1] := 'local v=redis.call(''GET'',KEYS[1]) local d=cjson.decode(v) local n=0 local function f(o) if type(o)==''table'' then if o.type==''base64'' and o.data then n=n+1 end for k,v in pairs(o) do f(v) end end end f(d) return n';
+      evalArgs[2] := '1';
+      evalArgs[3] := FKey;
+      v := FConn.Client.Execute(evalArgs);
+      try
+        if (v <> nil) and (v.Kind = rkInteger) then
+          Result := v.Int;
+      finally
+        v.Free;
+      end;
+    end;
+  except
+  end;
+end;
+
+function TRedisQuery.GetImageData(RecNo: Int64; ImageIndex: Integer; out MediaType: String): String;
+var
+  pairIdx: Integer;
+  fieldName: String;
+  v: TRedisValue;
+  evalArgs: TStringArray;
+begin
+  Result := '';
+  MediaType := '';
+  if FKey = '' then Exit;
+  try
+    if FKeyType = 'hash' then begin
+      if FReply = nil then Exit;
+      pairIdx := RecNo * 2;
+      if (pairIdx < 0) or (pairIdx >= Length(FReply.Items)) then Exit;
+      if FReply.Items[pairIdx] = nil then Exit;
+      fieldName := FReply.Items[pairIdx].Str;
+      SetLength(evalArgs, 6);
+      evalArgs[0] := 'EVAL';
+      evalArgs[1] := 'local v=redis.call(''HGET'',KEYS[1],ARGV[1]) local d=cjson.decode(v) local r={} local function f(o) if type(o)==''table'' then if o.type==''base64'' and o.data then table.insert(r,{o.media_type or ''image/jpeg'',o.data}) end for k,v in pairs(o) do f(v) end end end f(d) local i=tonumber(ARGV[2]) return {r[i][1],r[i][2]}';
+      evalArgs[2] := '1';
+      evalArgs[3] := FKey;
+      evalArgs[4] := fieldName;
+      evalArgs[5] := IntToStr(ImageIndex);
+      v := FConn.Client.Execute(evalArgs);
+      try
+        if (v <> nil) and (v.Kind = rkArray) and (Length(v.Items) >= 2) then begin
+          if v.Items[0] <> nil then MediaType := v.Items[0].Str;
+          if v.Items[1] <> nil then Result := v.Items[1].Str;
+        end;
+      finally
+        v.Free;
+      end;
+    end
+    else if FKeyType = 'string' then begin
+      SetLength(evalArgs, 5);
+      evalArgs[0] := 'EVAL';
+      evalArgs[1] := 'local v=redis.call(''GET'',KEYS[1]) local d=cjson.decode(v) local r={} local function f(o) if type(o)==''table'' then if o.type==''base64'' and o.data then table.insert(r,{o.media_type or ''image/jpeg'',o.data}) end for k,v in pairs(o) do f(v) end end end f(d) local i=tonumber(ARGV[2]) return {r[i][1],r[i][2]}';
+      evalArgs[2] := '1';
+      evalArgs[3] := FKey;
+      evalArgs[4] := IntToStr(ImageIndex);
+      v := FConn.Client.Execute(evalArgs);
+      try
+        if (v <> nil) and (v.Kind = rkArray) and (Length(v.Items) >= 2) then begin
+          if v.Items[0] <> nil then MediaType := v.Items[0].Str;
+          if v.Items[1] <> nil then Result := v.Items[1].Str;
+        end;
+      finally
+        v.Free;
+      end;
+    end;
+  except
+  end;
+end;
+
+function TRedisQuery.GetRawValue(RecNo: Int64): String;
+var
+  pairIdx: Integer;
+  fieldName: String;
+  v: TRedisValue;
+begin
+  // 获取原始完整值（不截断），供 Raw 按钮使用
+  Result := '';
+  if FKey = '' then Exit;
+  try
+    if FKeyType = 'string' then begin
+      v := FConn.Client.Execute(['GET', FKey]);
+      try
+        if (v <> nil) and (v.Kind in [rkBulk, rkString]) then
+          Result := v.Str;
+      finally
+        v.Free;
+      end;
+    end
+    else if FKeyType = 'hash' then begin
+      if FReply = nil then Exit;
+      pairIdx := RecNo * 2;
+      if (pairIdx < 0) or (pairIdx >= Length(FReply.Items)) then Exit;
+      if FReply.Items[pairIdx] = nil then Exit;
+      fieldName := FReply.Items[pairIdx].Str;
+      v := FConn.Client.Execute(['HGET', FKey, fieldName]);
+      try
+        if (v <> nil) and (v.Kind in [rkBulk, rkString]) then
+          Result := v.Str;
+      finally
+        v.Free;
+      end;
+    end
+    else if FKeyType = 'list' then begin
+      v := FConn.Client.Execute(['LINDEX', FKey, IntToStr(RecNo)]);
+      try
+        if (v <> nil) and (v.Kind in [rkBulk, rkString]) then
+          Result := v.Str;
+      finally
+        v.Free;
+      end;
+    end
+    else if (FKeyType = 'set') or (FKeyType = 'zset') then begin
+      Result := Col(0);
+    end;
+  except
+    on E: ERedisError do
+      raise EDbError.Create(E.Message);
+  end;
+end;
+
+function TRedisQuery.ColIsPrimaryKeyPart(Column: Integer): Boolean;
+begin
+  Result := False;
+end;
+
+function TRedisQuery.ColIsUniqueKeyPart(Column: Integer): Boolean;
+begin
+  Result := False;
+end;
+
+function TRedisQuery.ColIsKeyPart(Column: Integer): Boolean;
+begin
+  Result := False;
+end;
+
+function TRedisQuery.IsNull(Column: Integer): Boolean;
+begin
+  Result := (FReply = nil) or (FReply.Kind = rkNull);
+end;
+
+function TRedisQuery.HasResult: Boolean;
+begin
+  Result := (FReply <> nil) and (FReply.Kind <> rkNull);
+end;
+
+function TRedisQuery.DatabaseName: String;
+begin
+  Result := FConn.Database;
+end;
+
+function TRedisQuery.TableName(Column: Integer): String;
+begin
+  Result := '';
+end;
+
+procedure TRedisQuery.SetRecNo(Value: Int64);
+begin
+  FRecNo := Value;
+  FEof := FRecNo >= FRecordCount;
+end;
 
 
 end.

@@ -113,4 +113,7 @@ const
   SLogPrefixWarning = 'Warning';
   SLogPrefixNote = 'Note';
   SLogPrefixInfo = 'Info';
+  // Redis defaults
+  REDIS_DEFAULT_PORT = 6379;
+  REDIS_DEFAULT_DB = 0;
 

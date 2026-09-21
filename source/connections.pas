@@ -1604,9 +1604,9 @@ begin
         end
       end;
       editHost.Button.Enabled := Params.IsAnySQLite;
-      chkLoginPrompt.Enabled := Params.NetTypeGroup in [ngMySQL, ngMSSQL, ngPgSQL];
+      chkLoginPrompt.Enabled := Params.NetTypeGroup in [ngMySQL, ngMSSQL, ngPgSQL, ngRedis];
       chkWindowsAuth.Enabled := Params.IsAnyMSSQL or Params.IsAnyMySQL;
-      lblUsername.Enabled := (Params.NetTypeGroup in [ngMySQL, ngMSSQL, ngPgSQL, ngInterbase])
+      lblUsername.Enabled := (Params.NetTypeGroup in [ngMySQL, ngMSSQL, ngPgSQL, ngInterbase, ngRedis])
         and ((not chkLoginPrompt.Checked) or (not chkLoginPrompt.Enabled))
         and ((not chkWindowsAuth.Checked) or (not chkWindowsAuth.Enabled));
       lblUsername.Enabled := lblUsername.Enabled or (Params.NetType = ntSQLiteEncrypted);
@@ -1614,13 +1614,13 @@ begin
       editUsername.Button.Enabled := Params.NetType = ntSQLiteEncrypted;
       lblPassword.Enabled := lblUsername.Enabled;
       editPassword.Enabled := lblUsername.Enabled;
-      lblPort.Enabled := Params.NetType in [ntMySQL_TCPIP, ntMySQL_SSHtunnel, ntMySQL_ProxySQLAdmin, ntMySQL_RDS, ntMSSQL_TCPIP, ntPgSQL_TCPIP, ntPgSQL_SSHtunnel, ntInterbase_TCPIP, ntFirebird_TCPIP];
+      lblPort.Enabled := Params.NetType in [ntMySQL_TCPIP, ntMySQL_SSHtunnel, ntMySQL_ProxySQLAdmin, ntMySQL_RDS, ntMSSQL_TCPIP, ntPgSQL_TCPIP, ntPgSQL_SSHtunnel, ntInterbase_TCPIP, ntFirebird_TCPIP, ntRedis_TCPIP, ntRedis_SSHtunnel, ntRedis_TLS];
       spinPort.Enabled := lblPort.Enabled;
       chkCompressed.Enabled := Params.IsAnyMySQL;
-      lblDatabase.Enabled := Params.NetTypeGroup in [ngMySQL, ngMSSQL, ngPgSQL, ngInterbase];
+      lblDatabase.Enabled := Params.NetTypeGroup in [ngMySQL, ngMSSQL, ngPgSQL, ngInterbase, ngRedis];
       lblDatabase.Enabled := lblDatabase.Enabled or (Params.NetType = ntSQLiteEncrypted);
       editDatabases.Enabled := lblDatabase.Enabled;
-      editDatabases.Button.Enabled := Params.NetTypeGroup in [ngMySQL, ngMSSQL, ngPgSQL, ngInterbase];
+      editDatabases.Button.Enabled := Params.NetTypeGroup in [ngMySQL, ngMSSQL, ngPgSQL, ngInterbase, ngRedis];
       // SSH tunnel tab:
       chkSSHActive.Enabled := Params.SshSupport;
       lblSSHExe.Enabled := Params.SSHActive;
@@ -1650,7 +1650,7 @@ begin
       chkForceUnicode.Enabled := Params.NetTypeGroup = ngMySQL;
       editLogFilePath.Enabled := Params.LogFileDdl or Params.LogFileDml;
       // SSL tab:
-      chkWantSSL.Enabled := Params.NetType in [ntMySQL_TCPIP, ntMySQL_SSHtunnel, ntMySQL_ProxySQLAdmin, ntMySQL_RDS, ntPgSQL_TCPIP, ntPgSQL_SSHtunnel];
+      chkWantSSL.Enabled := Params.NetType in [ntMySQL_TCPIP, ntMySQL_SSHtunnel, ntMySQL_ProxySQLAdmin, ntMySQL_RDS, ntPgSQL_TCPIP, ntPgSQL_SSHtunnel, ntRedis_TLS];
       lblSSLPrivateKey.Enabled := Params.WantSSL;
       editSSLPrivateKey.Enabled := Params.WantSSL;
       lblSSLCACertificate.Enabled := Params.WantSSL;

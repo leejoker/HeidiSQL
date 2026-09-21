@@ -51,6 +51,14 @@ desktop.ini
 #**/units/
 #**/backup/
 
+# Redis protocol test program (standalone console)
+/tests/test_redis_proto
+/tests/_probe
+/tests/_smoke
+/tests/*.ppu
+/tests/*.o
+/tests/*.compiled
+
 # Others, IntelliJ IDEA, etc.
 .idea
 .junie

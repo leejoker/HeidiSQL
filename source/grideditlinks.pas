@@ -1262,11 +1262,27 @@ end;
 procedure TInplaceEditorLink.ButtonClick(Sender: TObject);
 var
   Editor: TfrmTextEditor;
+  RedisQ: TRedisQuery;
+  RowNum: PInt64;
+  ResultCol: Integer;
 begin
   if not FButton.Visible then Exit; // Button was invisible, but hotkey was pressed
   Editor := TfrmTextEditor.Create(FTree);
   Editor.SetFont(MainForm.SynMemoQuery.Font);
+
+  // Redis 懒加载：先用截断值快速打开编辑器，定时器再异步获取完整值并格式化
   Editor.SetText(FEdit.Text);
+  if Assigned(MainForm.DataGridResult) and (MainForm.DataGridResult is TRedisQuery) then begin
+    RedisQ := TRedisQuery(MainForm.DataGridResult);
+    if FTree = MainForm.DataGrid then begin
+      RowNum := FTree.GetNodeData(FNode);
+      ResultCol := FColumn - 1;  // 跳过行号列
+      if ResultCol >= 0 then begin
+        Editor.SetUpLazyLoad(RedisQ, RowNum^, ResultCol);
+      end;
+    end;
+  end;
+
   if FEdit.HandleAllocated then begin
     Editor.MemoText.SelStart := FEdit.SelStart;
     Editor.MemoText.SelEnd := FEdit.SelStart + FEdit.SelLength;

@@ -215,6 +215,14 @@ if TargetOS=&apos;win64&apos; then
         <IsPartOfProject Value="True"/>
       </Unit>
       <Unit>
+        <Filename Value="source\dbstructures.redis.pas"/>
+        <IsPartOfProject Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="source\redisclient.pas"/>
+        <IsPartOfProject Value="True"/>
+      </Unit>
+      <Unit>
         <Filename Value="source\loginform.pas"/>
         <IsPartOfProject Value="True"/>
         <ComponentName Value="frmLogin"/>

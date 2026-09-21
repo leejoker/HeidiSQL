@@ -4783,6 +4783,8 @@ begin
         Query := 'EXEC ';
       ngPgSQL:
         Query := 'SELECT ';
+      ngRedis:
+        raise Exception.Create(SUnsupported);
       else
         raise Exception.CreateFmt(_(MsgUnhandledNetType), [Integer(Obj.Connection.Parameters.NetType)]);
     end;
@@ -4808,6 +4810,8 @@ begin
           ParamValues := '(' + Implode(', ', Params) + ')';
         ngMSSQL:
           ParamValues := ' ' + Implode(' ', Params);
+        ngRedis:
+          raise Exception.Create(SUnsupported);
         else
           raise Exception.CreateFmt(_(MsgUnhandledNetType), [Integer(Obj.Connection.Parameters.NetType)]);
       end;
@@ -6240,6 +6244,7 @@ begin
       case DBObj.Connection.Parameters.NetTypeGroup of
         ngMSSQL: Offset := 0; // Does not support offset in all server versions
         ngMySQL, ngPgSQL, ngSQLite: Offset := DataGridResult.RecordCount;
+        ngRedis: Offset := 0; // Redis 不支持 SQL OFFSET
         else raise Exception.CreateFmt(_(MsgUnhandledNetType), [Integer(DBObj.Connection.Parameters.NetType)]);
       end;
     end;
@@ -6262,8 +6267,9 @@ begin
       DataGridResult.ColumnOrgNames := WantedColumnOrgnames;
       try
         DataGridResult.PrepareEditing;
-      except on E:EDbError do // Do not annoy user with popup when accessing tables in information_schema
+      except on E:EDbError do begin
         LogSQL(_('Data in this table will be read-only.'));
+      end;
       end;
 
       editFilterVT.Clear;
@@ -9801,6 +9807,8 @@ var
   DBObj: PDBObject;
   Columns: TTableColumnList;
   DBObjects: TDBObjectList;
+  ColUniquePrefixes: TStringList;
+  ColObjIdx, ColColonPos, ColMatchCount: Integer;
 begin
   DBObj := Sender.GetNodeData(Node);
   case DBObj.NodeType of
@@ -9818,7 +9826,29 @@ begin
       end;
     // DB node expanding
     lntDb: begin
-        if actGroupObjects.Checked then begin
+        if DBObj.Connection.Parameters.NetTypeGroup = ngRedis then begin
+          // Redis: 子节点 = 唯一前缀数
+          ShowStatusMsg(_('Scanning keys ...'));
+          Screen.Cursor := crHourglass;
+          try
+            DBObjects := DBObj.Connection.GetDBObjects(DBObj.Database);
+            ColUniquePrefixes := TStringList.Create;
+            ColUniquePrefixes.Sorted := True;
+            ColUniquePrefixes.Duplicates := dupIgnore;
+            for ColObjIdx := 0 to DBObjects.Count - 1 do begin
+              ColColonPos := Pos(':', DBObjects[ColObjIdx].Name);
+              if ColColonPos > 0 then
+                ColUniquePrefixes.Add(Copy(DBObjects[ColObjIdx].Name, 1, ColColonPos - 1))
+              else
+                ColUniquePrefixes.Add('');
+            end;
+            ChildCount := ColUniquePrefixes.Count;
+            ColUniquePrefixes.Free;
+          finally
+            ShowStatusMsg;
+            Screen.Cursor := crDefault;
+          end;
+        end else if actGroupObjects.Checked then begin
           // Just tables, views, etc.
           ChildCount := 6;
         end else begin
@@ -9833,13 +9863,35 @@ begin
         end;
       end;
     lntGroup: begin
-        ChildCount := 0;
-        DBObjects := DBObj.Connection.GetDBObjects(DBObj.Database, False, DBObj.GroupType);
-        ChildCount := DBObjects.Count;
+        if DBObj.Connection.Parameters.NetTypeGroup = ngRedis then begin
+          // Redis: 统计匹配前缀的 key 数
+          DBObjects := DBObj.Connection.GetDBObjects(DBObj.Database);
+          ColMatchCount := 0;
+          for ColObjIdx := 0 to DBObjects.Count - 1 do begin
+            if DBObjects[ColObjIdx].NodeType <> lntTable then Continue;
+            ColColonPos := Pos(':', DBObjects[ColObjIdx].Name);
+            if DBObj.Schema = '' then begin
+              if ColColonPos = 0 then
+                Inc(ColMatchCount);
+            end else begin
+              if (ColColonPos > 0) and (Copy(DBObjects[ColObjIdx].Name, 1, Length(DBObj.Schema)) = DBObj.Schema) then
+                Inc(ColMatchCount);
+            end;
+          end;
+          ChildCount := ColMatchCount;
+        end else begin
+          ChildCount := 0;
+          DBObjects := DBObj.Connection.GetDBObjects(DBObj.Database, False, DBObj.GroupType);
+          ChildCount := DBObjects.Count;
+        end;
       end;
     lntTable: begin
-        Columns := DBObj.TableColumns;
-        ChildCount := Columns.Count;
+        if DBObj.Connection.Parameters.NetTypeGroup = ngRedis then
+          ChildCount := 0  // Redis key 无子列
+        else begin
+          Columns := DBObj.TableColumns;
+          ChildCount := Columns.Count;
+        end;
       end;
   end;
 end;
@@ -9855,6 +9907,8 @@ var
   Item, ParentObj: PDBObject;
   DBObjects: TDBObjectList;
   Columns: TTableColumnList;
+  ColUniquePrefixes: TStringList;
+  ColObjIdx, ColColonPos, ColMatchingKeys: Integer;
 
   function TreeShowColumns: Boolean;
   var f: TWinControl;
@@ -9886,7 +9940,35 @@ begin
         Include(InitialStates, ivsHasChildren);
       end;
       lntDb: begin
-        if actGroupObjects.Checked then begin
+        if ParentObj.Connection.Parameters.NetTypeGroup = ngRedis then begin
+          // Redis: 按 ":" 前缀分组。从全量 key 列表中提取唯一前缀作为 lntGroup 节点。
+          DBObjects := ParentObj.Connection.GetDBObjects(ParentObj.Database);
+          // 收集唯一前缀列表
+          ColUniquePrefixes := TStringList.Create;
+          ColUniquePrefixes.Sorted := True;
+          ColUniquePrefixes.Duplicates := dupIgnore;
+          for ColObjIdx := 0 to DBObjects.Count - 1 do begin
+            ColColonPos := Pos(':', DBObjects[ColObjIdx].Name);
+            if ColColonPos > 0 then
+              ColUniquePrefixes.Add(Copy(DBObjects[ColObjIdx].Name, 1, ColColonPos - 1))
+            else
+              ColUniquePrefixes.Add('');
+          end;
+          if Node.Index < ColUniquePrefixes.Count then begin
+            Item^ := TDBObject.Create(ParentObj.Connection);
+            Item.NodeType := lntGroup;
+            Item.GroupType := lntTable;
+            Item.Database := ParentObj.Database;
+            if ColUniquePrefixes[Node.Index] = '' then
+              Item.Name := _('(no prefix)')
+            else
+              Item.Name := ColUniquePrefixes[Node.Index] + ':';
+            // 存储前缀供子节点过滤用
+            Item.Schema := ColUniquePrefixes[Node.Index];
+            Include(InitialStates, ivsHasChildren);
+          end;
+          ColUniquePrefixes.Free;
+        end else if actGroupObjects.Checked then begin
           Item^ := TDBObject.Create(ParentObj.Connection);
           Item.NodeType := lntGroup;
           case Node.Index of
@@ -9907,10 +9989,40 @@ begin
         end;
       end;
       lntGroup: begin
-        DBObjects := ParentObj.Connection.GetDBObjects(ParentObj.Database, False, ParentObj.GroupType);
-        Item^ := DBObjects[Node.Index];
-        if TreeShowColumns then
-          Include(InitialStates, ivsHasChildren);
+        if ParentObj.Connection.Parameters.NetTypeGroup = ngRedis then begin
+          // Redis: 从全量 key 列表中过滤出属于此前缀的 key
+          DBObjects := ParentObj.Connection.GetDBObjects(ParentObj.Database);
+          // 收集匹配前缀的 key（跳过 lntGroup 节点本身）
+          ColMatchingKeys := 0;
+          for ColObjIdx := 0 to DBObjects.Count - 1 do begin
+            if DBObjects[ColObjIdx].NodeType <> lntTable then Continue;
+            ColColonPos := Pos(':', DBObjects[ColObjIdx].Name);
+            if ParentObj.Schema = '' then begin
+              // "(no prefix)" 组：无冒号的 key
+              if ColColonPos = 0 then begin
+                if ColMatchingKeys = Integer(Node.Index) then begin
+                  Item^ := DBObjects[ColObjIdx];
+                  Break;
+                end;
+                Inc(ColMatchingKeys);
+              end;
+            end else begin
+              // 有前缀组：前缀匹配且有冒号
+              if (ColColonPos > 0) and (Copy(DBObjects[ColObjIdx].Name, 1, Length(ParentObj.Schema)) = ParentObj.Schema) then begin
+                if ColMatchingKeys = Integer(Node.Index) then begin
+                  Item^ := DBObjects[ColObjIdx];
+                  Break;
+                end;
+                Inc(ColMatchingKeys);
+              end;
+            end;
+          end;
+        end else begin
+          DBObjects := ParentObj.Connection.GetDBObjects(ParentObj.Database, False, ParentObj.GroupType);
+          Item^ := DBObjects[Node.Index];
+          if TreeShowColumns then
+            Include(InitialStates, ivsHasChildren);
+        end;
       end;
       lntTable: begin
         Item^ := TDBObject.Create(ParentObj.Connection);
@@ -10055,6 +10167,8 @@ begin
           SynSQLSynUsed.SQLDialect := sqlStandard;
         ngInterbase:
           SynSQLSynUsed.SQLDialect := sqlInterbase6;
+        ngRedis:
+          SynSQLSynUsed.SQLDialect := sqlStandard;
         else
           raise Exception.CreateFmt(_(MsgUnhandledNetType), [Integer(FActiveDbObj.Connection.Parameters.NetType)]);
       end;

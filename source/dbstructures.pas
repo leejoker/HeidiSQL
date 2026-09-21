@@ -1,4 +1,4 @@
-﻿unit dbstructures;
+unit dbstructures;
 
 {$mode delphi}{$H+}
 
@@ -28,9 +28,14 @@ type
     ntFirebird_TCPIP,
     ntFirebird_Local,
     ntMySQL_RDS,
-    ntSQLiteEncrypted
+    ntSQLiteEncrypted,
+    ntRedis_TCPIP,
+    ntRedis_SSHtunnel,
+    ntRedis_TLS,
+    ntRedis_Sentinel,
+    ntRedis_Cluster
     );
-  TNetTypeGroup = (ngMySQL, ngMSSQL, ngPgSQL, ngSQLite, ngInterbase);
+  TNetTypeGroup = (ngMySQL, ngMSSQL, ngPgSQL, ngSQLite, ngInterbase, ngRedis);
   TNetTypeLibs = TDictionary<TNetType, TStringList>;
 
   // SQL query ids and provider
