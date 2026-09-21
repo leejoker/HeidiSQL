@@ -126,7 +126,7 @@ type
 
 implementation
 
-uses main, Types, base64, process;
+uses main, Types, base64;
 
 {$R *.lfm}
 
@@ -365,9 +365,6 @@ var
   LooksLikeJson, LooksLikeXml: Boolean;
   Highlighters: TSynHighlighterList;
   i: Integer;
-  TempIn, TempOut, OutText: String;
-  SL: TStringList;
-  JqOk: Boolean;
   JsonParser: TJSONParser;
   JsonData: TJSONData;
 begin
@@ -378,7 +375,7 @@ begin
   LooksLikeXml := (Length(Txt) > 0) and (Copy(Txt, 1, 5) = '<?xml');
 
   if LooksLikeJson and (not Txt.IsEmpty) then begin
-    // JSON: JScript 高亮器 + jq 格式化
+    // JSON: JScript 高亮器 + fpjson 原生格式化
     HighlighterName := TSynJScriptSyn.GetLanguageName;
     comboHighlighter.ItemIndex := comboHighlighter.Items.IndexOf(HighlighterName);
     MemoText.Highlighter := nil;
@@ -400,50 +397,25 @@ begin
     end;
     menuFormatCodeOnce.Enabled := Assigned(FHighlighter) and (FHighlighterFormatters.IndexOf(FHighlighter.ClassName) > -1);
     if Assigned(FHighlighter) and (FHighlighter is TSynJScriptSyn) then begin
-      // 用 jq 格式化（比 fpjson 快 1800 倍，6MB 只需 ~100ms）
+      // 用 fpjson 原生实现格式化 JSON（不依赖外部 jq）
       try
-        TempIn := GetTempDir + 'dsh_json_in.tmp';
-        TempOut := GetTempDir + 'dsh_json_out.tmp';
-        SL := TStringList.Create;
+        JsonParser := TJSONParser.Create(MemoText.Text, []);
         try
-          SL.Text := MemoText.Text;
-          SL.SaveToFile(TempIn);
-        finally
-          SL.Free;
-        end;
-        // jq '.' < in > out
-        JqOk := RunCommandIndir('', 'bash', ['-c', 'jq ''.'' < ''' + TempIn + ''' > ''' + TempOut + ''''], OutText, []);
-        if JqOk and FileExists(TempOut) then begin
-          SL := TStringList.Create;
-          try
-            SL.LoadFromFile(TempOut);
-            if SL.Text <> '' then
-              MemoText.Text := SL.Text;
-          finally
-            SL.Free;
+          JsonData := JsonParser.Parse;
+          if Assigned(JsonData) then begin
+            try
+              MemoText.Text := JsonData.FormatJSON();
+            finally
+              JsonData.Free;
+            end;
           end;
+        finally
+          JsonParser.Free;
         end;
-        DeleteFile(TempIn);
-        DeleteFile(TempOut);
         MemoText.CaretXY := Point(1, 1);
         MemoText.ClearSelection;
       except
-        // jq 不可用时回退到 fpjson（仅小 JSON）
-        try
-          JsonParser := TJSONParser.Create(MemoText.Text, []);
-          try
-            JsonData := JsonParser.Parse;
-            if Assigned(JsonData) then begin
-              MemoText.Text := JsonData.FormatJSON();
-              JsonData.Free;
-            end;
-          finally
-            JsonParser.Free;
-          end;
-          MemoText.CaretXY := Point(1, 1);
-          MemoText.ClearSelection;
-        except
-        end;
+        // 格式化失败则保持原样
       end;
     end;
     if btnWrap.Down and btnWrap.Enabled then
@@ -541,6 +513,52 @@ begin
 end;
 
 
+procedure CollectBase64Images(Data: TJSONData; List: TStringList);
+var
+  Obj: TJSONObject;
+  i: Integer;
+  TypeVal, mediaType, b64: String;
+  HasData: Boolean;
+  Item: TJSONData;
+begin
+  if not Assigned(Data) then Exit;
+  if Data is TJSONObject then begin
+    Obj := TJSONObject(Data);
+    TypeVal := '';
+    mediaType := '';
+    b64 := '';
+    HasData := False;
+    for i := 0 to Obj.Count - 1 do begin
+      Item := Obj.Items[i];
+      if Obj.Names[i] = 'type' then begin
+        if Item is TJSONString then
+          TypeVal := Item.AsString;
+      end
+      else if Obj.Names[i] = 'media_type' then begin
+        if Item is TJSONString then
+          mediaType := Item.AsString;
+      end
+      else if Obj.Names[i] = 'data' then begin
+        if (Item is TJSONString) and (Item.AsString <> '') then begin
+          HasData := True;
+          b64 := Item.AsString;
+        end;
+      end;
+    end;
+    if (TypeVal = 'base64') and HasData then begin
+      if mediaType = '' then mediaType := 'image/jpeg';
+      List.Add(mediaType + #9 + b64);
+    end;
+    for i := 0 to Obj.Count - 1 do
+      CollectBase64Images(Obj.Items[i], List);
+  end
+  else if Data is TJSONArray then begin
+    for i := 0 to Data.Count - 1 do
+      CollectBase64Images(Data.Items[i], List);
+  end;
+end;
+
+
 procedure TfrmTextEditor.btnImagesClick(Sender: TObject);
 var
   frm: TForm;
@@ -553,16 +571,15 @@ var
   lbl: TLabel;
   btnSave: TButton;
   yPos: Integer;
-  TempIn, TempOut, jqOutput: String;
-  SL: TStringList;
-  JqOk: Boolean;
   base64Lines: TStringList;
   b64Str, decoded, mediaType: String;
   ms: TMemoryStream;
   jpg: TJPEGImage;
   png: TPortableNetworkGraphic;
+  JsonParser: TJSONParser;
+  JsonData: TJSONData;
 begin
-  // 从已拉取的原始数据中提取 base64 图片（用 jq，不二次请求 Redis）
+  // 从已拉取的原始数据中提取 base64 图片（不二次请求 Redis）
   if FRawJson = '' then begin
     ShowMessage(_('Click "Raw" first to load the original data.'));
     Exit;
@@ -570,33 +587,22 @@ begin
 
   Screen.Cursor := crHourglass;
   try
-    // 用 jq 提取所有 type=="base64" 的 data 和 media_type
-    TempIn := GetTempDir + 'dsh_img_in.tmp';
-    TempOut := GetTempDir + 'dsh_img_out.tmp';
-    SL := TStringList.Create;
-    try
-      SL.Text := FRawJson;
-      SL.SaveToFile(TempIn);
-    finally
-      SL.Free;
-    end;
-
-    // jq 提取所有 base64 图片的 media_type 和 data
-    JqOk := RunCommandIndir('', 'bash', ['-c',
-      'jq -r ''[.. | objects | select(.type=="base64" and .data) | (.media_type // "image/jpeg") + "\t" + .data] | .[]'' < ''' + TempIn + ''' > ''' + TempOut + ''''],
-      jqOutput, []);
-    DeleteFile(TempIn);
-
-    if (not JqOk) or (not FileExists(TempOut)) then begin
-      ShowMessage(_('Failed to extract images from JSON.'));
-      Exit;
-    end;
-
+    // 用 fpjson 原生递归遍历，提取所有 type=="base64" 的 data 和 media_type
     base64Lines := TStringList.Create;
     try
-      base64Lines.LoadFromFile(TempOut);
-      DeleteFile(TempOut);
+      JsonParser := TJSONParser.Create(FRawJson, []);
+      try
+        JsonData := JsonParser.Parse;
+        try
+          CollectBase64Images(JsonData, base64Lines);
+        finally
+          JsonData.Free;
+        end;
+      finally
+        JsonParser.Free;
+      end;
     except
+      ShowMessage(_('Failed to extract images from JSON.'));
       base64Lines.Free;
       Exit;
     end;
