@@ -1042,6 +1042,8 @@ type
     function ColIsKeyPart(Column: Integer): Boolean; override;
     function IsNull(Column: Integer): Boolean; overload; override;
     function HasResult: Boolean; override;
+    procedure CheckEditable; override;
+    function GetKeyColumns: TTableColumnList; override;
     function DatabaseName: String; override;
     function TableName(Column: Integer): String; overload; override;
     // 按需获取某个 field 的完整值（懒加载）
@@ -12580,6 +12582,51 @@ end;
 function TRedisQuery.HasResult: Boolean;
 begin
   Result := (FReply <> nil) and (FReply.Kind <> rkNull);
+end;
+
+procedure TRedisQuery.CheckEditable;
+begin
+  // string: 可编辑 value（单值），不可增删行
+  // hash/list/set/zset: 可编辑、可增删行
+  // none/stream: 不可编辑
+  if (FKeyType = 'none') or (FKeyType = 'stream') or (FKey = '') then
+    raise EDbError.Create(_(MSG_NOGRIDEDITING));
+end;
+
+function TRedisQuery.GetKeyColumns: TTableColumnList;
+var
+  Col: TTableColumn;
+  dt: TDBDatatype;
+begin
+  // 返回合成键列，使网格修改追踪能识别行标识
+  PrepareColumnAttributes;
+  Result := TTableColumnList.Create(True);
+
+  dt.Index := dbdtVarchar;
+  dt.Name := 'text';
+  dt.Category := dtcText;
+  dt.HasLength := False;
+  dt.HasBinary := False;
+  dt.HasDefault := False;
+  dt.LoadPart := False;
+
+  Col := TTableColumn.Create(FConn);
+  if FKeyType = 'hash' then
+    Col.Name := 'field'
+  else if FKeyType = 'list' then
+    Col.Name := 'index'
+  else if FKeyType = 'zset' then
+    Col.Name := 'member'
+  else if FKeyType = 'set' then
+    Col.Name := 'member'
+  else if FKeyType = 'string' then
+    Col.Name := 'key'
+  else
+    Col.Name := 'key';
+  Col.OldName := Col.Name;
+  Col.DataType := dt;
+  Col.AllowNull := False;
+  Result.Add(Col);
 end;
 
 function TRedisQuery.DatabaseName: String;
