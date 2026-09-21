@@ -8233,8 +8233,10 @@ begin
     end else begin
       Reply := Conn.Client.Execute(['EXPIRE', Obj.Name, IntToStr(Seconds)]);
       try
-        if (Reply <> nil) and (Reply.Kind = rkInteger) and (Reply.Int = 0) then
+        if (Reply <> nil) and (Reply.Kind = rkInteger) and (Reply.Int = 0) then begin
           ErrorDialog(f_('Key "%s" does not exist.', [Obj.Name]));
+          Exit;
+        end;
       finally
         Reply.Free;
       end;

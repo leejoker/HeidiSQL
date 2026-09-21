@@ -7647,7 +7647,10 @@ var
   Col: TTableColumn;
   ColName: String;
 begin
-  Result := TTableColumnList.Create;
+  // Non-owning list: the column objects are shared references from FColumns/FKeys,
+  // not owned by this list. Callers (e.g. TDBQuery.GetWhereClause) free the list
+  // wrapper via try/finally but must not destroy the shared column objects.
+  Result := TTableColumnList.Create(False);
   // Find best key for updates
   // 1. round: find a primary key
   for Key in Keys do begin
@@ -10149,50 +10152,54 @@ var
 begin
   // Compose WHERE clause including values from best key for editing
   NeededCols := GetKeyColumns;
-  Result := '';
+  try
+    Result := '';
 
-  for i:=0 to NeededCols.Count-1 do begin
-    j := FColumnOrgNames.IndexOf(NeededCols[i].Name);
-    if j = -1 then
-      raise EDbError.CreateFmt(_('Cannot compose WHERE clause - column missing: %s'), [NeededCols[i].Name]);
-    if Result <> '' then
-      Result := Result + ' AND';
-    // See issue #769 and #2031 for why we need CastAsText
-    Result := Result + ' ' + NeededCols[i].CastAsText;
+    for i:=0 to NeededCols.Count-1 do begin
+      j := FColumnOrgNames.IndexOf(NeededCols[i].Name);
+      if j = -1 then
+        raise EDbError.CreateFmt(_('Cannot compose WHERE clause - column missing: %s'), [NeededCols[i].Name]);
+      if Result <> '' then
+        Result := Result + ' AND';
+      // See issue #769 and #2031 for why we need CastAsText
+      Result := Result + ' ' + NeededCols[i].CastAsText;
 
-    if Modified(j) then begin
-      ColVal := FCurrentUpdateRow[j].OldText;
-      ColIsNull := FCurrentUpdateRow[j].OldIsNull;
-    end else begin
-      ColVal := Col(j);
-      ColIsNull := IsNull(j);
-    end;
+      if Modified(j) then begin
+        ColVal := FCurrentUpdateRow[j].OldText;
+        ColIsNull := FCurrentUpdateRow[j].OldIsNull;
+      end else begin
+        ColVal := Col(j);
+        ColIsNull := IsNull(j);
+      end;
 
-    if ColIsNull then
-      Result := Result + ' IS NULL'
-    else begin
-      case DataType(j).Category of
-        dtcInteger, dtcReal: begin
-          if DataType(j).Index = dbdtBit then
-            Result := Result + '=' + Connection.EscapeString(ColVal, DataType(j))
-          else begin
-            // Guess (!) the default value silently inserted by the server. This is likely
-            // to be incomplete in cases where a UNIQUE key allows NULL here
-            if ColVal='' then
-              ColVal := '0';
-            Result := Result + '=' + ColVal;
+      if ColIsNull then
+        Result := Result + ' IS NULL'
+      else begin
+        case DataType(j).Category of
+          dtcInteger, dtcReal: begin
+            if DataType(j).Index = dbdtBit then
+              Result := Result + '=' + Connection.EscapeString(ColVal, DataType(j))
+            else begin
+              // Guess (!) the default value silently inserted by the server. This is likely
+              // to be incomplete in cases where a UNIQUE key allows NULL here
+              if ColVal='' then
+                ColVal := '0';
+              Result := Result + '=' + ColVal;
+            end;
           end;
-        end;
-        dtcTemporal:
-          Result := Result + '=' + Connection.EscapeString(Connection.GetDateTimeValue(ColVal, DataType(j).Index));
-        dtcBinary, dtcSpatial:
-          Result := Result + '=' + FConnection.EscapeBin(ColVal);
-        else begin
-          // Any other data type goes here, including text:
-          Result := Result + '=' + Connection.EscapeString(ColVal, DataType(j));
+          dtcTemporal:
+            Result := Result + '=' + Connection.EscapeString(Connection.GetDateTimeValue(ColVal, DataType(j).Index));
+          dtcBinary, dtcSpatial:
+            Result := Result + '=' + FConnection.EscapeBin(ColVal);
+          else begin
+            // Any other data type goes here, including text:
+            Result := Result + '=' + Connection.EscapeString(ColVal, DataType(j));
+          end;
         end;
       end;
     end;
+  finally
+    NeededCols.Free;
   end;
 end;
 
@@ -12198,6 +12205,14 @@ var
   pairIdx: Integer;
   isHash: Boolean;
 begin
+  // Return edited value from update row when editing is active (same pattern as TMySQLQuery)
+  if FEditingPrepared and Assigned(FCurrentUpdateRow) and (Column >= 0) and (Column < FCurrentUpdateRow.Count) then begin
+    if FCurrentUpdateRow[Column].NewIsNull then
+      Exit;
+    Result := FCurrentUpdateRow[Column].NewText;
+    Exit;
+  end;
+
   Result := '';
   if FReply = nil then Exit;
 
@@ -12580,6 +12595,11 @@ end;
 
 function TRedisQuery.IsNull(Column: Integer): Boolean;
 begin
+  // Return edited null state from update row when editing is active
+  if FEditingPrepared and Assigned(FCurrentUpdateRow) and (Column >= 0) and (Column < FCurrentUpdateRow.Count) then begin
+    Result := FCurrentUpdateRow[Column].NewIsNull;
+    Exit;
+  end;
   Result := (FReply = nil) or (FReply.Kind = rkNull);
 end;
 
@@ -12857,9 +12877,21 @@ begin
 end;
 
 procedure TRedisQuery.SetRecNo(Value: Int64);
+var
+  Row: TGridRow;
 begin
   FRecNo := Value;
   FEof := FRecNo >= FRecordCount;
+  // Sync FCurrentUpdateRow from FUpdateData (same pattern as TMySQLQuery)
+  FCurrentUpdateRow := nil;
+  if FEditingPrepared and Assigned(FUpdateData) then begin
+    for Row in FUpdateData do begin
+      if Row.RecNo = Value then begin
+        FCurrentUpdateRow := Row;
+        Break;
+      end;
+    end;
+  end;
 end;
 
 
