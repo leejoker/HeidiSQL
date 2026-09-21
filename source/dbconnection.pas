@@ -1044,6 +1044,10 @@ type
     function HasResult: Boolean; override;
     procedure CheckEditable; override;
     function GetKeyColumns: TTableColumnList; override;
+    function SaveModifications: Boolean; override;
+    procedure DeleteRow; override;
+    function InsertRow: Int64; override;
+    function EnsureFullRow(Refresh: Boolean): Boolean; override;
     function DatabaseName: String; override;
     function TableName(Column: Integer): String; overload; override;
     // 按需获取某个 field 的完整值（懒加载）
@@ -12627,6 +12631,217 @@ begin
   Col.DataType := dt;
   Col.AllowNull := False;
   Result.Add(Col);
+end;
+
+function TRedisQuery.SaveModifications: Boolean;
+var
+  Row: TGridRow;
+  i: Integer;
+  Cell: TGridValue;
+  fieldVal, oldMember, scoreVal, RecNoStr: String;
+  procedure DoCmd(const Args: array of string);
+  begin
+    FConn.Client.Execute(Args).Free;
+  end;
+begin
+  Result := True;
+  if not FEditingPrepared then
+    raise EDbError.Create(_('Internal error: Cannot post modifications before editing was prepared.'));
+
+  for Row in FUpdateData do begin
+    RecNo := Row.RecNo;
+    try
+      if Row.Inserted then begin
+        // 插入行
+        if FKeyType = 'hash' then begin
+          // col 0 = field, col 1 = value
+          if Row[0].NewIsNull or Row[1].NewIsNull then Continue;
+          DoCmd(['HSET', FKey, Row[0].NewText, Row[1].NewText]);
+          // 更新本地数据
+          if (RecNo >= 0) and (RecNo*2+1 < Length(FReply.Items)) then begin
+            if FReply.Items[RecNo*2] <> nil then FReply.Items[RecNo*2].Str := Row[0].NewText;
+            if FReply.Items[RecNo*2+1] <> nil then FReply.Items[RecNo*2+1].Str := Row[1].NewText;
+          end;
+        end
+        else if FKeyType = 'list' then begin
+          if Row[1].NewIsNull then Continue;
+          DoCmd(['RPUSH', FKey, Row[1].NewText]);
+        end
+        else if FKeyType = 'set' then begin
+          if Row[0].NewIsNull then Continue;
+          DoCmd(['SADD', FKey, Row[0].NewText]);
+        end
+        else if FKeyType = 'zset' then begin
+          if Row[0].NewIsNull then Continue;
+          scoreVal := IfThen(Row[1].NewIsNull, '0', Row[1].NewText);
+          DoCmd(['ZADD', FKey, scoreVal, Row[0].NewText]);
+        end;
+      end else begin
+        // 已存在行修改
+        for i:=0 to Row.Count-1 do begin
+          Cell := Row[i];
+          if not Cell.Modified then Continue;
+          if FKeyType = 'string' then begin
+            // col 1 = value
+            if i = 1 then
+              DoCmd(['SET', FKey, Cell.NewText]);
+          end
+          else if FKeyType = 'hash' then begin
+            // col 0 = field（改名：HDEL old + HSET new val）, col 1 = value
+            fieldVal := Row[0].OldText;
+            if i = 0 then begin
+              // field 改名
+              DoCmd(['HDEL', FKey, fieldVal]);
+              DoCmd(['HSET', FKey, Cell.NewText, Row[1].OldText]);
+            end else if i = 1 then begin
+              DoCmd(['HSET', FKey, fieldVal, Cell.NewText]);
+            end;
+          end
+          else if FKeyType = 'list' then begin
+            // col 1 = value（col 0 = index 不可改）
+            if i = 1 then begin
+              RecNoStr := IntToStr(RecNo);
+              DoCmd(['LSET', FKey, RecNoStr, Cell.NewText]);
+            end;
+          end
+          else if FKeyType = 'zset' then begin
+            // col 0 = member（改名：ZREM old + ZADD score new）, col 1 = score
+            oldMember := Row[0].OldText;
+            if i = 0 then begin
+              scoreVal := IfThen(Row[1].NewIsNull, '0', Row[1].NewText);
+              DoCmd(['ZREM', FKey, oldMember]);
+              DoCmd(['ZADD', FKey, scoreVal, Cell.NewText]);
+            end else if i = 1 then begin
+              DoCmd(['ZADD', FKey, Cell.NewText, oldMember]);
+            end;
+          end;
+        end;
+      end;
+      // 重置修改标志
+      for i:=0 to Row.Count-1 do begin
+        Cell := Row[i];
+        Cell.OldText := Cell.NewText;
+        Cell.OldIsNull := Cell.NewIsNull;
+        Cell.OldIsFunction := False;
+        Cell.NewIsFunction := False;
+        Cell.Modified := False;
+      end;
+      Row.Inserted := False;
+    except
+      on E: ERedisError do begin
+        Result := False;
+        ErrorDialog(E.Message);
+      end;
+    end;
+  end;
+end;
+
+procedure TRedisQuery.DeleteRow;
+var
+  fieldVal, memberVal, RecNoStr, Tombstone: String;
+  IsVirtual: Boolean;
+begin
+  PrepareEditing;
+  IsVirtual := Assigned(FCurrentUpdateRow) and FCurrentUpdateRow.Inserted;
+  if not IsVirtual then begin
+    try
+      if FKeyType = 'hash' then begin
+        fieldVal := Col(0);
+        FConn.Client.Execute(['HDEL', FKey, fieldVal]).Free;
+      end
+      else if FKeyType = 'list' then begin
+        RecNoStr := IntToStr(RecNo);
+        // tombstone 方案避免重复值误删
+        Tombstone := '__HEIDISQL_TOMBSTONE_' + IntToStr(GetTickCount64) + '__';
+        FConn.Client.Execute(['LSET', FKey, RecNoStr, Tombstone]).Free;
+        FConn.Client.Execute(['LREM', FKey, '1', Tombstone]).Free;
+      end
+      else if FKeyType = 'set' then begin
+        memberVal := Col(0);
+        FConn.Client.Execute(['SREM', FKey, memberVal]).Free;
+      end
+      else if FKeyType = 'zset' then begin
+        memberVal := Col(0);
+        FConn.Client.Execute(['ZREM', FKey, memberVal]).Free;
+      end
+      else if FKeyType = 'string' then
+        raise EDbError.Create(_('Cannot delete row from a string key. Use "Delete key" to remove the entire key.'));
+    except
+      on E: ERedisError do
+        raise EDbError.Create(E.Message);
+    end;
+  end;
+  if Assigned(FCurrentUpdateRow) then begin
+    FUpdateData.Remove(FCurrentUpdateRow);
+    FCurrentUpdateRow := nil;
+    FRecNo := -1;
+  end;
+end;
+
+function TRedisQuery.InsertRow: Int64;
+var
+  Row, OtherRow: TGridRow;
+  c: TGridValue;
+  i: Integer;
+  InUse: Boolean;
+begin
+  // string 类型不允许插入行
+  if FKeyType = 'string' then
+    raise EDbError.Create(_('Cannot insert rows into a string key. Use "New Key" to create a new key.'));
+
+  PrepareEditing;
+  Row := TGridRow.Create(True);
+  for i:=0 to ColumnCount-1 do begin
+    c := TGridValue.Create;
+    Row.Add(c);
+    c.OldText := '';
+    c.OldIsFunction := False;
+    c.OldIsNull := True;
+    c.NewText := '';
+    c.NewIsFunction := False;
+    c.NewIsNull := True;
+    c.Modified := False;
+  end;
+  Row.Inserted := True;
+  Result := High(Cardinal);
+  while True do begin
+    InUse := False;
+    for OtherRow in FUpdateData do begin
+      InUse := OtherRow.RecNo = Result;
+      if InUse then break;
+    end;
+    if not InUse then break;
+    Dec(Result);
+  end;
+  Row.RecNo := Result;
+  FUpdateData.Add(Row);
+end;
+
+function TRedisQuery.EnsureFullRow(Refresh: Boolean): Boolean;
+var
+  FullText: String;
+begin
+  // Redis: 保存后直接用 FCurrentUpdateRow 的值更新本地数据，无需二次请求。
+  // 仅当 Refresh=True（外部触发刷新）时用 GetFullValue 重新拉取。
+  Result := True;
+  if not Assigned(FCurrentUpdateRow) then
+    Exit;
+  if Refresh then begin
+    try
+      FullText := GetFullValue(RecNo, 1);
+      if (FullText <> '') and (FCurrentUpdateRow.Count > 1) then begin
+        FCurrentUpdateRow[1].OldText := FullText;
+        FCurrentUpdateRow[1].NewText := FullText;
+        FCurrentUpdateRow[1].OldIsNull := False;
+        FCurrentUpdateRow[1].NewIsNull := False;
+        if (RecNo >= 0) and (RecNo*2+1 < Length(FReply.Items)) and (FReply.Items[RecNo*2+1] <> nil) then
+          FReply.Items[RecNo*2+1].Str := FullText;
+      end;
+    except
+      on E: ERedisError do
+        Result := False;
+    end;
+  end;
 end;
 
 function TRedisQuery.DatabaseName: String;
