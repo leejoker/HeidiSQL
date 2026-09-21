@@ -10221,7 +10221,9 @@ begin
   if not FTreeRefreshInProgress then begin
     SetMainTab(MainTabToActivate);
     tabDatabase.TabVisible := (FActiveDbObj <> nil) and (FActiveDbObj.NodeType <> lntNone);
-    tabEditor.TabVisible := (FActiveDbObj <> nil) and (FActiveDbObj.NodeType in [lntTable..lntEvent, lntColumn]);
+    tabEditor.TabVisible := (FActiveDbObj <> nil)
+      and (FActiveDbObj.NodeType in [lntTable..lntEvent, lntColumn])
+      and (FActiveDbObj.Connection.Parameters.NetTypeGroup <> ngRedis);
     tabData.TabVisible := (FActiveDbObj <> nil) and (FActiveDbObj.NodeType in [lntTable, lntView, lntColumn]);
   end;
 
