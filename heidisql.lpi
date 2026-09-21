@@ -294,6 +294,13 @@ if TargetOS=&apos;win64&apos; then
         <ResourceBaseClass Value="Form"/>
       </Unit>
       <Unit>
+        <Filename Value="source\redis_newkey.pas"/>
+        <IsPartOfProject Value="True"/>
+        <ComponentName Value="frmRedisNewKey"/>
+        <HasResources Value="True"/>
+        <ResourceBaseClass Value="Form"/>
+      </Unit>
+      <Unit>
         <Filename Value="source\copytable.pas"/>
         <IsPartOfProject Value="True"/>
         <ComponentName Value="CopyTableForm"/>

@@ -1,0 +1,91 @@
+object frmRedisNewKey: TfrmRedisNewKey
+  Left = 400
+  Height = 350
+  Top = 200
+  Width = 450
+  BorderStyle = bsDialog
+  Caption = 'New Redis Key'
+  ClientHeight = 350
+  ClientWidth = 450
+  Position = poMainFormCenter
+  LCLVersion = '4.4.0.0'
+  OnCreate = FormCreate
+  object lblKeyName: TLabel
+    Left = 12
+    Height = 16
+    Top = 12
+    Width = 70
+    Caption = 'Key name:'
+    FocusControl = editKeyName
+  end
+  object editKeyName: TEdit
+    Left = 12
+    Height = 28
+    Top = 32
+    Width = 426
+    Anchors = [akTop, akLeft, akRight]
+    TabOrder = 0
+  end
+  object lblType: TLabel
+    Left = 12
+    Height = 16
+    Top = 68
+    Width = 35
+    Caption = 'Type:'
+    FocusControl = comboType
+  end
+  object comboType: TComboBox
+    Left = 12
+    Height = 28
+    Top = 88
+    Width = 426
+    Anchors = [akTop, akLeft, akRight]
+    ItemIndex = 0
+    Items.Strings = (
+      'string'
+      'hash'
+      'list'
+      'set'
+      'zset'
+    )
+    Style = csDropDownList
+    TabOrder = 1
+    OnChange = comboTypeChange
+  end
+  object lblValue: TLabel
+    Left = 12
+    Height = 16
+    Top = 124
+    Width = 70
+    Caption = 'Initial value:'
+  end
+  object memoValue: TMemo
+    Left = 12
+    Height = 160
+    Top = 144
+    Width = 426
+    Anchors = [akTop, akLeft, akRight, akBottom]
+    TabOrder = 2
+    WordWrap = False
+  end
+  object btnOK: TButton
+    Left = 268
+    Height = 28
+    Top = 314
+    Width = 80
+    Anchors = [akRight, akBottom]
+    Caption = 'OK'
+    TabOrder = 3
+    OnClick = btnOKClick
+  end
+  object btnCancel: TButton
+    Left = 358
+    Height = 28
+    Top = 314
+    Width = 80
+    Anchors = [akRight, akBottom]
+    Caption = 'Cancel'
+    ModalResult = 2
+    TabOrder = 4
+  end
+end
