@@ -9,6 +9,9 @@
 /out/*
 /extra/locale/heidisql.*.po
 
+# TUI tool (standalone Go project, intentionally not committed)
+/tui/
+
 # Lazarus / FPC compiler output
 *.exe
 #*.dll # 3rd party libs needed for Windows installer
