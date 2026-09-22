@@ -3873,13 +3873,12 @@ end;
 procedure TMainForm.actDropObjectsExecute(Sender: TObject);
 var
   msg, db: String;
-  Node, SiblingDB, ParentNode: PVirtualNode;
+  Node, SiblingDB: PVirtualNode;
   Obj: PDBObject;
   DBObject: TDBObject;
-  ObjectList, DBObjects: TDBObjectList;
+  ObjectList: TDBObjectList;
   Editor: TDBObjectEditor;
   Conn: TDBConnection;
-  i: Integer;
 begin
   Conn := ActiveConnection;
 
@@ -3954,32 +3953,10 @@ begin
       end;
       if Conn.SqlProvider.Has(qEnableForeignKeyChecks) then
         Conn.Query(qEnableForeignKeyChecks);
-      // Refresh ListTables + dbtree so the dropped objects are gone:
-      if Conn.Parameters.NetTypeGroup = ngRedis then begin
-        // Redis: 从缓存中移除被删键，删除树节点，不重建整棵树（避免收起展开状态）
-        DBObjects := Conn.GetDBObjects(ActiveDatabase);
-        for DBObject in ObjectList do begin
-          for i := DBObjects.Count - 1 downto 0 do begin
-            if DBObjects[i].Name = DBObject.Name then begin
-              DBObjects.Delete(i);
-              Break;
-            end;
-          end;
-        end;
-        // 删除当前选中的键节点，刷新父节点的子节点
-        Node := DBtree.FocusedNode;
-        if Assigned(Node) then begin
-          ParentNode := Node.Parent;
-          DBtree.DeleteNode(Node);
-          if Assigned(ParentNode) then
-            DBtree.ResetNode(ParentNode);
-        end;
-        InvalidateVT(ListTables, VTREE_NOTLOADED_PURGECACHE, True);
-      end else begin
-        Conn.ClearDbObjects(ActiveDatabase);
-        RefreshTree;
-        SetActiveDatabase(Conn.Database, Conn);
-      end;
+      // Refresh ListTables + dbtree so the dropped tables are gone:
+      Conn.ClearDbObjects(ActiveDatabase);
+      RefreshTree;
+      SetActiveDatabase(Conn.Database, Conn);
     except
       on E:EDbError do
         ErrorDialog(E.Message);
