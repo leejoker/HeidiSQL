@@ -10836,6 +10836,10 @@ var
   function GroupKey(DBObj: PDBObject): String;
   begin
     Result := DBObj.Database + #9 + IntToStr(Integer(DBObj.GroupType));
+    // Redis 按 ":" 前缀分组，所有前缀组共享 GroupType=lntTable，必须用前缀（存于 Schema）
+    // 区分，否则多个前缀组会映射到同一个 key，无法逐个恢复展开状态。
+    if (DBObj.Connection <> nil) and (DBObj.Connection.Parameters.NetTypeGroup = ngRedis) then
+      Result := Result + #9 + DBObj.Schema;
   end;
 
   procedure StoreExpandedState(DBNode: PVirtualNode);
@@ -10871,7 +10875,10 @@ var
       Exit;
     try
       DBtree.Expanded[DBNode] := True;
-      if not actGroupObjects.Checked then
+      // SQL 的类型分组（Tables/Views/...）由 actGroupObjects 开关控制；
+      // 但 Redis 的 ":" 前缀分组是无条件的（见 DBtreeInitNode 的 ngRedis 分支），
+      // 因此 Redis 必须始终恢复前缀组的展开状态，不能受该开关拦截。
+      if (DBObj.Connection.Parameters.NetTypeGroup <> ngRedis) and (not actGroupObjects.Checked) then
         Exit;
       GroupNode := DBtree.GetFirstChild(DBNode);
       while Assigned(GroupNode) do begin
