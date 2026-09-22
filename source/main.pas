@@ -10487,8 +10487,13 @@ begin
           PlaceObjectEditor(TableLevelObj);
           // When a table is clicked in the tree, and the current
           // tab is a Host or Database tab, switch to showing table columns.
-          if (PagecontrolMain.ActivePage = tabHost) or (PagecontrolMain.ActivePage = tabDatabase) then
-            MainTabToActivate := tabEditor;
+          // Redis keys have no table editor — default to the Data tab instead.
+          if (PagecontrolMain.ActivePage = tabHost) or (PagecontrolMain.ActivePage = tabDatabase) then begin
+            if FActiveDbObj.Connection.Parameters.NetTypeGroup = ngRedis then
+              MainTabToActivate := tabData
+            else
+              MainTabToActivate := tabEditor;
+          end;
           // Todo: prevent reload when focus has changed within a table's children only
           if DataGrid.Tag = VTREE_LOADED then
             InvalidateVT(DataGrid, VTREE_NOTLOADED_PURGECACHE, False);
