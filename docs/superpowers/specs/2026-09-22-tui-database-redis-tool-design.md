@@ -200,7 +200,9 @@ type KVResult struct {
 
 ### 连接生命周期
 
-- `db.Open(cfg)` 建连 + `Ping`，失败返回 error。
+- `db.Open(cfg)` 建连 + `Ping`，失败返回 error。返回值是 `Connection` 接口；
+  `app.go` 收到后按 `cfg.Driver` **类型断言**到 `SQLConn`（postgres）或 `KVConn`（redis），
+  三个字段（`conn`/`sqlConn`/`kvConn`）同时持有：`conn` 用于统一 `Close`，类型字段用于分发查询。
 - 单连接会话下 `app.go` 持有当前 `Connection`，切出主屏/退出时 `Close`。
 - 所有方法接收 `context.Context`，UI 层默认 30s 超时。
 
@@ -246,7 +248,10 @@ type connectModel struct {
 - `↑/↓` 移动光标，`Enter` 选中：
   - `db.Open(cfg)` 异步发起（`tea.Cmd` 返回 `connectedMsg{conn}` 或 `errMsg`），进行中显示 "connecting..."。
   - 成功 → 切换到 `screenMain`；失败 → 底部红字错误摘要。
-- `n` 新增：`adding=true`，焦点转入 `addForm`。`Tab` 下一字段，`Enter` 确认 → `Add()` + 写回 toml + 刷新列表；`Esc` 取消。driver 字段左右切换 `postgres`/`redis`。
+- `n` 新增：`adding=true`，焦点转入 `addForm`。表单按 driver 分两阶段：
+  - 公共字段：name / driver / host / port / user / password
+  - driver 选定后追加引擎专属字段：postgres → `database` + `sslmode`（可选）；redis → `db`（可选，默认 0）
+  - `Tab` 下一字段，`Enter` 确认 → `Add()` + 写回 toml + 刷新列表；`Esc` 取消。driver 字段左右切换 `postgres`/`redis`，切换后表单动态增减专属字段。
 - `d` 删除：底部 `确认删除 <name>? y/n`，`y` 确认 → `Remove()` + 写回 toml；`n`/`Esc` 取消。
 - `Ctrl+Q` 退出程序。
 - 编辑（`e`）MVP 不实现。
@@ -323,7 +328,7 @@ type mainModel struct {
 
 - `bubbles/textarea`，纯文本，无语法高亮。
 - `Ctrl+R` 执行当前全部内容（避免 `Ctrl+Enter` 终端兼容问题）。
-- 异步 `tea.Cmd`：PG 调 `sqlConn.Exec`，Redis 调 `kvConn.Exec(splitArgs(text)...)`，返回 `resultMsg` 或 `errMsg`。
+- 异步 `tea.Cmd`：PG 调 `sqlConn.Exec`，Redis 调 `kvConn.Exec(splitArgs(text)...)`（`splitArgs` 为按空白分词的简单实现，MVP 不处理引号包裹的空格值），返回 `resultMsg` 或 `errMsg`。
 - 执行中状态栏显示 "running..."。
 
 ### 区域 C — Results（`results.go`）
