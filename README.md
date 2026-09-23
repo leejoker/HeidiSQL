@@ -58,8 +58,8 @@ Ansgar
   对应的 `TNetType` 引擎。
 - 单元测试见 `tests/test_dbeaver_import.lpr`。
 
-设计文档见 `docs/superpowers/specs/2026-09-23-dbeaver-import-design.md` 与
-`2026-09-23-dbeaver-import-gui-design.md`。
+设计文档见 `docs/superpowers/specs/2026-09-23-dbeaver-import-gui-design.md`（TUI 版设计已随
+`db-tui` 模块迁至其仓库 `docs/specs/` 下）。
 
 ### 3. Win64 交叉编译脚本
 

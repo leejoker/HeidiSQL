@@ -3,7 +3,7 @@
 **日期**：2026-09-23
 **状态**：待实现（已通过头脑风暴确认关键决策）
 **目标模块**：`source/`（HeidiSQL 主 GUI，Lazarus/FPC）
-**关联文档**：`docs/superpowers/specs/2026-09-23-dbeaver-import-design.md`（TUI 版，已实现并验证 DBeaver 格式细节，本设计复用其源码确认结论）
+**关联文档**：`db-tui` 仓库 `docs/specs/2026-09-23-dbeaver-import-design.md`（TUI 版，已实现并验证 DBeaver 格式细节，本设计复用其源码确认结论；原在本仓库，2026-09-23 随 tui 模块迁出）
 
 ---
 
