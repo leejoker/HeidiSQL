@@ -17,7 +17,7 @@
 - 测试为纯逻辑单测（无 Docker、无 `//go:build integration`），与 `internal/config` 现有惯例一致。
 - commit message 用英文（遵循 AGENTS.md §15）；代码与文档默认中文注释。
 - 现有 TUI 启动路径（`tea.NewProgram`）不得改动行为。
-- **`tui/` 在父仓库 `.gitignore` 中，不提交父仓库**（README 已声明）。任务检查点以 `go test` + `go build` 通过为准，不做 `git commit`。计划文档本身（`docs/`）可提交。
+- `tui/` 有独立 git 仓库（父仓库 `.gitignore` 已忽略 `/tui/`）。在 `feature/dbeaver-import` 分支上开发，每个 task 完成后 commit。提交不影响父仓库。
 
 ## File Structure
 
@@ -114,10 +114,13 @@ func (c *Config) Upsert(conn Connection) {
 Run: `cd tui && go test ./internal/config/ -v`
 Expected: PASS（含原有 3 个测试 + 新 TestUpsert）
 
-- [ ] **Step 5: 检查点**
+- [ ] **Step 5: Commit**
 
-Run: `cd tui && go test ./internal/config/ -v && go build ./...`
-Expected: 全部 PASS，构建无错误。（`tui/` 在 .gitignore 中，不提交。）
+Run: `cd tui && go test ./internal/config/ -v && go build ./...`（确认 PASS）
+```bash
+cd tui && git add internal/config/config.go internal/config/config_test.go
+git commit -m "feat(config): add Upsert method for name-based merge"
+```
 
 ---
 
@@ -380,10 +383,13 @@ func LoadCredentials(ws string) (map[string]Credentials, error) {
 Run: `cd tui && go test ./internal/dbeaver/ -v`
 Expected: PASS（5 个测试全过）
 
-- [ ] **Step 5: 检查点**
+- [ ] **Step 5: Commit**
 
-Run: `cd tui && go test ./internal/dbeaver/ -v && go build ./...`
-Expected: 全部 PASS，构建无错误。（`tui/` 在 .gitignore 中，不提交。）
+Run: `cd tui && go test ./internal/dbeaver/ -v && go build ./...`（确认 PASS）
+```bash
+cd tui && git add internal/dbeaver/decrypt.go internal/dbeaver/decrypt_test.go
+git commit -m "feat(dbeaver): add AES-128-CBC credential decryption with format fallbacks"
+```
 
 ---
 
@@ -693,10 +699,13 @@ func mapConn(ds DataSource, cr Credentials) ImportedConn {
 Run: `cd tui && go test ./internal/dbeaver/ -v`
 Expected: PASS（Task 2 + Task 3 全部测试）
 
-- [ ] **Step 5: 检查点**
+- [ ] **Step 5: Commit**
 
-Run: `cd tui && go test ./internal/dbeaver/ -v && go build ./...`
-Expected: 全部 PASS，构建无错误。（`tui/` 在 .gitignore 中，不提交。）
+Run: `cd tui && go test ./internal/dbeaver/ -v && go build ./...`（确认 PASS）
+```bash
+cd tui && git add internal/dbeaver/mapping.go internal/dbeaver/mapping_test.go
+git commit -m "feat(dbeaver): add driver detection and connection field mapping"
+```
 
 ---
 
@@ -964,10 +973,13 @@ func Import(ws string) (*Result, error) {
 Run: `cd tui && go test ./internal/dbeaver/ -v`
 Expected: PASS（Task 2+3+4 全部测试）
 
-- [ ] **Step 5: 检查点**
+- [ ] **Step 5: Commit**
 
-Run: `cd tui && go test ./internal/dbeaver/ -v && go build ./...`
-Expected: 全部 PASS，构建无错误。（`tui/` 在 .gitignore 中，不提交。）
+Run: `cd tui && go test ./internal/dbeaver/ -v && go build ./...`（确认 PASS）
+```bash
+cd tui && git add internal/dbeaver/dbeaver.go internal/dbeaver/dbeaver_test.go
+git commit -m "feat(dbeaver): add workspace detection, data-sources parsing, Import orchestration"
+```
 
 ---
 
@@ -1194,10 +1206,13 @@ Expected: PASS（4 个子命令测试全过）
 Run: `cd tui && go test ./... && go build ./...`
 Expected: 全部 PASS，构建无错误
 
-- [ ] **Step 7: 检查点**
+- [ ] **Step 7: Commit**
 
-Run: `cd tui && go test ./... && go build ./...`
-Expected: 全部 PASS，构建无错误。（`tui/` 在 .gitignore 中，不提交。）
+Run: `cd tui && go test ./... && go build ./...`（确认 PASS）
+```bash
+cd tui && git add import_dbeaver.go import_dbeaver_test.go main.go
+git commit -m "feat(cli): add import-dbeaver subcommand for DBeaver connection import"
+```
 
 ---
 
