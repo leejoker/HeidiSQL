@@ -468,3 +468,13 @@ pre-existing and acceptable; do not introduce *new* warning classes.
 - ❌ Do not commit `bin/`, `out/`, `lib/`, `units/`, `*.ppu`, `*.o`, `*.lps`.
 - ❌ Do not add raw `$00BBGGRR` literals in UI code outside `TAppColorScheme`.
 - ❌ Do not bypass `TExtForm` scaling — all pixel math goes through `ScaleFromDesign`/`Space`.
+
+---
+
+## 15. 语言与沟通约定
+
+- **所有对用户的回答一律使用中文**（包括解释、总结、提问、状态汇报）。
+- 代码、标识符、文件路径、命令、commit message 保持英文不变（遵循本文件其他章节的既有规范）。
+- 文档（spec、README 等）除非任务要求英文，否则默认用中文撰写。
+
+> 此约定由用户在 2026-09-23 会话中明确要求，适用于本仓库下所有后续 agent 交互。
