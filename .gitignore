@@ -56,6 +56,7 @@ desktop.ini
 
 # Redis protocol test program (standalone console)
 /tests/test_redis_proto
+/tests/test_dbeaver_import
 /tests/_probe
 /tests/_smoke
 /tests/*.ppu

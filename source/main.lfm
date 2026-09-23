@@ -3640,6 +3640,9 @@ object MainForm: TMainForm
       object Importsettings1: TMenuItem
         Action = actImportSettings
       end
+      object ImportDBeaverSessions1: TMenuItem
+        Action = actImportDBeaverSessions
+      end
       object N5: TMenuItem
         Caption = '-'
       end
@@ -4351,6 +4354,11 @@ object MainForm: TMainForm
       Caption = 'Import settings file ...'
       ImageIndex = 101
       OnExecute = actImportSettingsExecute
+    end
+    object actImportDBeaverSessions: TAction
+      Category = 'Export/Import'
+      Caption = 'Import DBeaver sessions ...'
+      OnExecute = actImportDBeaverSessionsExecute
     end
     object actPreferences: TAction
       Category = 'Tools'

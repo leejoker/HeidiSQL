@@ -324,6 +324,7 @@ type
     Cut1: TMenuItem;
     actExportSettings: TAction;
     actImportSettings: TAction;
+    actImportDBeaverSessions: TAction;
     actPreferences: TAction;
     actFlushHosts: TAction;
     actFlushLogs: TAction;
@@ -913,6 +914,7 @@ type
     procedure actExportSettingsExecute(Sender: TObject);
     procedure actFlushExecute(Sender: TObject);
     procedure actImportCSVExecute(Sender: TObject);
+    procedure actImportDBeaverSessionsExecute(Sender: TObject);
     procedure actImportSettingsExecute(Sender: TObject);
     procedure actLoadSQLExecute(Sender: TObject);
     procedure actNewWindowExecute(Sender: TObject);
@@ -1500,7 +1502,7 @@ uses
   FileInfo, winpeimagereader, elfreader, machoreader, About, data_sorting, column_selection, loaddata, editvar,
   copytable, csv_detector, exportgrid, usermanager, rolemanagerpg, reformatter, connections, sqlhelp, updatecheck,
   insertfiles, texteditor, preferences, table_editor, view, routine_editor, trigger_editor, event_editor, grideditlinks,
-  crashdialog, selectdbobject, redis_newkey, redisclient;
+  crashdialog, selectdbobject, redis_newkey, redisclient, dbeaver_import_dlg;
 
 {$R *.lfm}
 
@@ -3179,6 +3181,21 @@ begin
       ErrorDialog(E.Message);
   end;
   Dialog.Free;
+end;
+
+
+procedure TMainForm.actImportDBeaverSessionsExecute(Sender: TObject);
+var
+  Dlg: TfrmDBeaverImport;
+begin
+  // Import database sessions from a DBeaver workspace (data-sources.json +
+  // encrypted credentials-config.json). See dbeaver_import.pas / _dlg.pas.
+  Dlg := TfrmDBeaverImport.Create(Self);
+  try
+    Dlg.ShowModal;
+  finally
+    Dlg.Free;
+  end;
 end;
 
 

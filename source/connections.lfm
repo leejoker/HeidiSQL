@@ -1446,6 +1446,9 @@ object connform: Tconnform
     object Importsettingsfile1: TMenuItem
       Action = MainForm.actImportSettings
     end
+    object ImportDBeaverSessions2: TMenuItem
+      Action = MainForm.actImportDBeaverSessions
+    end
     object Exportsettingsfile1: TMenuItem
       Action = MainForm.actExportSettings
     end

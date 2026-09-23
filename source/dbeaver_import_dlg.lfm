@@ -1,0 +1,105 @@
+object frmDBeaverImport: TfrmDBeaverImport
+  Left = 0
+  Height = 480
+  Top = 0
+  Width = 620
+  BorderStyle = bsDialog
+  Caption = 'Import DBeaver sessions'
+  ClientHeight = 480
+  ClientWidth = 620
+  Color = clBtnFace
+  Position = poMainFormCenter
+  LCLVersion = '4.4.0.0'
+  OnCreate = FormCreate
+  object pnlTop: TPanel
+    Left = 0
+    Height = 150
+    Top = 0
+    Width = 620
+    Align = alTop
+    BevelOuter = bvNone
+    ClientHeight = 150
+    ClientWidth = 620
+    TabOrder = 0
+    object lblDataSources: TLabel
+      Left = 10
+      Height = 15
+      Top = 10
+      Width = 120
+      Caption = 'DBeaver data-sources.json:'
+    end
+    object editDataSources: TEditButton
+      Left = 10
+      Height = 30
+      Top = 28
+      Width = 595
+      Anchors = [akTop, akLeft, akRight]
+      BorderSpacing.Around = 5
+      ButtonWidth = 23
+      TabOrder = 0
+      Text = 'editDataSources'
+      OnButtonClick = editDataSourcesButtonClick
+    end
+    object lblCredentials: TLabel
+      Left = 10
+      Height = 15
+      Top = 66
+      Width = 130
+      Caption = 'Credentials file (optional):'
+    end
+    object editCredentials: TEditButton
+      Left = 10
+      Height = 30
+      Top = 84
+      Width = 595
+      Anchors = [akTop, akLeft, akRight]
+      BorderSpacing.Around = 5
+      ButtonWidth = 23
+      TabOrder = 1
+      Text = 'editCredentials'
+      OnButtonClick = editCredentialsButtonClick
+    end
+    object chkImportPasswords: TCheckBox
+      Left = 10
+      Height = 20
+      Top = 120
+      Width = 280
+      Caption = 'Try to decrypt and import passwords'
+      Checked = True
+      State = cbChecked
+      TabOrder = 2
+    end
+  end
+  object memoResult: TMemo
+    Left = 10
+    Height = 250
+    Top = 160
+    Width = 595
+    Anchors = [akTop, akLeft, akRight, akBottom]
+    BorderSpacing.Around = 5
+    ReadOnly = True
+    ScrollBars = ssAutoVertical
+    TabOrder = 1
+  end
+  object btnImport: TBitBtn
+    Left = 350
+    Height = 30
+    Top = 440
+    Width = 120
+    Anchors = [akRight, akBottom]
+    Caption = 'Import'
+    Default = True
+    TabOrder = 2
+    OnClick = btnImportClick
+  end
+  object btnClose: TBitBtn
+    Left = 480
+    Height = 30
+    Top = 440
+    Width = 120
+    Anchors = [akRight, akBottom]
+    Caption = 'Close'
+    ModalResult = 2
+    TabOrder = 3
+  end
+end

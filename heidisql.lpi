@@ -481,6 +481,17 @@ if TargetOS=&apos;win64&apos; then
         <HasResources Value="True"/>
         <ResourceBaseClass Value="Form"/>
       </Unit>
+      <Unit>
+        <Filename Value="source\dbeaver_import.pas"/>
+        <IsPartOfProject Value="True"/>
+      </Unit>
+      <Unit>
+        <Filename Value="source\dbeaver_import_dlg.pas"/>
+        <IsPartOfProject Value="True"/>
+        <ComponentName Value="frmDBeaverImport"/>
+        <HasResources Value="True"/>
+        <ResourceBaseClass Value="Form"/>
+      </Unit>
     </Units>
   </ProjectOptions>
   <CompilerOptions>
