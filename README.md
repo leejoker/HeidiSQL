@@ -61,20 +61,7 @@ Ansgar
 设计文档见 `docs/superpowers/specs/2026-09-23-dbeaver-import-design.md` 与
 `2026-09-23-dbeaver-import-gui-design.md`。
 
-### 3. 独立 TUI 工具（`tui/`）
-
-基于 [bubbletea](https://github.com/charmbracelet/bubbletea) 的精简终端工具
-（`heidisql-tui`），用于在服务器上查询 PostgreSQL 与执行 Redis 命令：
-
-- 独立 Go 项目，复用 HeidiSQL 的概念但不共享代码，仅覆盖 PostgreSQL + Redis 子集。
-- `CGO_ENABLED=0` 构建为单静态二进制，scp 到服务器即用。
-- 配置位于 `~/.config/heidisql-tui/config.toml`（示例见 `tui/config.example.toml`）。
-- 设计文档见 `docs/superpowers/specs/2026-09-22-tui-database-redis-tool-design.md`。
-- 规划中（已有设计、待实现）：定时轮询查询（`Ctrl+P`）、Editor 字段自动补全，
-  分别见 `2026-09-23-poll-query-design.md` 与 `2026-09-23-editor-autocomplete-design.md`。
-- 注意：`tui/` 已加入父仓库 `.gitignore`，拥有独立 git 仓库，不随本仓库提交。
-
-### 4. Win64 交叉编译脚本
+### 3. Win64 交叉编译脚本
 
 `scripts/cross-build-win64.sh`：在 Linux 上直接交叉编译出 `out/win64/heidisql.exe`
 （绕过 Makefile `build-win64` target 未传 `--ws/--cpu/--os` 参数的问题），
