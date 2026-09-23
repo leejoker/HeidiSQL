@@ -99,6 +99,7 @@ type
     Preferences1: TMenuItem;
     Exportsettingsfile1: TMenuItem;
     Importsettingsfile1: TMenuItem;
+    ImportDBeaverSessions2: TMenuItem;
     lblComment: TLabel;
     memoComment: TMemo;
     lblQueryTimeout: TLabel;

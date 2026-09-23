@@ -60,6 +60,8 @@ type
     SshPrivateKey: string;
     HasPassword: Boolean; // whether a credential password was recovered
     Reason: string;       // skip reason when Engine = dbeNone
+    FolderPath: string;   // '/'-joined DBeaver folder chain (parent-first, no
+                          // trailing slash); '' = session root
   end;
 
   TDBeaverImportEntryArray = array of TDBeaverImportEntry;
@@ -95,12 +97,19 @@ function DBeaverLoadDataSources(const Workspace: string;
   out DataSources: TDBeaverDataSourceMap;
   out Folders: TDBeaverFolderArray): Boolean;
 
-// Decrypt <ws>/credentials-config.json. Returns True if the file existed
-// (Decrypted=True when plaintext was recovered, False on missing/unreadable).
-// On success Creds is populated keyed by connection id.
-function DBeaverLoadCredentials(const Workspace: string;
+// Decrypt a DBeaver credentials file at the given explicit path ('' = none).
+// Returns True if the file existed (Decrypted=True when plaintext was
+// recovered; False on missing/unreadable/malformed — malformed input never
+// raises). On success Creds is populated keyed by connection id.
+function DBeaverLoadCredentials(const CredentialsFile: string;
   out Creds: TDBeaverCredentialsMap;
   out Decrypted: Boolean): Boolean;
+
+// Resolve a DBeaver folder id to a HeidiSQL SessionPath chain: parent-first,
+// '/' separated, no trailing slash. '' when FolderId is empty or unknown.
+// Path separators inside folder names become '_'; parentFolder cycles are
+// bounded (depth 32) so malformed data cannot loop forever.
+function DBeaverFolderPath(const Folders: TDBeaverFolderArray; const FolderId: string): string;
 
 // Map provider+driver substring to an engine. dbeNone = unsupported.
 function DBeaverDetectEngine(const Provider, Driver: string): TDBeaverEngine;
@@ -111,8 +120,12 @@ procedure DBeaverParseJdbcUrl(const Url: string; out Host: string;
 
 // Read + parse + map an entire workspace into a result. Does NOT touch the
 // HeidiSQL registry. TryPasswords=False skips credential loading entirely.
+// CredentialsFile='' derives <ws>/credentials-config.json; a non-empty path
+// points at an explicit credentials file. Malformed JSON never raises into
+// the caller: bad data-sources fails (False), bad credentials degrade to
+// Decrypted=False.
 function DBeaverImport(const Workspace: string; TryPasswords: Boolean;
-  out AResult: TDBeaverImportResult): Boolean;
+  const CredentialsFile: string; out AResult: TDBeaverImportResult): Boolean;
 
 implementation
 
@@ -212,6 +225,12 @@ begin
     RoundKeys[i*4+3] := RoundKeys[(i-4)*4+3] xor temp[3];
   end;
 end;
+
+// AES state buffers below are fully written through untyped var parameters
+// (Move / key expansion) before their first read; FPC's flow analysis cannot
+// track that, so silence the resulting 5057/5058 hints for this section.
+{$WARN 5057 off}
+{$WARN 5058 off}
 
 // Decrypt one 16-byte block. State is column-major: state[r + 4*c].
 procedure AesDecryptBlock(const InBlock: array of Byte;
@@ -333,7 +352,26 @@ begin
     Move(Data[0], Result[0], Length(Result));
 end;
 
+{$WARN 5057 on}
+{$WARN 5058 on}
+
 { ===== JSON helpers ===== }
+
+// JSON scalar -> string without raising (AsString alone is unsafe on booleans).
+function JsonValueToStr(const D: TJSONData): string;
+begin
+  case D.JSONType of
+    jtString, jtNumber:
+      Result := D.AsString;
+    jtBoolean:
+      if D.AsBoolean then
+        Result := 'true'
+      else
+        Result := 'false';
+  else
+    Result := '';
+  end;
+end;
 
 function ObjGetString(Obj: TJSONObject; const Key: string): string;
 var
@@ -344,12 +382,7 @@ begin
     Exit;
   D := Obj.Find(Key);
   if D <> nil then
-    Result := D.AsString;
-end;
-
-function ConfigObj(ds: TDBeaverDataSource): TJSONObject;
-begin
-  Result := ds.Configuration;
+    Result := JsonValueToStr(D);
 end;
 
 function ConfigStr(ds: TDBeaverDataSource; const Key: string): string;
@@ -361,7 +394,7 @@ begin
     Exit;
   D := ds.Configuration.Find(Key);
   if D <> nil then
-    Result := D.AsString;
+    Result := JsonValueToStr(D);
 end;
 
 function ConfigProps(ds: TDBeaverDataSource): TJSONObject;
@@ -387,14 +420,17 @@ begin
     Exit;
   D := Props.Find(Key);
   if D <> nil then
-    Result := D.AsString;
+    Result := JsonValueToStr(D);
 end;
 
 { ===== public API ===== }
 
 function DBeaverFindWorkspace(const Explicit: string): string;
 var
-  Home, AppData: string;
+  Home: string;
+  {$IFDEF MSWINDOWS}
+  AppData: string;
+  {$ENDIF}
 
   function Exists(const P: string): Boolean;
   begin
@@ -412,7 +448,9 @@ begin
   Home := GetEnvironmentVariable('HOME');
   if Home = '' then
     Home := '.';
+  {$IFDEF MSWINDOWS}
   AppData := GetEnvironmentVariable('APPDATA');
+  {$ENDIF}
   {$IFDEF MSWINDOWS}
   if Exists(AppData + '\DBeaverData\workspace6\General\.dbeaver') then
     Result := AppData + '\DBeaverData\workspace6\General\.dbeaver\';
@@ -455,73 +493,91 @@ begin
   Path := IncludeTrailingPathDelimiter(Workspace) + 'data-sources.json';
   if not FileExists(Path) then
     Exit;
-  fs := TFileStream.Create(Path, fmOpenRead or fmShareDenyNone);
+  fs := nil;
   Parser := nil;
   Root := nil;
   try
-    Parser := TJSONParser.Create(fs, [joUTF8]);
-    Data := Parser.Parse;
-    if (Data = nil) or (Data.JSONType <> jtObject) then
-      Exit;
-    Root := Data as TJSONObject;
-    RootAlive := Root;
-
-    DataSources := TDBeaverDataSourceMap.Create;
-    Folders := nil;
-
-    // Folders
-    Data := Root.Find('folders');
-    if (Data <> nil) and (Data.JSONType = jtObject) then
-    begin
-      Flds := Data as TJSONObject;
-      for i := 0 to Flds.Count - 1 do
+    try
+      fs := TFileStream.Create(Path, fmOpenRead or fmShareDenyNone);
+      Parser := TJSONParser.Create(fs, [joUTF8]);
+      Data := Parser.Parse;
+      if Data = nil then
+        Exit;
+      if Data.JSONType <> jtObject then
       begin
-        FolderObj := Flds.Items[i] as TJSONObject;
-        fld.Id := Flds.Names[i];
-        fld.Name := ObjGetString(FolderObj, 'name');
-        fld.ParentId := ObjGetString(FolderObj, 'parentFolder');
-        SetLength(Folders, Length(Folders) + 1);
-        Folders[High(Folders)] := fld;
+        Data.Free;
+        Exit;
       end;
-    end;
+      Root := Data as TJSONObject;
+      RootAlive := Root;
 
-    // Connections
-    Data := Root.Find('connections');
-    if (Data <> nil) and (Data.JSONType = jtObject) then
-    begin
-      Conns := Data as TJSONObject;
-      for i := 0 to Conns.Count - 1 do
+      DataSources := TDBeaverDataSourceMap.Create;
+
+      // Folders
+      Data := Root.Find('folders');
+      if (Data <> nil) and (Data.JSONType = jtObject) then
       begin
-        ds.Id := Conns.Names[i];
-        Conn := Conns.Items[i] as TJSONObject;
-        ds.Provider := ObjGetString(Conn, 'provider');
-        ds.Driver := ObjGetString(Conn, 'driver');
-        ds.Name := ObjGetString(Conn, 'name');
-        ds.FolderId := ObjGetString(Conn, 'folder');
-        Data := Conn.Find('configuration');
-        if (Data <> nil) and (Data.JSONType = jtObject) then
-          ds.Configuration := Data as TJSONObject
-        else
-          ds.Configuration := nil;
-        DataSources.Add(ds.Id, ds);
-        // Configuration object is owned by RootAlive; the map stores a copy of
-        // the record (TJSONObject pointer copied by value).
+        Flds := Data as TJSONObject;
+        for i := 0 to Flds.Count - 1 do
+        begin
+          FolderObj := Flds.Items[i] as TJSONObject;
+          fld.Id := Flds.Names[i];
+          fld.Name := ObjGetString(FolderObj, 'name');
+          fld.ParentId := ObjGetString(FolderObj, 'parentFolder');
+          SetLength(Folders, Length(Folders) + 1);
+          Folders[High(Folders)] := fld;
+        end;
       end;
+
+      // Connections
+      Data := Root.Find('connections');
+      if (Data <> nil) and (Data.JSONType = jtObject) then
+      begin
+        Conns := Data as TJSONObject;
+        for i := 0 to Conns.Count - 1 do
+        begin
+          ds.Id := Conns.Names[i];
+          Conn := Conns.Items[i] as TJSONObject;
+          ds.Provider := ObjGetString(Conn, 'provider');
+          ds.Driver := ObjGetString(Conn, 'driver');
+          ds.Name := ObjGetString(Conn, 'name');
+          ds.FolderId := ObjGetString(Conn, 'folder');
+          Data := Conn.Find('configuration');
+          if (Data <> nil) and (Data.JSONType = jtObject) then
+            ds.Configuration := Data as TJSONObject
+          else
+            ds.Configuration := nil;
+          DataSources.Add(ds.Id, ds);
+          // Configuration object is owned by RootAlive; the map stores a copy
+          // of the record (TJSONObject pointer copied by value).
+        end;
+      end;
+      Result := True;
+    except
+      // Malformed data-sources.json must not raise into the UI: fail
+      // gracefully (Result stays False; everything is cleaned up below).
+      Result := False;
     end;
-    Result := True;
   finally
     Parser.Free;
     fs.Free;
-    // RootAlive is returned to caller (not freed here). On failure, free it.
-    if (not Result) and Assigned(Root) then
+    // RootAlive is returned to caller (not freed here). On failure, clean up.
+    if not Result then
     begin
-      Root.Free;
+      if Assigned(Root) then
+      begin
+        Root.Free;
+        Root := nil;
+      end;
       RootAlive := nil;
+      DataSources.Free;
+      DataSources := nil;
+      SetLength(Folders, 0);
     end;
   end;
 end;
 
-function DBeaverLoadCredentials(const Workspace: string;
+function DBeaverLoadCredentials(const CredentialsFile: string;
   out Creds: TDBeaverCredentialsMap;
   out Decrypted: Boolean): Boolean;
 var
@@ -538,7 +594,7 @@ begin
   Result := False;
   Creds := nil;
   Decrypted := False;
-  Path := IncludeTrailingPathDelimiter(Workspace) + 'credentials-config.json';
+  Path := CredentialsFile;
   if not FileExists(Path) then
     Exit;
   Result := True; // file existed
@@ -591,25 +647,76 @@ begin
   Parser := TJSONParser.Create(S, [joUTF8]);
   JsonData := nil;
   try
-    JsonData := Parser.Parse;
-    if (JsonData = nil) or (JsonData.JSONType <> jtObject) then
-      Exit;
-    Root := JsonData as TJSONObject;
-    Decrypted := True;
-    for i := 0 to Root.Count - 1 do
-    begin
-      ConnObj := Root.Items[i] as TJSONObject;
-      Node := ConnObj.Find('#connection') as TJSONObject;
-      if Node = nil then
-        Continue;
-      cr.User := ObjGetString(Node, 'user');
-      cr.Password := ObjGetString(Node, 'password');
-      Creds.Add(Root.Names[i], cr);
+    try
+      JsonData := Parser.Parse;
+      if (JsonData = nil) or (JsonData.JSONType <> jtObject) then
+        Exit;
+      Root := JsonData as TJSONObject;
+      Decrypted := True;
+      for i := 0 to Root.Count - 1 do
+      begin
+        ConnObj := Root.Items[i] as TJSONObject;
+        Node := ConnObj.Find('#connection') as TJSONObject;
+        if Node = nil then
+          Continue;
+        cr.User := ObjGetString(Node, 'user');
+        cr.Password := ObjGetString(Node, 'password');
+        Creds.Add(Root.Names[i], cr);
+      end;
+    except
+      // Malformed credentials JSON must never abort the import: keep whatever
+      // was parsed; entries without a recovered password fall back to
+      // LoginPrompt on connect.
     end;
   finally
     JsonData.Free;
     Parser.Free;
   end;
+end;
+
+function DBeaverFolderPath(const Folders: TDBeaverFolderArray; const FolderId: string): string;
+var
+  Chain, Id, Seg: string;
+  i, Depth, Found: Integer;
+
+  function SanitizeSeg(const S: string): string;
+  var
+    k: Integer;
+  begin
+    Result := S;
+    for k := Length(Result) downto 1 do
+      if (Result[k] = '/') or (Result[k] = ':') or (Result[k] = #0) then
+        Result[k] := '_';
+  end;
+
+begin
+  Result := '';
+  Id := FolderId;
+  Chain := '';
+  Depth := 0;
+  // Walk parentFolder links upward (cycle-safe). Unknown ids drop the rest
+  // of the chain instead of failing the whole import.
+  while (Id <> '') and (Depth < 32) do
+  begin
+    Found := -1;
+    for i := 0 to High(Folders) do
+      if Folders[i].Id = Id then
+      begin
+        Found := i;
+        Break;
+      end;
+    if Found < 0 then
+      Break;
+    Seg := Folders[Found].Name;
+    if Seg = '' then
+      Seg := Folders[Found].Id;
+    Chain := SanitizeSeg(Seg) + '/' + Chain;
+    Id := Folders[Found].ParentId;
+    Inc(Depth);
+  end;
+  if Chain <> '' then
+    SetLength(Chain, Length(Chain) - 1);
+  Result := Chain;
 end;
 
 function DBeaverDetectEngine(const Provider, Driver: string): TDBeaverEngine;
@@ -691,7 +798,7 @@ begin
 end;
 
 function DBeaverImport(const Workspace: string; TryPasswords: Boolean;
-  out AResult: TDBeaverImportResult): Boolean;
+  const CredentialsFile: string; out AResult: TDBeaverImportResult): Boolean;
 var
   Root: TJSONObject;
   DataSources: TDBeaverDataSourceMap;
@@ -703,6 +810,7 @@ var
   cr: TDBeaverCredentials;
   Entry: TDBeaverImportEntry;
   SPort, SslMode: string;
+  CredPath: string;
   Host2, Db2: string;
   Port2: Integer;
 begin
@@ -716,11 +824,15 @@ begin
     Exit(False);
 
   Creds := nil;
+  CredsDecrypted := False;
   try
     if TryPasswords then
-      DBeaverLoadCredentials(Workspace, Creds, CredsDecrypted)
-    else
-      CredsDecrypted := False;
+    begin
+      CredPath := CredentialsFile;
+      if CredPath = '' then
+        CredPath := IncludeTrailingPathDelimiter(Workspace) + 'credentials-config.json';
+      DBeaverLoadCredentials(CredPath, Creds, CredsDecrypted);
+    end;
     AResult.CredentialsDecrypted := CredsDecrypted;
 
     for i := 0 to DataSources.Count - 1 do
@@ -731,10 +843,25 @@ begin
         Entry.Name := ds.Id;
       Entry.Engine := DBeaverDetectEngine(ds.Provider, ds.Driver);
       Entry.Reason := '';
+      Entry.FolderPath := DBeaverFolderPath(Folders, ds.FolderId);
 
       if Entry.Engine = dbeNone then
       begin
         Entry.Reason := 'Unsupported provider/driver: ' + ds.Provider + '/' + ds.Driver;
+        // Clear per-connection fields so a skipped entry never carries stale
+        // data from the previous loop iteration.
+        Entry.Host := '';
+        Entry.Port := 0;
+        Entry.User := '';
+        Entry.Password := '';
+        Entry.Database := '';
+        Entry.SslMode := '';
+        Entry.WantsSSL := False;
+        Entry.SshHost := '';
+        Entry.SshPort := 0;
+        Entry.SshUser := '';
+        Entry.SshPrivateKey := '';
+        Entry.HasPassword := False;
         Inc(AResult.SkippedCount);
       end
       else

@@ -37,6 +37,8 @@ type
   private
     function EngineToNetType(Engine: TDBeaverEngine): TNetType;
     function UniqueSessionPath(const ParentPath, Name: string): string;
+    function IsFolderSession(const Path: string): Boolean;
+    function EnsureFolderChain(const FolderPath: string): string;
     function ImportEntry(const Entry: TDBeaverImportEntry): string;
   public
   end;
@@ -46,7 +48,7 @@ var
 
 implementation
 
-uses main, connections;
+uses connections;
 
 {$R *.lfm}
 {$I const.inc}
@@ -142,13 +144,77 @@ begin
   Result := Candidate;
 end;
 
+
+// True when Path exists as a session key and carries the folder flag.
+function TfrmDBeaverImport.IsFolderSession(const Path: string): Boolean;
+begin
+  Result := False;
+  if not AppSettings.SessionPathExists(Path) then
+    Exit;
+  AppSettings.SessionPath := Path;
+  // asSessionFolder is session-scoped, so this read keeps the current path.
+  Result := AppSettings.ReadBool(asSessionFolder);
+end;
+
+
+// Ensure a '/'-joined folder chain exists: create missing folder sessions,
+// reuse existing folders, suffix around collisions with plain sessions.
+// Returns the actual chain ('' = root / no folder).
+function TfrmDBeaverImport.EnsureFolderChain(const FolderPath: string): string;
+var
+  Parts: TStringList;
+  i: Integer;
+  Parent, Seg, Candidate, Unique: string;
+  Sess: TConnectionParameters;
+begin
+  Result := '';
+  if FolderPath = '' then
+    Exit;
+  Parts := TStringList.Create;
+  try
+    Parts.Delimiter := '/';
+    Parts.StrictDelimiter := True;
+    Parts.DelimitedText := FolderPath;
+    Parent := '';
+    for i := 0 to Parts.Count - 1 do
+    begin
+      Seg := ValidFilename(Parts[i]);
+      if Seg = '' then
+        Continue;
+      Candidate := Parent + Seg;
+      if not AppSettings.SessionPathExists(Candidate) then
+        Unique := Candidate
+      else if IsFolderSession(Candidate) then
+        Unique := Candidate              // reuse the existing folder
+      else
+        Unique := UniqueSessionPath(Parent, Seg); // occupied by a session
+      if not AppSettings.SessionPathExists(Unique) then
+      begin
+        Sess := TConnectionParameters.Create;
+        try
+          Sess.IsFolder := True;
+          Sess.SessionPath := Unique;
+          Sess.SaveToRegistry;
+        finally
+          Sess.Free;
+        end;
+      end;
+      Parent := Unique + '/';
+    end;
+    Result := Copy(Parent, 1, Length(Parent) - 1);
+    AppSettings.ResetPath;
+  finally
+    Parts.Free;
+  end;
+end;
+
 // Persist one import entry as a HeidiSQL session. Returns the created
 // SessionPath (or '' on skip). v1 imports connections flat at the root;
 // DBeaver folders are not preserved (future enhancement).
 function TfrmDBeaverImport.ImportEntry(const Entry: TDBeaverImportEntry): string;
 var
   Sess: TConnectionParameters;
-  Path: string;
+  Path, Parent: string;
 begin
   Result := '';
   if Entry.Engine = dbeNone then
@@ -183,7 +249,10 @@ begin
       Sess.SSHPrivateKey := Entry.SshPrivateKey;
     end;
 
-    Path := UniqueSessionPath('', Entry.Name);
+    Parent := EnsureFolderChain(Entry.FolderPath);
+    if Parent <> '' then
+      Parent := Parent + '/';
+    Path := UniqueSessionPath(Parent, Entry.Name);
     Sess.SessionPath := Path;
     Sess.SaveToRegistry;
     Result := Path;
@@ -194,30 +263,39 @@ end;
 
 procedure TfrmDBeaverImport.btnImportClick(Sender: TObject);
 var
-  Ws, Summary, Status: string;
+  Ws, CredFile, Summary, Status: string;
   Res: TDBeaverImportResult;
   i: Integer;
   E: TDBeaverImportEntry;
-  Created, Skipped, NeedsPw: Integer;
+  Created, Skipped, NeedsPw, Errors: Integer;
 begin
   if editDataSources.Text = '' then
   begin
     MessageDialog(_('Please select a DBeaver data-sources.json file.'), mtWarning, [mbOK]);
     Exit;
   end;
-  // Workspace = directory containing data-sources.json (and credentials file).
-  Ws := ExtractFilePath(editDataSources.Text);
+  // Workspace = directory containing data-sources.json. Accept a file path or
+  // the directory itself.
+  if DirectoryExists(editDataSources.Text) then
+    Ws := IncludeTrailingPathDelimiter(editDataSources.Text)
+  else
+    Ws := ExtractFilePath(editDataSources.Text);
   if Ws = '' then
     Ws := '.';
+  // Explicit credentials file (optional); a directory gets the default name.
+  CredFile := editCredentials.Text;
+  if DirectoryExists(CredFile) then
+    CredFile := IncludeTrailingPathDelimiter(CredFile) + 'credentials-config.json';
 
   memoResult.Clear;
   Created := 0;
   Skipped := 0;
   NeedsPw := 0;
+  Errors := 0;
 
   Screen.Cursor := crHourGlass;
   try
-    if not DBeaverImport(Ws, chkImportPasswords.Checked, Res) then
+    if not DBeaverImport(Ws, chkImportPasswords.Checked, CredFile, Res) then
     begin
       memoResult.Lines.Add('Could not read DBeaver data-sources.json in:');
       memoResult.Lines.Add(Ws);
@@ -233,7 +311,17 @@ begin
         memoResult.Lines.Add(Format('- [skipped] %s (%s)', [E.Name, E.Reason]));
         Continue;
       end;
-      Status := ImportEntry(E);
+      // One failing session must not abort the remaining imports.
+      try
+        Status := ImportEntry(E);
+      except
+        on Ex: Exception do
+        begin
+          Inc(Errors);
+          memoResult.Lines.Add(Format('- [error] %s: %s', [E.Name, Ex.Message]));
+          Continue;
+        end;
+      end;
       if Status <> '' then
       begin
         Inc(Created);
@@ -252,6 +340,8 @@ begin
 
   Summary := Format('Imported: %d   Skipped: %d   Needs password: %d',
     [Created, Skipped, NeedsPw]);
+  if Errors > 0 then
+    Summary := Summary + Format('   Errors: %d', [Errors]);
   if chkImportPasswords.Checked and (not Res.CredentialsDecrypted) and (Created > 0) then
     Summary := Summary + sLineBreak + 'Note: credentials file could not be decrypted; ' +
       'imported sessions will prompt for a password.';

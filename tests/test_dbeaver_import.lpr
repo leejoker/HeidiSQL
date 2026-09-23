@@ -219,7 +219,7 @@ begin
   ct := EncryptFixture(Plain);
   WriteBytes(Tmp + 'credentials-config.json', ct);
   cr := nil;
-  if DBeaverLoadCredentials(Tmp, cr, Decrypted) then
+  if DBeaverLoadCredentials(Tmp + 'credentials-config.json', cr, Decrypted) then
   begin
     Check('credentials file existed', True);
     Check('credentials decrypted', Decrypted);
@@ -259,7 +259,7 @@ begin
     Move(Raw[1], RawBytes[0], Length(Raw));
   WriteBytes(Tmp + 'credentials-config.json', RawBytes);
   cr := nil;
-  if DBeaverLoadCredentials(Tmp, cr, Decrypted) then
+  if DBeaverLoadCredentials(Tmp + 'credentials-config.json', cr, Decrypted) then
   begin
     Check('fixture decrypted', Decrypted);
     if cr <> nil then
@@ -293,7 +293,7 @@ begin
   WriteFile(Tmp + 'credentials-config.json',
     '{"x":{"#connection":{"user":"u","password":"p"}}}');
   cr := nil;
-  DBeaverLoadCredentials(Tmp, cr, Decrypted);
+  DBeaverLoadCredentials(Tmp + 'credentials-config.json', cr, Decrypted);
   Check('plain json decrypted', Decrypted);
   if cr <> nil then
   begin
@@ -317,7 +317,7 @@ begin
   Tmp := GetTempDir + 'dbimpmiss-' + IntToStr(GetTickCount64) + PathDelim;
   CreateDir(Tmp);
   cr := nil;
-  Check('missing returns false', DBeaverLoadCredentials(Tmp, cr, Decrypted) = False);
+  Check('missing returns false', DBeaverLoadCredentials(Tmp + 'credentials-config.json', cr, Decrypted) = False);
   Check('missing -> nil map', cr = nil);
   RemoveDir(Tmp);
 end;
@@ -382,7 +382,7 @@ begin
   ct := EncryptFixture('{"pg-abc":{"#connection":{"user":"readonly","password":"s3cret"}},"redis-xyz":{"#connection":{"user":"","password":"rwpw"}}}');
   WriteBytes(Tmp + 'credentials-config.json', ct);
 
-  if DBeaverImport(Tmp, True, r) then
+  if DBeaverImport(Tmp, True, '', r) then
   begin
     Check('import succeeded', True);
     Check('imported count = 2', r.ImportedCount = 2);
@@ -439,7 +439,7 @@ begin
   CreateDir(Tmp);
   WriteFile(Tmp + 'data-sources.json',
     '{"connections":{"pg-1":{"provider":"postgresql","driver":"postgres-jdbc","name":"pg","configuration":{"host":"h","port":"5432"}}}}');
-  if DBeaverImport(Tmp, True, r) then
+  if DBeaverImport(Tmp, True, '', r) then
   begin
     Check('imported=1', r.ImportedCount = 1);
     Check('needs-password=1', r.NeedsPasswordCount = 1);
@@ -456,7 +456,7 @@ var
   r: TDBeaverImportResult;
 begin
   writeln('Import missing workspace');
-  Check('missing -> false', DBeaverImport('/nonexistent/path/xyz', True, r) = False);
+  Check('missing -> false', DBeaverImport('/nonexistent/path/xyz', True, '', r) = False);
 end;
 
 procedure TestNameFallbackToId;
@@ -469,7 +469,7 @@ begin
   CreateDir(Tmp);
   WriteFile(Tmp + 'data-sources.json',
     '{"connections":{"pg-abc":{"provider":"postgresql","driver":"postgres-jdbc","configuration":{"host":"h","port":"5432"}}}}');
-  if DBeaverImport(Tmp, False, r) then
+  if DBeaverImport(Tmp, False, '', r) then
   begin
     Check('one entry', Length(r.Entries) = 1);
     if Length(r.Entries) = 1 then
@@ -477,6 +477,115 @@ begin
   end
   else
     Check('import ok', False);
+  DeleteFile(Tmp + 'data-sources.json');
+  RemoveDir(Tmp);
+end;
+
+procedure TestMalformedDataSources;
+var
+  Tmp: string;
+  r: TDBeaverImportResult;
+begin
+  writeln('malformed data-sources.json degrades gracefully');
+  Tmp := GetTempDir + 'dbimpbad-' + IntToStr(GetTickCount64) + PathDelim;
+  CreateDir(Tmp);
+  WriteFile(Tmp + 'data-sources.json', '{"connections": {');
+  Check('malformed ds -> false', DBeaverImport(Tmp, True, '', r) = False);
+  Check('malformed ds -> no entries', Length(r.Entries) = 0);
+  DeleteFile(Tmp + 'data-sources.json');
+  RemoveDir(Tmp);
+end;
+
+procedure TestMalformedCredentialsContinue;
+var
+  Tmp: string;
+  r: TDBeaverImportResult;
+begin
+  writeln('malformed credentials JSON does not abort the import');
+  Tmp := GetTempDir + 'dbimpbc-' + IntToStr(GetTickCount64) + PathDelim;
+  CreateDir(Tmp);
+  WriteFile(Tmp + 'data-sources.json',
+    '{"connections":{"pg-1":{"provider":"postgresql","driver":"postgres-jdbc","name":"pg","configuration":{"host":"h","port":"5432"}}}}');
+  WriteFile(Tmp + 'credentials-config.json', '{"broken":');
+  if DBeaverImport(Tmp, True, '', r) then
+  begin
+    Check('import still succeeds', True);
+    Check('credentials not decrypted', not r.CredentialsDecrypted);
+    Check('entry present', Length(r.Entries) = 1);
+    Check('needs-password = 1', r.NeedsPasswordCount = 1);
+  end
+  else
+    Check('import ok', False);
+  DeleteFile(Tmp + 'data-sources.json');
+  DeleteFile(Tmp + 'credentials-config.json');
+  RemoveDir(Tmp);
+end;
+
+procedure TestExplicitCredentialsPath;
+var
+  Tmp: string;
+  r: TDBeaverImportResult;
+begin
+  writeln('explicit credentials file path');
+  Tmp := GetTempDir + 'dbimpex-' + IntToStr(GetTickCount64) + PathDelim;
+  CreateDir(Tmp);
+  WriteFile(Tmp + 'data-sources.json',
+    '{"connections":{"pg-1":{"provider":"postgresql","driver":"postgres-jdbc","name":"pg","configuration":{"host":"h","port":"5432","user":"alice"}}}}');
+  WriteFile(Tmp + 'elsewhere.json',
+    '{"pg-1":{"#connection":{"user":"alice","password":"s3cret"}}}');
+  if DBeaverImport(Tmp, True, Tmp + 'elsewhere.json', r) then
+  begin
+    Check('credentials decrypted', r.CredentialsDecrypted);
+    Check('one entry', Length(r.Entries) = 1);
+    if Length(r.Entries) = 1 then
+    begin
+      Check('password recovered', r.Entries[0].HasPassword);
+      CheckEq('password value', r.Entries[0].Password, 's3cret');
+      Check('needs-password = 0', r.NeedsPasswordCount = 0);
+    end;
+  end
+  else
+    Check('import ok', False);
+  DeleteFile(Tmp + 'data-sources.json');
+  DeleteFile(Tmp + 'elsewhere.json');
+  RemoveDir(Tmp);
+end;
+
+procedure TestFolderPath;
+var
+  F: TDBeaverFolderArray;
+  Tmp: string;
+  r: TDBeaverImportResult;
+begin
+  writeln('folder chain resolution');
+  SetLength(F, 2);
+  F[0].Id := 'f1'; F[0].Name := 'Work'; F[0].ParentId := '';
+  F[1].Id := 'f2'; F[1].Name := 'Dev'; F[1].ParentId := 'f1';
+  CheckEq('empty id', DBeaverFolderPath(F, ''), '');
+  CheckEq('unknown id', DBeaverFolderPath(F, 'zzz'), '');
+  CheckEq('flat folder', DBeaverFolderPath(F, 'f1'), 'Work');
+  CheckEq('nested folder', DBeaverFolderPath(F, 'f2'), 'Work/Dev');
+  F[1].ParentId := 'missing';
+  CheckEq('orphan parent keeps leaf', DBeaverFolderPath(F, 'f2'), 'Dev');
+  SetLength(F, 1);
+  F[0].Id := 'fx'; F[0].Name := 'A/B:C'; F[0].ParentId := '';
+  CheckEq('separators sanitized', DBeaverFolderPath(F, 'fx'), 'A_B_C');
+
+  // end-to-end: the entry carries the resolved folder chain
+  Tmp := GetTempDir + 'dbimpfl-' + IntToStr(GetTickCount64) + PathDelim;
+  CreateDir(Tmp);
+  WriteFile(Tmp + 'data-sources.json',
+    '{"folders":{"fld1":{"name":"Work","description":""}},' +
+    '"connections":{"pg-1":{"provider":"postgresql","driver":"postgres-jdbc","name":"pg",' +
+    '"folder":"fld1","configuration":{"host":"h","port":"5432"}}}}');
+  if DBeaverImport(Tmp, False, '', r) then
+  begin
+    Check('e2e one entry', Length(r.Entries) = 1);
+    if Length(r.Entries) = 1 then
+      CheckEq('e2e folder path', r.Entries[0].FolderPath, 'Work');
+  end
+  else
+    Check('e2e import ok', False);
   DeleteFile(Tmp + 'data-sources.json');
   RemoveDir(Tmp);
 end;
@@ -494,6 +603,10 @@ begin
   TestImportNoCredentials;
   TestImportMissingWorkspace;
   TestNameFallbackToId;
+  TestMalformedDataSources;
+  TestMalformedCredentialsContinue;
+  TestExplicitCredentialsPath;
+  TestFolderPath;
   writeln;
   writeln('Total: ', Pass, ' passed, ', Fail, ' failed');
   if Fail > 0 then

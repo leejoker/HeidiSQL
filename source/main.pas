@@ -282,6 +282,7 @@ type
     actExecuteSelection: TAction;
     ExportSettings1: TMenuItem;
     Importsettings1: TMenuItem;
+    ImportDBeaverSessions1: TMenuItem;
     menuSupportForum: TMenuItem;
     actExportData: TAction;
     actExecuteCurrentQuery: TAction;

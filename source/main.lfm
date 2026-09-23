@@ -4358,6 +4358,7 @@ object MainForm: TMainForm
     object actImportDBeaverSessions: TAction
       Category = 'Export/Import'
       Caption = 'Import DBeaver sessions ...'
+      ImageIndex = 101
       OnExecute = actImportDBeaverSessionsExecute
     end
     object actPreferences: TAction
