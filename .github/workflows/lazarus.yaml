@@ -32,14 +32,35 @@ jobs:
 
         steps:
         - name: Checkout source code
-          uses: actions/checkout@v4
+          uses: actions/checkout@v6
 
-        - name: Install Lazarus
-          if: ${{ matrix.operating-system != 'ubuntu-latest' }}
-          uses: gcarreno/setup-lazarus@v3
-          with:
-            lazarus-version: ${{ matrix.lazarus-versions }}
-            with-cache: false
+        - name: Install Lazarus 4.8 (Windows)
+          if: ${{ matrix.operating-system == 'windows-latest' }}
+          shell: pwsh
+          run: |
+            $installer = "${env:RUNNER_TEMP}\lazarus-4.8.exe"
+            curl.exe -L --retry 3 -o $installer "https://sourceforge.net/projects/lazarus/files/Lazarus%20Windows%2064%20bits/Lazarus%204.8/lazarus-4.8-fpc-3.2.2-win64.exe/download"
+            if ((Get-Item $installer).Length -lt 100MB) { throw "Lazarus installer download failed: file too small" }
+            $lazarusDir = "${env:RUNNER_TEMP}\lazarus"
+            Start-Process -FilePath $installer -ArgumentList "/VERYSILENT", "/SP-", "/SUPPRESSMSGBOXES", "/DIR=$lazarusDir" -Wait -NoNewWindow
+            Add-Content -Path $env:GITHUB_PATH -Value $lazarusDir
+            Add-Content -Path $env:GITHUB_PATH -Value "$lazarusDir\fpc\3.2.2\bin\x86_64-win64"
+
+        - name: Install Lazarus 4.8 (macOS)
+          if: ${{ matrix.operating-system == 'macos-15' }}
+          run: |
+            wget -q "https://sourceforge.net/projects/lazarus/files/Lazarus%20macOS%20x86-64/Lazarus%204.8/fpc-3.2.4rc1a.intelarm64-macosx.dmg" -O "$RUNNER_TEMP/fpc.dmg"
+            wget -q "https://sourceforge.net/projects/lazarus/files/Lazarus%20macOS%20aarch64/Lazarus%204.8/lazarus-darwin-aarch64-4.8.zip" -O "$RUNNER_TEMP/lazarus.zip"
+            sudo hdiutil attach "$RUNNER_TEMP/fpc.dmg"
+            FPC_VOL=$(ls -d /Volumes/fpc* | head -1)
+            FPC_PKG=$(find "$FPC_VOL" -maxdepth 1 -name "*.pkg" | head -1)
+            sudo installer -package "$FPC_PKG" -target /
+            sudo hdiutil detach "$FPC_VOL"
+            xattr -cr "$RUNNER_TEMP/lazarus.zip"
+            unzip -q "$RUNNER_TEMP/lazarus.zip" -d "$RUNNER_TEMP"
+            sed -i '' 's|"/Developer/lazarus/"|"'$RUNNER_TEMP'/lazarus/"|g' "$RUNNER_TEMP/lazarus/config/environmentoptions.xml" 2>/dev/null || true
+            sudo ln -sf "$RUNNER_TEMP/lazarus/lazbuild" /usr/local/bin/lazbuild
+            echo "$RUNNER_TEMP/lazarus" >> $GITHUB_PATH
 
         - name: Install Lazarus 4.8 (Ubuntu)
           if: ${{ matrix.operating-system == 'ubuntu-latest' }}
@@ -47,6 +68,7 @@ jobs:
             wget -q https://sourceforge.net/projects/lazarus/files/Lazarus%20Linux%20amd64%20DEB/Lazarus%204.8/fpc-laz_3.2.2-210709_amd64.deb -O /tmp/fpc-laz.deb
             wget -q https://sourceforge.net/projects/lazarus/files/Lazarus%20Linux%20amd64%20DEB/Lazarus%204.8/fpc-src_3.2.2-210709_amd64.deb -O /tmp/fpc-src.deb
             wget -q https://sourceforge.net/projects/lazarus/files/Lazarus%20Linux%20amd64%20DEB/Lazarus%204.8/lazarus-project_4.8.0-0_amd64.deb -O /tmp/lazarus.deb
+            sudo apt-get update
             sudo apt-get install -y /tmp/fpc-laz.deb /tmp/fpc-src.deb /tmp/lazarus.deb
             echo "/usr/lib/lazarus/4.8" >> $GITHUB_PATH
 
@@ -73,7 +95,7 @@ jobs:
 
         - name: Upload binaries Windows
           if: ${{ matrix.operating-system == 'windows-latest' && matrix.lazarus-versions == 'stable' }}
-          uses: actions/upload-artifact@v4
+          uses: actions/upload-artifact@v6
           with:
             name: ${{ matrix.operating-system }}-WIN64
             path: out/win64/heidisql.exe
@@ -86,7 +108,7 @@ jobs:
 
         - name: Upload binaries GTK
           if: ${{ matrix.operating-system == 'ubuntu-latest' && matrix.lazarus-versions == 'stable' }}
-          uses: actions/upload-artifact@v4
+          uses: actions/upload-artifact@v6
           with:
             name: ${{ matrix.operating-system }}-GTK
             path: out/gtk2/heidisql
@@ -111,7 +133,7 @@ jobs:
 
         - name: Upload binaries QT5
           if: ${{ matrix.operating-system == 'ubuntu-latest' && matrix.lazarus-versions == 'stable' }}
-          uses: actions/upload-artifact@v4
+          uses: actions/upload-artifact@v6
           with:
             name: ${{ matrix.operating-system }}-QT5
             path: out/qt5/heidisql
@@ -136,7 +158,7 @@ jobs:
 
         - name: Upload binaries QT6
           if: ${{ matrix.operating-system == 'ubuntu-latest' && matrix.lazarus-versions == 'stable' }}
-          uses: actions/upload-artifact@v4
+          uses: actions/upload-artifact@v6
           with:
             name: ${{ matrix.operating-system }}-QT6
             path: out/qt6/heidisql
@@ -147,10 +169,96 @@ jobs:
 
         - name: Upload binaries macOS
           if: ${{ matrix.operating-system == 'macos-15' && matrix.lazarus-versions == 'stable' }}
-          uses: actions/upload-artifact@v4
+          uses: actions/upload-artifact@v6
           with:
             name: ${{ matrix.operating-system }}
             path: out/macos/heidisql
+
+    build-macos-app:
+      name: macOS App Bundle
+      if: github.repository == 'HeidiSQL/HeidiSQL'
+      runs-on: macos-15
+      env:
+        GITHUB: 1
+      steps:
+      - name: Checkout source code
+        uses: actions/checkout@v6
+
+      - name: Install Lazarus 4.8 (macOS)
+        run: |
+          wget -q "https://sourceforge.net/projects/lazarus/files/Lazarus%20macOS%20x86-64/Lazarus%204.8/fpc-3.2.4rc1a.intelarm64-macosx.dmg" -O "$RUNNER_TEMP/fpc.dmg"
+          wget -q "https://sourceforge.net/projects/lazarus/files/Lazarus%20macOS%20aarch64/Lazarus%204.8/lazarus-darwin-aarch64-4.8.zip" -O "$RUNNER_TEMP/lazarus.zip"
+          sudo hdiutil attach "$RUNNER_TEMP/fpc.dmg"
+          FPC_VOL=$(ls -d /Volumes/fpc* | head -1)
+          FPC_PKG=$(find "$FPC_VOL" -maxdepth 1 -name "*.pkg" | head -1)
+          sudo installer -package "$FPC_PKG" -target /
+          sudo hdiutil detach "$FPC_VOL"
+          xattr -cr "$RUNNER_TEMP/lazarus.zip"
+          unzip -q "$RUNNER_TEMP/lazarus.zip" -d "$RUNNER_TEMP"
+          sed -i '' 's|"/Developer/lazarus/"|"'$RUNNER_TEMP'/lazarus/"|g' "$RUNNER_TEMP/lazarus/config/environmentoptions.xml" 2>/dev/null || true
+          sudo ln -sf "$RUNNER_TEMP/lazarus/lazbuild" /usr/local/bin/lazbuild
+          echo "$RUNNER_TEMP/lazarus" >> $GITHUB_PATH
+
+      - name: Import code signing certificate
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -z "${MACOS_CERTIFICATE_P12_BASE64}" ]; then
+            echo "No signing certificate configured, skipping keychain setup"
+            exit 0
+          fi
+          KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          echo "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$KEYCHAIN_PATH" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+      - name: Build HeidiSQL (macOS)
+        run: make build-macos
+
+      - name: Create, sign and notarize app bundle
+        env:
+          MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+        run: |
+          if [ -n "${MACOS_CODESIGN_IDENTITY}" ] && [ -n "${APPLE_ID}" ]; then
+            xcrun notarytool store-credentials notarytool-profile-ci \
+              --apple-id "${APPLE_ID}" \
+              --team-id "${APPLE_TEAM_ID}" \
+              --password "${APPLE_PASSWORD}"
+            export MACOS_NOTARY_PROFILE=notarytool-profile-ci
+            ./create-macos-app.sh --notarize
+          else
+            echo "Signing secrets not available, creating ad-hoc signed bundle"
+            ./create-macos-app.sh --adhoc
+          fi
+
+      - name: Zip app bundle
+        run: |
+          cd "$(pwd)"
+          rm -f heidisql-macos-app.zip
+          /usr/bin/zip -r -y heidisql-macos-app.zip heidisql.app
+
+      - name: Upload app bundle artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: macos-app-bundle
+          path: heidisql-macos-app.zip
+
+      - name: Cleanup keychain
+        if: always() && env.KEYCHAIN_PATH != ''
+        run: |
+          security delete-keychain "$KEYCHAIN_PATH" || true
 
     build-qt6arm:
       name: Linux ARM64 QT6
@@ -160,7 +268,7 @@ jobs:
 
       steps:
         - name: Checkout source code
-          uses: actions/checkout@v4
+          uses: actions/checkout@v6
 
         - name: Install Lazarus 4.8 (ARM64)
           run: |
@@ -199,7 +307,7 @@ jobs:
             make build-qt6arm
 
         - name: Upload binaries QT6 ARM64
-          uses: actions/upload-artifact@v4
+          uses: actions/upload-artifact@v6
           with:
             name: ubuntu-24.04-arm-QT6
             path: out/qt6arm/heidisql
@@ -211,11 +319,11 @@ jobs:
 
         name: Create GitHub Release
         runs-on: [ubuntu-latest]
-        needs: [build, build-qt6arm]
+        needs: [build, build-qt6arm, build-macos-app]
 
         steps:
             - name: Checkout source code
-              uses: actions/checkout@v4
+              uses: actions/checkout@v6
               with:
                 fetch-depth: 0
 
@@ -227,28 +335,35 @@ jobs:
                 echo "prev_tag=$prev_tag" >> "$GITHUB_ENV"
 
             - name: Download Ubuntu GTK
-              uses: actions/download-artifact@v4
+              uses: actions/download-artifact@v7
               with:
                 name: ubuntu-latest-GTK
                 path: out/gtk2
 
             - name: Download Ubuntu QT5
-              uses: actions/download-artifact@v4
+              uses: actions/download-artifact@v7
               with:
                 name: ubuntu-latest-QT5
                 path: out/qt5
 
             - name: Download Ubuntu QT6
-              uses: actions/download-artifact@v4
+              uses: actions/download-artifact@v7
               with:
                 name: ubuntu-latest-QT6
                 path: out/qt6
 
             - name: Download Ubuntu QT6 ARM64
-              uses: actions/download-artifact@v4
+              uses: actions/download-artifact@v7
               with:
                 name: ubuntu-24.04-arm-QT6
                 path: out/qt6arm
+            - name: Download macOS app bundle
+              uses: actions/download-artifact@v7
+              with:
+                name: macos-app-bundle
+                path: dist
+            - name: Rename macOS app bundle for release
+              run: mv dist/heidisql-macos-app.zip "dist/HeidiSQL-macos-${{ env.tag }}.zip"
 
             - name: List files
               run: |
@@ -292,7 +407,7 @@ jobs:
                 args: "${{ env.prev_tag }}..HEAD --strip header"
 
             - name: Create GitHub release
-              uses: softprops/action-gh-release@v2
+              uses: softprops/action-gh-release@v3
               with:
                 name: HeidiSQL ${{ env.tag }}
                 body: ${{ steps.git-cliff.outputs.content }}

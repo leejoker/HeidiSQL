@@ -1352,6 +1352,7 @@ type
     FProposalItems: TProposalItemList;
     FProposalLeftWidth: Integer;
     FProposalTriggeredByDot: Boolean;
+    FPendingErrorMsg: String;
 
     procedure SetDelimiter(Value: String);
     procedure DisplayRowCountStats(Sender: TBaseVirtualTree);
@@ -1391,6 +1392,7 @@ type
     procedure SetHintFontByControl(Control: TWinControl=nil);
     procedure GlobalSynEditStatusChange(Sender: TObject; Changes: TSynStatusChanges);
     procedure ColorSchemeMenuClick(Sender: TObject);
+    procedure AsyncErrorDialog(Data: PtrInt);
   public
     QueryTabs: TQueryTabList;
     ActiveObjectEditor: TDBObjectEditor;
@@ -2197,6 +2199,7 @@ begin
   FFormatSettings.ThousandSeparator := ' ';;
   FDefaultHintFontName := Screen.HintFont.Name;
   SetHintFontByControl(SynMemoQuery);
+  FPendingErrorMsg := '';
 
   // Now we are free to use certain methods, which are otherwise fired too early
   MainFormCreated := True;
@@ -2438,7 +2441,7 @@ var
   Section, Filename, BackupFilename, TabCaption: String;
   TabsIni: TIniFile;
   pid: Cardinal;
-  EditorHeight, EditorTopLine: Integer;
+  EditorHeight, HelpersWidth, EditorTopLine: Integer;
   BindParams: String;
   TabFocused: Boolean;
   TabLoadStart, TabLoadTime: UInt64;
@@ -2473,7 +2476,7 @@ begin
       TabCaption := TabsIni.ReadString(Section, TQueryTab.IdentCaption, '');
       pid := Cardinal(TabsIni.ReadInteger(Section, TQueryTab.IdentPid, 0));
       EditorHeight := TabsIni.ReadInteger(Section, TQueryTab.IdentEditorHeight, 0);
-      //HelpersWidth := TabsIni.ReadInteger(Section, TQueryTab.IdentHelpersWidth, 0);
+      HelpersWidth := TabsIni.ReadInteger(Section, TQueryTab.IdentHelpersWidth, 0);
       BindParams := TabsIni.ReadString(Section, TQueryTab.IdentBindParams, '');
       EditorTopLine := TabsIni.ReadInteger(Section, TQueryTab.IdentEditorTopLine, 1);
       TabFocused := TabsIni.ReadBool(Section, TQueryTab.IdentTabFocused, False);
@@ -2499,8 +2502,8 @@ begin
           if EditorHeight > 50 then
             Tab.pnlMemo.Height := EditorHeight;
           // Causes sporadic long-waiters:
-          //if HelpersWidth > 50 then
-          //  Tab.pnlHelpers.Width := HelpersWidth;
+          if HelpersWidth > 50 then
+            Tab.pnlHelpers.Width := HelpersWidth;
           Tab.ListBindParams.AsText := BindParams;
           Tab.BindParamsActivated := Tab.ListBindParams.Count > 0;
           Tab.Memo.TopLine := EditorTopLine;
@@ -2522,8 +2525,8 @@ begin
           if EditorHeight > 50 then
             Tab.pnlMemo.Height := EditorHeight;
           // Causes sporadic long-waiters:
-          //if HelpersWidth > 50 then
-          //  Tab.pnlHelpers.Width := HelpersWidth;
+          if HelpersWidth > 50 then
+            Tab.pnlHelpers.Width := HelpersWidth;
           Tab.ListBindParams.AsText := BindParams;
           Tab.BindParamsActivated := Tab.ListBindParams.Count > 0;
           Tab.Memo.TopLine := EditorTopLine;
@@ -6380,8 +6383,13 @@ begin
 
     except
       // Wrong WHERE clause in most cases
-      on E:EDbError do
-        ErrorDialog(E.Message);
+      on E:EDbError do begin
+        // Caution on macOS: This runs inside the grid's paint cycle, i.e. within -[NSView drawRect:].
+        // A modal dialog opened here either deadlocks AppKit's display
+        // transaction or faults inside MessageDlg. Defer it to the next message.
+        FPendingErrorMsg := E.Message;
+        Application.QueueAsyncCall(AsyncErrorDialog, 0);
+      end;
     end;
 
     vt.EndUpdate;
@@ -16069,6 +16077,17 @@ begin
     Beep;
 end;
 
+
+procedure TMainForm.AsyncErrorDialog(Data: PtrInt);
+begin
+  if FPendingErrorMsg.IsEmpty then
+    Exit;
+  try
+    ErrorDialog(FPendingErrorMsg);
+  finally
+    FPendingErrorMsg := '';
+  end;
+end;
 
 { TQueryTab }
 
