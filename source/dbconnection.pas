@@ -837,6 +837,9 @@ type
     function GetCreateCode(Obj: TDBObject): String; override;
     procedure Drop(Obj: TDBObject); override;
     function ConnectionInfo: TStringList; override;
+    { 删除指定前缀分组下的所有 key。APrefix 为空时删除无冒号的 key，
+      否则删除第一个冒号之前部分等于 APrefix 的 key。返回删除的 key 数。 }
+    function DeleteKeysByPrefix(const APrefix: String; const ADatabase: String): Int64;
     property Client: TRedisClient read FClient;
     property LastResultCount: Int64 read FLastResultCount write FLastResultCount;
   end;
@@ -11878,6 +11881,91 @@ procedure TRedisConnection.Drop(Obj: TDBObject);
 begin
   // Redis 删除键用 DEL，不是 SQL 的 DROP TABLE
   Query('DEL ' + Obj.Name);
+end;
+
+function TRedisConnection.DeleteKeysByPrefix(const APrefix: String; const ADatabase: String): Int64;
+var
+  dbNum: Integer;
+  cursor: Int64;
+  v, keyList, delReply: TRedisValue;
+  i: Integer;
+  done: Boolean;
+  keyName: String;
+  ColonPos: Integer;
+  DelArgs: array of String;
+  Batch: Integer;
+begin
+  // 切换到目标逻辑库，然后 SCAN 全量 key，按前缀分组规则筛选后分批 DEL。
+  // 前缀分组规则与 DBtreeInitNode 的 Redis 分组保持一致：
+  //   APrefix='' → 无冒号的 key
+  //   APrefix<>'' → 第一个冒号之前的部分等于 APrefix
+  Result := 0;
+  dbNum := StrToIntDef(StringReplace(ADatabase, 'db', '', [rfReplaceAll, rfIgnoreCase]), 0);
+  try
+    FClient.SelectDb(dbNum);
+  except
+    // 可能已在该库，忽略
+  end;
+
+  cursor := 0;
+  done := False;
+  Batch := 0;
+  SetLength(DelArgs, 1); // DelArgs[0] = 'DEL', 后续为 key 名
+  DelArgs[0] := 'DEL';
+  while not done do begin
+    v := FClient.Execute(['SCAN', IntToStr(cursor), 'COUNT', '200']);
+    try
+      if (v = nil) or (v.Kind <> rkArray) or (Length(v.Items) < 2) then
+        Break;
+      if v.Items[0] <> nil then
+        cursor := StrToInt64Def(v.Items[0].Str, 0)
+      else
+        cursor := 0;
+      keyList := v.Items[1];
+      if (keyList <> nil) and (keyList.Kind in [rkArray, rkSet]) then begin
+        for i := 0 to High(keyList.Items) do begin
+          if keyList.Items[i] = nil then Continue;
+          keyName := keyList.Items[i].Str;
+          ColonPos := Pos(':', keyName);
+          if APrefix = '' then begin
+            if ColonPos <> 0 then Continue;
+          end else begin
+            if (ColonPos = 0) or (Copy(keyName, 1, ColonPos - 1) <> APrefix) then Continue;
+          end;
+          // 累积到批处理（UNLINK/DEL 支持多 key），每 500 个执行一次
+          Inc(Batch);
+          SetLength(DelArgs, Batch + 1);
+          DelArgs[Batch] := keyName;
+          if Batch >= 500 then begin
+            delReply := FClient.Execute(DelArgs);
+            try
+              if (delReply <> nil) and (delReply.Kind = rkInteger) then
+                Inc(Result, delReply.Int);
+            finally
+              delReply.Free;
+            end;
+            Batch := 0;
+            SetLength(DelArgs, 1);
+          end;
+        end;
+      end;
+      if cursor = 0 then
+        done := True;
+    finally
+      v.Free;
+    end;
+  end;
+
+  // 执行剩余未满一批的 DEL
+  if Batch > 0 then begin
+    delReply := FClient.Execute(DelArgs);
+    try
+      if (delReply <> nil) and (delReply.Kind = rkInteger) then
+        Inc(Result, delReply.Int);
+    finally
+      delReply.Free;
+    end;
+  end;
 end;
 
 function TRedisConnection.ConnectionInfo: TStringList;

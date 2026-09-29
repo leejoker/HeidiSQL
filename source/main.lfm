@@ -975,7 +975,7 @@ object MainForm: TMainForm
         TabOrder = 3
         TreeOptions.AutoOptions = [toAutoDropExpand, toAutoScrollOnExpand, toAutoSort, toAutoTristateTracking, toAutoHideButtons, toAutoDeleteMovedNodes, toAutoChangeScale]
         TreeOptions.PaintOptions = [toHotTrack, toShowButtons, toShowDropmark, toShowRoot, toShowTreeLines, toThemeAware, toUseBlendedImages, toGhostedIfUnfocused, toUseExplorerTheme]
-        TreeOptions.SelectionOptions = [toFullRowSelect, toRightClickSelect]
+        TreeOptions.SelectionOptions = [toFullRowSelect, toMultiSelect, toRightClickSelect]
         OnAfterCellPaint = DBtreeAfterCellPaint
         OnBeforeCellPaint = DBtreeBeforeCellPaint
         OnChange = DBtreeChange
@@ -4210,6 +4210,12 @@ object MainForm: TMainForm
       Caption = 'New key...'
       Hint = 'Create new Redis key'
       OnExecute = actRedisNewKeyExecute
+    end
+    object actRedisDeleteGroup: TAction
+      Category = 'Database'
+      Caption = 'Delete keys by prefix...'
+      Hint = 'Delete all Redis keys under the selected prefix group'
+      OnExecute = actRedisDeleteGroupExecute
     end
     object actCreateView: TAction
       Category = 'Database'
@@ -20412,6 +20418,9 @@ object MainForm: TMainForm
     end
     object menuRedisNewKey: TMenuItem
       Action = actRedisNewKey
+    end
+    object menuRedisDeleteGroup: TMenuItem
+      Action = actRedisDeleteGroup
     end
     object Attach1: TMenuItem
       Action = actAttachDatabase

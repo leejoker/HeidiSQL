@@ -295,6 +295,7 @@ type
     actRedisPersist: TAction;
     actRedisTTL: TAction;
     actRedisNewKey: TAction;
+    actRedisDeleteGroup: TAction;
     actLoadSQL: TAction;
     menuConnections: TPopupMenu;
     menuFeaturetracker: TMenuItem;
@@ -528,6 +529,7 @@ type
     menuRedisCopyKeyName: TMenuItem;
     menuRedisSeparator: TMenuItem;
     menuRedisNewKey: TMenuItem;
+    menuRedisDeleteGroup: TMenuItem;
     menuMaintenance2: TMenuItem;
     menuEmptyTables: TMenuItem;
     menuCreateDB: TMenuItem;
@@ -910,6 +912,7 @@ type
     procedure actRedisPersistExecute(Sender: TObject);
     procedure actRedisTTLExecute(Sender: TObject);
     procedure actRedisNewKeyExecute(Sender: TObject);
+    procedure actRedisDeleteGroupExecute(Sender: TObject);
     procedure menuRedisCopyKeyNameClick(Sender: TObject);
     procedure actEmptyTablesExecute(Sender: TObject);
     procedure actExportSettingsExecute(Sender: TObject);
@@ -3903,37 +3906,47 @@ begin
   ObjectList := TDBobjectList.Create(TDBObjectDropComparer.Create, False);
 
   if DBTreeClicked(Sender) then begin
-    // drop table selected in tree view.
+    // Drop object(s) selected in tree view. Database drop always uses the
+    // focused node; object drop honours the (possibly multi) selection.
     DBObject := ActiveDBObj;
-    case DBObject.NodeType of
-      lntDb: begin
-        if MessageDialog(f_('Drop Database "%s"?', [DBObject.Database]), f_('WARNING: You will lose all objects in database %s!', [DBObject.Database]), mtCriticalConfirmation, [mbok,mbcancel]) <> mrok then
-          Abort;
-        try
-          db := DBObject.Database;
-          Node := FindDBNode(DBtree, Conn, db);
-          // Set focus on previous or next database, to prevent "Cannot drop database xyz, because it is currently in use"
-          // MS SQL on top cannot "un-use" the current database
-          SiblingDB := DBtree.GetNextSibling(Node);
-          if not Assigned(SiblingDB) then
-            SiblingDB := DBtree.GetPreviousSibling(Node);
-          if Assigned(SiblingDB) then
-            SetActiveDatabase(DBtree.Text[SiblingDB, 0], Conn)
-          else
-            SetActiveDatabase('', Conn); // Fallback if there is no sibling. Works on MySQL only.
-          Conn.Query(qDatabaseDrop, [Conn.QuoteIdent(db)]);
-          DBtree.DeleteNode(Node);
-          Conn.ClearDbObjects(db);
-          Conn.RefreshAllDatabases;
-          InvalidateVT(ListDatabases, VTREE_NOTLOADED_PURGECACHE, False);
-        except
-          on E:EDbError do
-            ErrorDialog(E.Message);
-        end;
-        Exit;
+    if DBObject.NodeType = lntDb then begin
+      if MessageDialog(f_('Drop Database "%s"?', [DBObject.Database]), f_('WARNING: You will lose all objects in database %s!', [DBObject.Database]), mtCriticalConfirmation, [mbok,mbcancel]) <> mrok then
+        Abort;
+      try
+        db := DBObject.Database;
+        Node := FindDBNode(DBtree, Conn, db);
+        // Set focus on previous or next database, to prevent "Cannot drop database xyz, because it is currently in use"
+        // MS SQL on top cannot "un-use" the current database
+        SiblingDB := DBtree.GetNextSibling(Node);
+        if not Assigned(SiblingDB) then
+          SiblingDB := DBtree.GetPreviousSibling(Node);
+        if Assigned(SiblingDB) then
+          SetActiveDatabase(DBtree.Text[SiblingDB, 0], Conn)
+        else
+          SetActiveDatabase('', Conn); // Fallback if there is no sibling. Works on MySQL only.
+        Conn.Query(qDatabaseDrop, [Conn.QuoteIdent(db)]);
+        DBtree.DeleteNode(Node);
+        Conn.ClearDbObjects(db);
+        Conn.RefreshAllDatabases;
+        InvalidateVT(ListDatabases, VTREE_NOTLOADED_PURGECACHE, False);
+      except
+        on E:EDbError do
+          ErrorDialog(E.Message);
       end;
-      lntTable..lntEvent: ObjectList.Add(ActiveDBObj);
+      Exit;
     end;
+    // Object drop: collect all selected object nodes when multiple are selected,
+    // otherwise just the focused object.
+    if DBtree.SelectedCount > 1 then begin
+      Node := GetNextNode(DBtree, nil, True);
+      while Assigned(Node) do begin
+        Obj := DBtree.GetNodeData(Node);
+        if Assigned(Obj^) and (Obj^.NodeType in [lntTable..lntEvent]) then
+          ObjectList.Add(Obj^);
+        Node := GetNextNode(DBtree, Node, True);
+      end;
+    end else if DBObject.NodeType in [lntTable..lntEvent] then
+      ObjectList.Add(ActiveDBObj);
   end else begin
     // Invoked from database tab
     Node := GetNextNode(ListTables, nil, True);
@@ -3971,8 +3984,11 @@ begin
       end;
       if Conn.SqlProvider.Has(qEnableForeignKeyChecks) then
         Conn.Query(qEnableForeignKeyChecks);
-      // Refresh ListTables + dbtree so the dropped tables are gone:
-      Conn.ClearDbObjects(ActiveDatabase);
+      // Refresh ListTables + dbtree so the dropped tables are gone. Clear the
+      // object cache for every database that contained a dropped object, so a
+      // multi-selection spanning databases refreshes correctly.
+      for DBObject in ObjectList do
+        Conn.ClearDbObjects(DBObject.Database);
       RefreshTree;
       SetActiveDatabase(Conn.Database, Conn);
     except
@@ -4778,7 +4794,18 @@ begin
   Result := TDBObjectList.Create(False);
 
   if DBTreeClicked(Sender) then begin
-    if ActiveDbObj.NodeType in NodeTypes then
+    // DBtree supports multi-selection (toMultiSelect). When more than one node is
+    // selected, iterate all selected nodes; otherwise fall back to the focused
+    // (active) object so single-node behaviour is unchanged.
+    if DBtree.SelectedCount > 1 then begin
+      Node := GetNextNode(DBtree, nil, True);
+      while Assigned(Node) do begin
+        pObj := DBtree.GetNodeData(Node);
+        if Assigned(pObj^) and (pObj^.NodeType in NodeTypes) then
+          Result.Add(pObj^);
+        Node := GetNextNode(DBtree, Node, True);
+      end;
+    end else if ActiveDbObj.NodeType in NodeTypes then
       Result.Add(ActiveDbObj);
   end else begin
     Node := GetNextNode(ListTables, nil, True);
@@ -8099,7 +8126,7 @@ end;
 procedure TMainForm.popupDBPopup(Sender: TObject);
 var
   Obj: PDBObject;
-  IsDb, IsObject: Boolean;
+  IsDb, IsObject, IsGroup: Boolean;
   Conn: TDBConnection;
 begin
   // DBtree and ListTables both use popupDB as menu
@@ -8110,6 +8137,7 @@ begin
     Obj := DBTree.GetNodeData(DBTree.FocusedNode);
     IsDb := Obj.NodeType = lntDb;
     IsObject := Obj.NodeType in [lntTable..lntEvent];
+    IsGroup := Obj.NodeType = lntGroup;
     actCreateDatabase.Enabled := (Obj.NodeType = lntNone)
       and (Obj.Connection.Parameters.NetTypeGroup in [ngMySQL, ngMSSQL, ngPgSQL]);
     actConnectionProperties.Enabled := Obj.NodeType = lntNone;
@@ -8121,8 +8149,10 @@ begin
     actCreateFunction.Enabled := actCreateProcedure.Enabled;
     actCreateTrigger.Enabled := IsDb or IsObject or (Obj.GroupType = lntTrigger);
     actCreateEvent.Enabled := IsDb or IsObject or (Obj.GroupType = lntEvent);
+    // Drop supports a multi-selection of object nodes in the tree.
     actDropObjects.Enabled := IsObject or
-      (IsDb and not Obj.Connection.Parameters.IsAnySQLite);
+      (IsDb and not Obj.Connection.Parameters.IsAnySQLite) or
+      (DBtree.SelectedCount > 1);
     // Redis 键操作菜单可见性
     actRedisRename.Visible := (Obj.Connection.Parameters.NetTypeGroup = ngRedis) and IsObject;
     actRedisExpire.Visible := (Obj.Connection.Parameters.NetTypeGroup = ngRedis) and IsObject;
@@ -8130,6 +8160,9 @@ begin
     actRedisTTL.Visible := (Obj.Connection.Parameters.NetTypeGroup = ngRedis) and IsObject;
     menuRedisCopyKeyName.Visible := (Obj.Connection.Parameters.NetTypeGroup = ngRedis) and IsObject;
     actRedisNewKey.Visible := (Obj.Connection.Parameters.NetTypeGroup = ngRedis) and (IsDb or (Obj.NodeType = lntNone));
+    // Redis 分组批量删除：仅在前缀分组节点上可见
+    actRedisDeleteGroup.Visible := (Obj.Connection.Parameters.NetTypeGroup = ngRedis) and IsGroup;
+    actRedisDeleteGroup.Enabled := actRedisDeleteGroup.Visible;
     menuRedisSeparator.Visible := (Obj.Connection.Parameters.NetTypeGroup = ngRedis);
     actDetachDatabase.Visible := Obj.Connection.Parameters.IsAnySQLite;
     actDetachDatabase.Enabled := actDetachDatabase.Visible and (Obj.NodeType = lntDb);
@@ -8162,6 +8195,7 @@ begin
     actRedisTTL.Visible := False;
     menuRedisCopyKeyName.Visible := False;
     actRedisNewKey.Visible := False;
+    actRedisDeleteGroup.Visible := False;
     menuRedisSeparator.Visible := False;
     actDetachDatabase.Visible := False;
     actEmptyTables.Enabled := True;
@@ -8416,6 +8450,43 @@ begin
   finally
     Lines.Free;
     Frm.Free;
+  end;
+end;
+
+
+procedure TMainForm.actRedisDeleteGroupExecute(Sender: TObject);
+var
+  Obj: TDBObject;
+  Conn: TRedisConnection;
+  Prefix, DisplayName, DbName: String;
+  DeletedCount: Int64;
+begin
+  // 批量删除 Redis 前缀分组下的所有 key
+  Obj := ActiveDBObj;
+  if (Obj = nil) or (Obj.Connection.Parameters.NetTypeGroup <> ngRedis) then Exit;
+  if Obj.NodeType <> lntGroup then Exit;
+  Conn := Obj.Connection as TRedisConnection;
+  Prefix := Obj.Schema; // 前缀（不含冒号），"(no prefix)" 组为空
+  DbName := Obj.Database;
+  if Prefix = '' then
+    DisplayName := _('(no prefix)')
+  else
+    DisplayName := Prefix + ':';
+  if MessageDialog(f_('Delete all keys in group "%s"?', [DisplayName]),
+    f_('This will permanently delete every key whose prefix is "%s" in %s.', [DisplayName, DbName]),
+    mtCriticalConfirmation, [mbOK, mbCancel]) <> mrOK then
+    Exit;
+  try
+    DeletedCount := Conn.DeleteKeysByPrefix(Prefix, DbName);
+    // 清除该库缓存并刷新键树
+    Conn.ClearDbObjects(DbName);
+    RefreshTree;
+    MessageDialog(f_('Deleted %s key(s) in group "%s".', [FormatNumber(DeletedCount), DisplayName]),
+      mtInformation, [mbOK]);
+    LogSQL(f_('Deleted %s Redis key(s) in group "%s" (%s)', [FormatNumber(DeletedCount), DisplayName, DbName]), lcInfo);
+  except
+    on E: ERedisError do
+      ErrorDialog(E.Message);
   end;
 end;
 
@@ -10389,8 +10460,8 @@ begin
                 Inc(ColMatchingKeys);
               end;
             end else begin
-              // 有前缀组：前缀匹配且有冒号
-              if (ColColonPos > 0) and (Copy(DBObjects[ColObjIdx].Name, 1, Length(ParentObj.Schema)) = ParentObj.Schema) then begin
+              // 有前缀组：第一个冒号之前的部分等于前缀（锚定匹配，避免 "user" 误匹配 "userextra:x"）
+              if (ColColonPos > 0) and (Copy(DBObjects[ColObjIdx].Name, 1, ColColonPos - 1) = ParentObj.Schema) then begin
                 if ColMatchingKeys = Integer(Node.Index) then begin
                   Item^ := DBObjects[ColObjIdx];
                   Break;
