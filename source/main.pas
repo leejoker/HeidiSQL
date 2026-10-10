@@ -1893,6 +1893,25 @@ begin
   AppSettings.Free;
 end;
 
+{$IFDEF DARWIN}
+function CtrlToCmdShortCut(ShortCut: TShortCut): TShortCut;
+var
+  Key: Word;
+  Shift: TShiftState;
+begin
+  // On Cocoa, ssCtrl is the physical Control key, while the Command key arrives as ssMeta.
+  // Move Ctrl+letter/digit shortcuts to Cmd, as macOS users expect Cmd+C/V/X/A/Z etc.
+  // Q, H, M and W are left alone, as Cmd+Q/H/M/W are reserved for app and window handling.
+  Result := ShortCut;
+  ShortCutToKey(ShortCut, Key, Shift);
+  if (ssCtrl in Shift)
+    and (not (ssMeta in Shift))
+    and (Key in [VK_0..VK_9, VK_A..VK_Z])
+    and (not (Key in [VK_Q, VK_H, VK_M, VK_W])) then
+    Result := KeyToShortCut(Key, Shift - [ssCtrl] + [ssMeta]);
+end;
+{$ENDIF}
+
 procedure TMainForm.FormCreate(Sender: TObject);
 var
   i, j, MonitorIndex: Integer;
@@ -2018,6 +2037,12 @@ begin
   QueryTab.spltHelpers := spltQueryHelpers;
   QueryTab.spltQuery := spltQuery;
   QueryTab.tabsetQuery := tabsetQuery;
+  {$IFDEF DARWIN}
+  // The native NSTabView frame of a TTabControl extends some pixels above its LCL bounds (see
+  // TCocoaTabControl.lclGetFrameToLayoutDelta: 6px in Lazarus 4.4, 5px in 4.8), covering
+  // spltQuery and swallowing its mouse events
+  tabsetQuery.BorderSpacing.Top := 6;
+  {$ENDIF}
   //InheritFont(QueryTab.tabsetQuery.Font);
   QueryTab.ResultTabs := TResultTabs.Create(True);
 
@@ -2117,6 +2142,22 @@ begin
   {$IFDEF WINDOWS}
     actExitApplication.Caption := 'E&xit';
     actExitApplication.ShortCut := KeyToShortCut(VK_F4, [ssAlt]);
+  {$ENDIF}
+  {$IFDEF DARWIN}
+  // Default shortcuts use Cmd instead of Ctrl, before customized ones are applied
+  for i:=0 to ActionList1.ActionCount-1 do begin
+    Action := TAction(ActionList1.Actions[i]);
+    Action.ShortCut := CtrlToCmdShortCut(Action.ShortCut);
+  end;
+  for i:=0 to SynMemoQuery.Keystrokes.Count-1 do begin
+    try
+      SynMemoQuery.Keystrokes[i].ShortCut := CtrlToCmdShortCut(SynMemoQuery.Keystrokes[i].ShortCut);
+      SynMemoQuery.Keystrokes[i].ShortCut2 := CtrlToCmdShortCut(SynMemoQuery.Keystrokes[i].ShortCut2);
+    except
+      on E:ESynKeyError do
+        LogSQL(E.Message, lcDebug);
+    end;
+  end;
   {$ENDIF}
   // Customized keyboard shortcuts
   for i:=0 to ActionList1.ActionCount-1 do begin
@@ -13469,6 +13510,7 @@ begin
   // Prevent various problems with alignment of controls. See http://www.heidisql.com/forum.php?t=18924
   QueryTab.tabsetQuery.Top := QueryTab.spltQuery.Top + QueryTab.spltQuery.Height;
   QueryTab.tabsetQuery.Align := tabsetQuery.Align;
+  QueryTab.tabsetQuery.BorderSpacing.Top := tabsetQuery.BorderSpacing.Top;
   QueryTab.tabsetQuery.Font.Assign(tabsetQuery.Font);
   QueryTab.tabsetQuery.Images := tabsetQuery.Images;
   QueryTab.tabsetQuery.ShowHint := tabsetQuery.ShowHint;

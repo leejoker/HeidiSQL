@@ -74,7 +74,7 @@ Ansgar
 ---
 
 ### Building
-Install Lazarus 4.4 and FreePascal. Then load the `.lpi` file in the root directory in the Lazarus IDE.
+Install Lazarus 4.8 and FreePascal. Then load the `.lpi` file in the root directory in the Lazarus IDE.
 Alternatively, use `/usr/bin/lazbuild heidisql.lpi` on the command line.
 
 ### Icons8 copyright

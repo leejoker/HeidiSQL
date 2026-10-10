@@ -490,6 +490,7 @@ type
       FCaseSensitivity: Integer;
       FSQLFunctions: TSQLFunctionList;
       FNamedEnums: TStringList;
+      FHexPrefix, FHexPostfix: String;
       procedure SetActive(Value: Boolean); virtual; abstract;
       procedure DoBeforeConnect; virtual;
       procedure StartSSHTunnel(var FinalHost: String; var FinalPort: Integer);
@@ -631,6 +632,8 @@ type
       property SqlProvider: TSqlProvider read FSqlProvider;
       property NamedEnums: TStringList read FNamedEnums;
       procedure GetColumnDefaultExpressions(Items: TStrings); virtual;
+      property HexPrefix: String read FHexPrefix;
+      property HexPostfix: String read FHexPostfix;
     published
       property Active: Boolean read FActive write SetActive default False;
       property Database: String read FDatabase write SetDatabase;
@@ -1014,6 +1017,7 @@ type
       constructor Create(AOwner: TComponent); override;
       destructor Destroy; override;
       procedure Execute(AddResult: Boolean=False; UseRawResult: Integer=-1); override;
+      function GetColBinData(Column: Integer; var baData: TBytes): Boolean; override;
       function Col(Column: Integer; IgnoreErrors: Boolean=False): String; overload; override;
       function ColIsPrimaryKeyPart(Column: Integer): Boolean; override;
       function ColIsUniqueKeyPart(Column: Integer): Boolean; override;
@@ -2180,6 +2184,8 @@ begin
   FQuoteChar := '"';
   FQuoteChars := '"[]';
   FNamedEnums := TStringList.Create;
+  FHexPrefix := '';
+  FHexPostfix := '';
 end;
 
 
@@ -2190,6 +2196,8 @@ begin
   inherited;
   FQuoteChar := '`';
   FQuoteChars := '`"';
+  FHexPrefix := '0x';
+  FHexPostfix := '';
   FStatementNum := 0;
   // The compiler complains that dynamic and static arrays are incompatible, so this does not work:
   // FDatatypes := MySQLDatatypes
@@ -2234,6 +2242,8 @@ var
   i: Integer;
 begin
   inherited;
+  FHexPrefix := 'x''';
+  FHexPostfix := '''';
   SetLength(FDatatypes, Length(SQLiteDatatypes));
   for i:=0 to High(SQLiteDatatypes) do
     FDatatypes[i] := SQLiteDatatypes[i];
@@ -3904,7 +3914,8 @@ var
   Value: TGridValue;
   QueryResult: Psqlite3_stmt;
   QueryStatus: Integer;
-  i, OldRowsAffected: Integer;
+  i, NumBytes, OldRowsAffected: Integer;
+  AnsiStr: AnsiString;
   CurrentSQL, NextSQL: PAnsiChar;
   StepResult: Integer;
 begin
@@ -3936,8 +3947,15 @@ begin
         Row := TGridRow.Create;
         for i:=0 to FLib.sqlite3_column_count(QueryResult)-1 do begin
           Value := TGridValue.Create;
-          Value.OldText := DecodeAPIString(FLib.sqlite3_column_text(QueryResult, i));
-          Value.OldIsNull := FLib.sqlite3_column_text(QueryResult, i) = nil;
+          if FLib.sqlite3_column_type(QueryResult, i) = SQLITE_BLOB then begin
+            NumBytes := FLib.sqlite3_column_bytes(QueryResult, i);
+            SetString(AnsiStr, PAnsiChar(FLib.sqlite3_column_blob(QueryResult, i)), NumBytes);
+            Value.OldText := String(AnsiStr);
+            Value.OldIsNull := False;
+          end else begin
+            Value.OldText := DecodeAPIString(FLib.sqlite3_column_text(QueryResult, i));
+            Value.OldIsNull := FLib.sqlite3_column_text(QueryResult, i) = nil;
+          end;
           Row.Add(Value);
         end;
         Rows.Add(Row);
@@ -5200,7 +5218,7 @@ begin
   ValuePrefix := '';
   case Datatype.Category of
     // Some special cases
-    dtcBinary: begin
+    dtcBinary, dtcSpatial: begin
       if IsHex(Text) then
         DoQuote := False;
     end;
@@ -5299,7 +5317,7 @@ begin
     end else begin
       SetLength(Result, BinLen*2);
       BinToHex(PAnsiChar(Ansi), PChar(Result), BinLen);
-      Result := '0x' + Result;
+      Result := FHexPrefix + Result + FHexPostfix;
     end;
     if AppSettings.ReadBool(asLowercaseHex) then
       Result := Result.ToLowerInvariant;
@@ -5313,16 +5331,16 @@ var
   Ansi: AnsiString;
 begin
   BinLen := Length(ByteData);
-  SetString(Ansi, PAnsiChar(ByteData), BinLen);
   if BinLen = 0 then begin
     Result := EscapeString('');
   end else begin
+    SetString(Ansi, PAnsiChar(ByteData), BinLen);
     if IsHex(String(Ansi)) then begin
       Result := String(Ansi); // Already hex encoded
     end else begin
       SetLength(Result, BinLen*2);
       BinToHex(PAnsiChar(Ansi), PChar(Result), BinLen);
-      Result := '0x' + Result;
+      Result := FHexPrefix + Result + FHexPostfix;
     end;
     if AppSettings.ReadBool(asLowercaseHex) then
       Result := Result.ToLowerInvariant;
@@ -6708,7 +6726,7 @@ begin
   Result := False;
   Len := Length(Text);
   if Len >= 3 then begin
-    Result := (Text[1] = '0') and (Text[2] = 'x');
+    Result := (FHexPrefix.IsEmpty or Text.StartsWith(FHexPrefix)) and (FHexPostfix.IsEmpty or Text.EndsWith(FHexPostfix));
     if Result then begin
       for i:=3 to SIZE_KB do begin
         if not CharInSet(Text[i], HexChars) then begin
@@ -9104,6 +9122,26 @@ begin
 end;
 
 
+function TSQLiteQuery.GetColBinData(Column: Integer; var baData: TBytes): Boolean;
+var
+  AnsiStr: AnsiString;
+  Len: Integer;
+begin
+  Result := False;
+  if ColumnExists(Column) then begin
+    if FEditingPrepared and Assigned(FCurrentUpdateRow) then begin
+      AnsiStr := AnsiString(FCurrentUpdateRow[Column].NewText);
+    end else begin
+      AnsiStr := AnsiString(FCurrentResults[FRecNoLocal][Column].OldText);
+    end;
+    Len := Length(AnsiStr);
+    SetLength(baData, Len);
+    if Len > 0 then
+      Move(AnsiStr[1], baData[0], Len);
+    Result := True;
+  end;
+end;
+
 function TSQLiteQuery.Col(Column: Integer; IgnoreErrors: Boolean=False): String;
 begin
   Result := '';
@@ -9158,12 +9196,14 @@ var
   baData: TBytes;
 begin
   // Return a binary column value as hex AnsiString
-  if FConnection.Parameters.IsAnyMysql then begin
-    baData := [];
+  baData := [];
+  try
+    // Throws sNotImplemented on connections without an override
     GetColBinData(Column, baData);
     Result := FConnection.EscapeBin(baData);
-  end else
+  except
     Result := FConnection.EscapeBin(Col(Column, IgnoreErrors));
+  end;
 end;
 
 
