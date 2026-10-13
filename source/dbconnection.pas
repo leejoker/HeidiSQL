@@ -974,6 +974,7 @@ type
       constructor Create(AOwner: TComponent); override;
       destructor Destroy; override;
       procedure Execute(AddResult: Boolean=False; UseRawResult: Integer=-1); override;
+      function GetColBinData(Column: Integer; var baData: TBytes): Boolean; override;
       function Col(Column: Integer; IgnoreErrors: Boolean=False): String; overload; override;
       function ColIsPrimaryKeyPart(Column: Integer): Boolean; override;
       function ColIsUniqueKeyPart(Column: Integer): Boolean; override;
@@ -2184,7 +2185,7 @@ begin
   FQuoteChar := '"';
   FQuoteChars := '"[]';
   FNamedEnums := TStringList.Create;
-  FHexPrefix := '';
+  FHexPrefix := '0x'; // MySQL and MSSQL. Override if required.
   FHexPostfix := '';
 end;
 
@@ -2196,8 +2197,6 @@ begin
   inherited;
   FQuoteChar := '`';
   FQuoteChars := '`"';
-  FHexPrefix := '0x';
-  FHexPostfix := '';
   FStatementNum := 0;
   // The compiler complains that dynamic and static arrays are incompatible, so this does not work:
   // FDatatypes := MySQLDatatypes
@@ -2227,6 +2226,8 @@ var
 begin
   inherited;
   FQuoteChars := '"';
+  FHexPrefix := '''\x';
+  FHexPostfix := '''';
   SetLength(FDatatypes, Length(PostGreSQLDatatypes));
   for i:=0 to High(PostGreSQLDatatypes) do
     FDatatypes[i] := PostGreSQLDatatypes[i];
@@ -5208,30 +5209,33 @@ end;
 
 function TDBConnection.EscapeString(Text: String; Datatype: TDBDatatype): String;
 var
-  DoQuote: Boolean;
+  DoEscape: Boolean;
   ValuePrefix: String;
 const
   CategoriesNeedQuote = [dtcText, dtcBinary, dtcTemporal, dtcSpatial, dtcOther];
 begin
-  // Quote text based on the passed datatype
-  DoQuote := Datatype.Category in CategoriesNeedQuote;
+  // Escape and quote text based on the passed datatype
+  DoEscape := Datatype.Category in CategoriesNeedQuote;
   ValuePrefix := '';
   case Datatype.Category of
     // Some special cases
     dtcBinary, dtcSpatial: begin
       if IsHex(Text) then
-        DoQuote := False;
+        DoEscape := False;
     end;
     dtcInteger, dtcReal: begin
       if (not IsNumeric(Text)) and (not IsHex(Text)) then
-        DoQuote := True;
+        DoEscape := True;
       if (Datatype.Index = dbdtBit) and FParameters.IsAnyMySQL then begin
-        DoQuote := True;
+        DoEscape := True;
         ValuePrefix := 'b';
       end;
     end;
   end;
-  Result := ValuePrefix + EscapeString(Text, False, DoQuote);
+  if DoEscape then
+    Result := ValuePrefix + EscapeString(Text, False)
+  else
+    Result := ValuePrefix + Text;
 end;
 
 
@@ -6718,23 +6722,36 @@ end;
 
 function TDBConnection.IsHex(Text: String): Boolean;
 var
-  i, Len: Integer;
+  i, BodyLen: Integer;
+  HexBody: String;
+  AllowOddHexLen: Boolean;
 const
   HexChars: TSysCharSet = ['0'..'9','a'..'f', 'A'..'F'];
 begin
   // Check first kilobyte of passed text whether it's a hex encoded string. Hopefully faster than a regex.
-  Result := False;
-  Len := Length(Text);
-  if Len >= 3 then begin
-    Result := (FHexPrefix.IsEmpty or Text.StartsWith(FHexPrefix)) and (FHexPostfix.IsEmpty or Text.EndsWith(FHexPostfix));
+  BodyLen := Length(Text) - Length(FHexPrefix) - Length(FHexPostfix);
+  AllowOddHexLen := FParameters.IsAnyMySQL;
+
+  if BodyLen < 0 then begin
+    Result := False;
+  end
+  else if (not AllowOddHexLen) and Odd(BodyLen) then begin
+    Result := False;
+  end
+  else begin
+    Result := (FHexPrefix.IsEmpty or Text.StartsWith(FHexPrefix)) and
+      (FHexPostfix.IsEmpty or Text.EndsWith(FHexPostfix));
     if Result then begin
-      for i:=3 to SIZE_KB do begin
-        if not CharInSet(Text[i], HexChars) then begin
+      HexBody := Text;
+      if not FHexPrefix.IsEmpty then
+        Delete(HexBody, 1, Length(FHexPrefix));
+      if not FHexPostfix.IsEmpty then
+        Delete(HexBody, Length(HexBody) - Length(FHexPostfix) + 1, Length(FHexPostfix));
+      for i:=1 to Length(HexBody) do begin
+        if not CharInSet(HexBody[i], HexChars) then begin
           Result := False;
           Break;
         end;
-        if i >= Len then
-          Break;
       end;
     end;
   end;
@@ -9068,6 +9085,28 @@ begin
 end;
 
 {$IFDEF HASMSSQL}
+function TSqlSrvQuery.GetColBinData(Column: Integer; var baData: TBytes): Boolean;
+var
+  Stream: TMemoryStream;
+begin
+  Result := False;
+  if ColumnExists(Column) and (not IsNull(Column)) then begin
+    if FCurrentResults.Fields[Column] is TBlobField then begin
+      Stream := TMemoryStream.Create;
+      try
+        TBlobField(FCurrentResults.Fields[Column]).SaveToStream(Stream);
+        SetLength(baData, Stream.Size);
+        if Stream.Size > 0 then
+          Move((Stream.Memory)^, baData[0], Stream.Size);
+        Result := True;
+      finally
+        Stream.Free;
+      end;
+    end else
+      Raise EDbError.Create(SNotImplemented);
+  end;
+end;
+
 function TSqlSrvQuery.Col(Column: Integer; IgnoreErrors: Boolean=False): String;
 begin
   if ColumnExists(Column) then begin
