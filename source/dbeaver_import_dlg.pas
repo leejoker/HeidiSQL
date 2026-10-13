@@ -40,6 +40,7 @@ type
     function IsFolderSession(const Path: string): Boolean;
     function EnsureFolderChain(const FolderPath: string): string;
     function ImportEntry(const Entry: TDBeaverImportEntry): string;
+    procedure WriteErrorLog(const Ws, ErrorMsg: string; out LogPath: string);
   public
   end;
 
@@ -261,9 +262,37 @@ begin
   end;
 end;
 
+procedure TfrmDBeaverImport.WriteErrorLog(const Ws, ErrorMsg: string; out LogPath: string);
+var
+  LogDir: string;
+  F: TextFile;
+begin
+  LogPath := '';
+  try
+    LogDir := AppSettings.DirnameUserAppData;
+    ForceDirectories(LogDir);
+    LogPath := LogDir + 'dbeaver_import_error.log';
+    AssignFile(F, LogPath);
+    if FileExists(LogPath) then
+      Append(F)
+    else
+      Rewrite(F);
+    try
+      WriteLn(F, Format('[%s] Workspace: %s', [DateTimeToStr(Now), Ws]));
+      WriteLn(F, 'Error: ' + ErrorMsg);
+      WriteLn(F, StringOfChar('-', 60));
+    finally
+      CloseFile(F);
+    end;
+  except
+    // Logging is best-effort; never block the import flow on a log write error.
+    LogPath := '';
+  end;
+end;
+
 procedure TfrmDBeaverImport.btnImportClick(Sender: TObject);
 var
-  Ws, CredFile, Summary, Status: string;
+  Ws, CredFile, Summary, Status, LogPath: string;
   Res: TDBeaverImportResult;
   i: Integer;
   E: TDBeaverImportEntry;
@@ -299,6 +328,13 @@ begin
     begin
       memoResult.Lines.Add('Could not read DBeaver data-sources.json in:');
       memoResult.Lines.Add(Ws);
+      if Res.LoadError <> '' then
+      begin
+        memoResult.Lines.Add('Error: ' + Res.LoadError);
+        WriteErrorLog(Ws, Res.LoadError, LogPath);
+        if LogPath <> '' then
+          memoResult.Lines.Add('Error log written to: ' + LogPath);
+      end;
       Exit;
     end;
 

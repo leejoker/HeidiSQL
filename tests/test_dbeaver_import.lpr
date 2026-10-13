@@ -492,6 +492,89 @@ begin
   WriteFile(Tmp + 'data-sources.json', '{"connections": {');
   Check('malformed ds -> false', DBeaverImport(Tmp, True, '', r) = False);
   Check('malformed ds -> no entries', Length(r.Entries) = 0);
+  Check('malformed ds -> load error set', r.LoadError <> '');
+  DeleteFile(Tmp + 'data-sources.json');
+  RemoveDir(Tmp);
+end;
+
+procedure TestBomDataSources;
+var
+  Tmp: string;
+  r: TDBeaverImportResult;
+  fs: TFileStream;
+  Bom: array[0..2] of Byte;
+  JsonBody: AnsiString;
+begin
+  writeln('data-sources.json with UTF-8 BOM (DBeaver/Java default)');
+  Tmp := GetTempDir + 'dbimpbom-' + IntToStr(GetTickCount64) + PathDelim;
+  CreateDir(Tmp);
+  // Write EF BB BF followed by valid JSON — DBeaver (Java) emits this.
+  Bom[0] := $EF; Bom[1] := $BB; Bom[2] := $BF;
+  JsonBody := '{"connections":{"pg-1":{"provider":"postgresql","driver":"postgres-jdbc","name":"pg","configuration":{"host":"h","port":"5432"}}}}';
+  fs := TFileStream.Create(Tmp + 'data-sources.json', fmCreate);
+  try
+    fs.Write(Bom[0], 3);
+    fs.Write(JsonBody[1], Length(JsonBody));
+  finally
+    fs.Free;
+  end;
+  if DBeaverImport(Tmp, False, '', r) then
+  begin
+    Check('bom import succeeded', True);
+    Check('bom one entry', Length(r.Entries) = 1);
+    if Length(r.Entries) = 1 then
+      CheckEq('bom name', r.Entries[0].Name, 'pg');
+  end
+  else
+    Check('bom import ok', False);
+  DeleteFile(Tmp + 'data-sources.json');
+  RemoveDir(Tmp);
+end;
+
+procedure TestMissingFileLoadError;
+var
+  Tmp: string;
+  r: TDBeaverImportResult;
+begin
+  writeln('missing data-sources.json sets LoadError');
+  Tmp := GetTempDir + 'dbimpnf2-' + IntToStr(GetTickCount64) + PathDelim;
+  CreateDir(Tmp);
+  // No data-sources.json written — DBeaverImport should fail with a
+  // "File not found" diagnostic in LoadError.
+  Check('missing -> false', DBeaverImport(Tmp, False, '', r) = False);
+  Check('missing -> load error mentions not found',
+    (r.LoadError <> '') and (Pos('not found', LowerCase(r.LoadError)) > 0));
+  RemoveDir(Tmp);
+end;
+
+procedure TestDuplicateKeys;
+var
+  Tmp: string;
+  r: TDBeaverImportResult;
+begin
+  writeln('data-sources.json with duplicate folder keys (real DBeaver output)');
+  Tmp := GetTempDir + 'dbimpdup-' + IntToStr(GetTickCount64) + PathDelim;
+  CreateDir(Tmp);
+  // DBeaver (Java/Jackson) tolerates duplicate object keys and keeps the last.
+  // A real workspace may have two "dev" folders with different parents.
+  // FPC's parser must use joIgnoreDuplicates to match this behavior.
+  WriteFile(Tmp + 'data-sources.json',
+    '{"folders":{' +
+      '"dev":{"parent":"top"},' +
+      '"dev":{"parent":"top/sub"}' +
+    '},' +
+    '"connections":{' +
+      '"pg-1":{"provider":"postgresql","driver":"postgres-jdbc","name":"pg","folder":"dev","configuration":{"host":"h","port":"5432"}}' +
+    '}}');
+  if DBeaverImport(Tmp, False, '', r) then
+  begin
+    Check('dup import succeeded', True);
+    Check('dup one entry', Length(r.Entries) = 1);
+    if Length(r.Entries) = 1 then
+      Check('dup load error empty', r.LoadError = '');
+  end
+  else
+    Check('dup import ok', False);
   DeleteFile(Tmp + 'data-sources.json');
   RemoveDir(Tmp);
 end;
@@ -553,36 +636,32 @@ end;
 
 procedure TestFolderPath;
 var
-  F: TDBeaverFolderArray;
   Tmp: string;
   r: TDBeaverImportResult;
 begin
-  writeln('folder chain resolution');
-  SetLength(F, 2);
-  F[0].Id := 'f1'; F[0].Name := 'Work'; F[0].ParentId := '';
-  F[1].Id := 'f2'; F[1].Name := 'Dev'; F[1].ParentId := 'f1';
-  CheckEq('empty id', DBeaverFolderPath(F, ''), '');
-  CheckEq('unknown id', DBeaverFolderPath(F, 'zzz'), '');
-  CheckEq('flat folder', DBeaverFolderPath(F, 'f1'), 'Work');
-  CheckEq('nested folder', DBeaverFolderPath(F, 'f2'), 'Work/Dev');
-  F[1].ParentId := 'missing';
-  CheckEq('orphan parent keeps leaf', DBeaverFolderPath(F, 'f2'), 'Dev');
-  SetLength(F, 1);
-  F[0].Id := 'fx'; F[0].Name := 'A/B:C'; F[0].ParentId := '';
-  CheckEq('separators sanitized', DBeaverFolderPath(F, 'fx'), 'A_B_C');
+  writeln('folder path resolution (DBeaver path-style folder field)');
+  // DBeaver's connection "folder" field is already a full '/' path.
+  // DBeaverFolderPath uses it directly (no folders array needed).
+  CheckEq('empty folder', DBeaverFolderPath(''), '');
+  CheckEq('flat folder', DBeaverFolderPath('Work'), 'Work');
+  CheckEq('nested folder', DBeaverFolderPath('Work/Dev'), 'Work/Dev');
+  CheckEq('deep folder', DBeaverFolderPath('a/b/c'), 'a/b/c');
+  // ':' and NUL are sanitized to '_'; '/' is the path separator (kept).
+  CheckEq('colon sanitized', DBeaverFolderPath('A:B'), 'A_B');
+  CheckEq('colon in segment', DBeaverFolderPath('A/B:C'), 'A/B_C');
 
-  // end-to-end: the entry carries the resolved folder chain
+  // end-to-end: connection with a path-style folder field
   Tmp := GetTempDir + 'dbimpfl-' + IntToStr(GetTickCount64) + PathDelim;
   CreateDir(Tmp);
   WriteFile(Tmp + 'data-sources.json',
-    '{"folders":{"fld1":{"name":"Work","description":""}},' +
+    '{"folders":{"Work":{"description":""},"Work/Dev":{"parent":"Work"}},' +
     '"connections":{"pg-1":{"provider":"postgresql","driver":"postgres-jdbc","name":"pg",' +
-    '"folder":"fld1","configuration":{"host":"h","port":"5432"}}}}');
+    '"folder":"Work/Dev","configuration":{"host":"h","port":"5432"}}}}');
   if DBeaverImport(Tmp, False, '', r) then
   begin
     Check('e2e one entry', Length(r.Entries) = 1);
     if Length(r.Entries) = 1 then
-      CheckEq('e2e folder path', r.Entries[0].FolderPath, 'Work');
+      CheckEq('e2e folder path', r.Entries[0].FolderPath, 'Work/Dev');
   end
   else
     Check('e2e import ok', False);
@@ -604,6 +683,9 @@ begin
   TestImportMissingWorkspace;
   TestNameFallbackToId;
   TestMalformedDataSources;
+  TestBomDataSources;
+  TestMissingFileLoadError;
+  TestDuplicateKeys;
   TestMalformedCredentialsContinue;
   TestExplicitCredentialsPath;
   TestFolderPath;

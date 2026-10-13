@@ -70,6 +70,8 @@ type
     Entries: TDBeaverImportEntryArray;
     ImportedCount, SkippedCount, NeedsPasswordCount: Integer;
     CredentialsDecrypted: Boolean;
+    LoadError: string;   // human-readable diagnostic when data-sources.json
+                         // could not be read/parsed ('' on success)
   end;
 
   TDBeaverFolderArray = array of TDBeaverFolder;
@@ -92,10 +94,14 @@ function DBeaverFindWorkspace(const Explicit: string): string;
 // or unparseable). On success DataSources and Folders are populated. The caller
 // owns the returned objects (DataSources.Configuration objects are freed when
 // the root document is freed — keep RootAlive alive while you use them).
+// ErrorMsg receives a human-readable diagnostic on failure (file missing,
+// parse error, etc.) so the UI can show the real cause instead of a generic
+// "could not read" message.
 function DBeaverLoadDataSources(const Workspace: string;
   out RootAlive: TJSONObject;
   out DataSources: TDBeaverDataSourceMap;
-  out Folders: TDBeaverFolderArray): Boolean;
+  out Folders: TDBeaverFolderArray;
+  out ErrorMsg: string): Boolean;
 
 // Decrypt a DBeaver credentials file at the given explicit path ('' = none).
 // Returns True if the file existed (Decrypted=True when plaintext was
@@ -105,11 +111,11 @@ function DBeaverLoadCredentials(const CredentialsFile: string;
   out Creds: TDBeaverCredentialsMap;
   out Decrypted: Boolean): Boolean;
 
-// Resolve a DBeaver folder id to a HeidiSQL SessionPath chain: parent-first,
-// '/' separated, no trailing slash. '' when FolderId is empty or unknown.
-// Path separators inside folder names become '_'; parentFolder cycles are
-// bounded (depth 32) so malformed data cannot loop forever.
-function DBeaverFolderPath(const Folders: TDBeaverFolderArray; const FolderId: string): string;
+// Resolve a DBeaver connection "folder" field to a HeidiSQL SessionPath chain.
+// In DBeaver's data-sources.json the connection's "folder" field is already a
+// full '/'-separated path (e.g. "云边协同/dev"), so we use it directly.
+// The folders definition is not needed and not parsed.
+function DBeaverFolderPath(const FolderId: string): string;
 
 // Map provider+driver substring to an engine. dbeNone = unsupported.
 function DBeaverDetectEngine(const Provider, Driver: string): TDBeaverEngine;
@@ -357,6 +363,81 @@ end;
 
 { ===== JSON helpers ===== }
 
+// FPC 3.2.2's TJSONParser rejects duplicate object keys (DBeaver/Gson LENIENT
+// silently keeps the last). DBeaver workspaces may contain duplicate keys in
+// the "folders" object (e.g. two "dev" entries). We don't need the folders
+// definition at all — each connection's "folder" field is already a full path.
+// So we strip the "folders" object's contents to '{}' before parsing, which
+// both avoids the duplicate-key error and skips data we don't use.
+function StripFoldersContent(const Input: RawByteString): RawByteString;
+var
+  P, Len, BraceNest: Integer;
+  Ch: AnsiChar;
+  InStr: Boolean;
+  FldStart, FldEnd: Integer;
+begin
+  Result := Input;
+  P := 1;
+  Len := Length(Input);
+  // Find "folders" key
+  while P <= Len do
+  begin
+    // Skip whitespace
+    while (P <= Len) and (Input[P] in [' ', #9, #10, #13]) do Inc(P);
+    if P > Len then Break;
+    // Look for "folders"
+    if (Input[P] = '"') and (P + 8 <= Len) and
+       (Copy(Input, P + 1, 7) = 'folders') and (Input[P + 8] = '"') then
+    begin
+      // Found "folders" — skip past the key string
+      Inc(P, 9);
+      // Skip whitespace
+      while (P <= Len) and (Input[P] in [' ', #9, #10, #13]) do Inc(P);
+      if (P > Len) or (Input[P] <> ':') then
+        Exit; // malformed, bail out
+      Inc(P); // skip ':'
+      // Skip whitespace
+      while (P <= Len) and (Input[P] in [' ', #9, #10, #13]) do Inc(P);
+      if (P > Len) or (Input[P] <> '{') then
+        Exit; // not an object, bail out
+      // Record the range of the folders object value
+      FldStart := P;
+      // Skip to matching '}'
+      Inc(P); // past '{'
+      BraceNest := 1;
+      InStr := False;
+      while (P <= Len) and (BraceNest > 0) do
+      begin
+        Ch := Input[P];
+        if InStr then
+        begin
+          if Ch = '\' then
+          begin
+            Inc(P, 2);
+            Continue;
+          end;
+          if Ch = '"' then
+            InStr := False;
+        end
+        else
+        begin
+          case Ch of
+            '"': InStr := True;
+            '{': Inc(BraceNest);
+            '}': Dec(BraceNest);
+          end;
+        end;
+        Inc(P);
+      end;
+      FldEnd := P; // just past the closing '}'
+      // Replace [FldStart, FldEnd) with "{}"
+      Result := Copy(Input, 1, FldStart - 1) + '{}' + Copy(Input, FldEnd, Len);
+      Exit;
+    end;
+    Inc(P);
+  end;
+end;
+
 // JSON scalar -> string without raising (AsString alone is unsafe on booleans).
 function JsonValueToStr(const D: TJSONData): string;
 begin
@@ -475,31 +556,50 @@ end;
 function DBeaverLoadDataSources(const Workspace: string;
   out RootAlive: TJSONObject;
   out DataSources: TDBeaverDataSourceMap;
-  out Folders: TDBeaverFolderArray): Boolean;
+  out Folders: TDBeaverFolderArray;
+  out ErrorMsg: string): Boolean;
 var
   Path: string;
   fs: TFileStream;
   Parser: TJSONParser;
-  Root, Conns, Flds, FolderObj, Conn: TJSONObject;
+  Root, Conns, Conn: TJSONObject;
   Data: TJSONData;
   i: Integer;
   ds: TDBeaverDataSource;
-  fld: TDBeaverFolder;
+  Raw, Clean: RawByteString;
 begin
   Result := False;
   RootAlive := nil;
   DataSources := nil;
   Folders := nil;
+  ErrorMsg := '';
   Path := IncludeTrailingPathDelimiter(Workspace) + 'data-sources.json';
   if not FileExists(Path) then
+  begin
+    ErrorMsg := 'File not found: ' + Path;
     Exit;
+  end;
   fs := nil;
   Parser := nil;
   Root := nil;
   try
     try
+      // Read entire file into a string, strip the "folders" object contents
+      // (which may contain duplicate keys that FPC's parser rejects), then parse.
+      // We don't use the folders definition — each connection's "folder" field
+      // is already a full '/'-separated path (e.g. "云边协同/dev").
       fs := TFileStream.Create(Path, fmOpenRead or fmShareDenyNone);
-      Parser := TJSONParser.Create(fs, [joUTF8]);
+      SetLength(Raw, fs.Size);
+      if Length(Raw) > 0 then
+        fs.ReadBuffer(Raw[1], Length(Raw));
+      fs.Free;
+      fs := nil;
+      Clean := StripFoldersContent(Raw);
+      // Strip UTF-8 BOM: joBOMCheck only works for the TStream overload of
+      // TJSONScanner, not the RawByteString overload we use here.
+      if (Length(Clean) >= 3) and (Clean[1] = #$EF) and (Clean[2] = #$BB) and (Clean[3] = #$BF) then
+        Delete(Clean, 1, 3);
+      Parser := TJSONParser.Create(Clean, [joUTF8, joIgnoreTrailingComma]);
       Data := Parser.Parse;
       if Data = nil then
         Exit;
@@ -513,21 +613,7 @@ begin
 
       DataSources := TDBeaverDataSourceMap.Create;
 
-      // Folders
-      Data := Root.Find('folders');
-      if (Data <> nil) and (Data.JSONType = jtObject) then
-      begin
-        Flds := Data as TJSONObject;
-        for i := 0 to Flds.Count - 1 do
-        begin
-          FolderObj := Flds.Items[i] as TJSONObject;
-          fld.Id := Flds.Names[i];
-          fld.Name := ObjGetString(FolderObj, 'name');
-          fld.ParentId := ObjGetString(FolderObj, 'parentFolder');
-          SetLength(Folders, Length(Folders) + 1);
-          Folders[High(Folders)] := fld;
-        end;
-      end;
+      // Folders are intentionally not parsed — see StripFoldersContent comment.
 
       // Connections
       Data := Root.Find('connections');
@@ -548,15 +634,17 @@ begin
           else
             ds.Configuration := nil;
           DataSources.Add(ds.Id, ds);
-          // Configuration object is owned by RootAlive; the map stores a copy
-          // of the record (TJSONObject pointer copied by value).
         end;
       end;
       Result := True;
     except
-      // Malformed data-sources.json must not raise into the UI: fail
-      // gracefully (Result stays False; everything is cleaned up below).
-      Result := False;
+      on E: Exception do
+      begin
+        // Malformed data-sources.json must not raise into the UI: fail
+        // gracefully (Result stays False; everything is cleaned up below).
+        // Preserve the message so the dialog can show the real cause.
+        ErrorMsg := E.Message;
+      end;
     end;
   finally
     Parser.Free;
@@ -618,6 +706,9 @@ begin
   except
     S := '';
   end;
+  // Strip UTF-8 BOM from decrypted plaintext (DBeaver may emit one).
+  if (Length(S) >= 3) and (S[1] = #$EF) and (S[2] = #$BB) and (S[3] = #$BF) then
+    Delete(S, 1, 3);
 
   // 2. Plain JSON fallback.
   if (S = '') or (S[1] <> '{') then
@@ -625,6 +716,9 @@ begin
     SetLength(S, Length(Data));
     if Length(Data) > 0 then
       Move(Data[0], S[1], Length(Data));
+    // Strip UTF-8 BOM from raw file data.
+    if (Length(S) >= 3) and (S[1] = #$EF) and (S[2] = #$BB) and (S[3] = #$BF) then
+      Delete(S, 1, 3);
   end;
 
   // 3. Base64 fallback.
@@ -644,7 +738,7 @@ begin
   if (S = '') or (S[1] <> '{') then
     Exit; // Decrypted stays False, empty map returned.
 
-  Parser := TJSONParser.Create(S, [joUTF8]);
+  Parser := TJSONParser.Create(S, [joUTF8, joIgnoreTrailingComma]);
   JsonData := nil;
   try
     try
@@ -674,49 +768,42 @@ begin
   end;
 end;
 
-function DBeaverFolderPath(const Folders: TDBeaverFolderArray; const FolderId: string): string;
-var
-  Chain, Id, Seg: string;
-  i, Depth, Found: Integer;
+// Resolve a DBeaver connection "folder" field to a HeidiSQL SessionPath chain.
+// In DBeaver's data-sources.json the connection's "folder" field is already a
+// full '/'-separated path (e.g. "云边协同/dev"), so we use it directly.
+// The folders definition is not needed and not parsed.
+function DBeaverFolderPath(const FolderId: string): string;
 
-  function SanitizeSeg(const S: string): string;
+  function Sanitize(const S: string): string;
   var
     k: Integer;
   begin
     Result := S;
     for k := Length(Result) downto 1 do
-      if (Result[k] = '/') or (Result[k] = ':') or (Result[k] = #0) then
+      if (Result[k] = ':') or (Result[k] = #0) then
         Result[k] := '_';
   end;
 
+var
+  Parts: TStringArray;
+  i: Integer;
+  Seg: string;
 begin
   Result := '';
-  Id := FolderId;
-  Chain := '';
-  Depth := 0;
-  // Walk parentFolder links upward (cycle-safe). Unknown ids drop the rest
-  // of the chain instead of failing the whole import.
-  while (Id <> '') and (Depth < 32) do
+  if FolderId = '' then
+    Exit;
+  // The folder field is a path like "parent/child". Split on '/' and sanitize
+  // each segment (':' and NUL are invalid in HeidiSQL session paths).
+  Parts := FolderId.Split(['/']);
+  for i := 0 to High(Parts) do
   begin
-    Found := -1;
-    for i := 0 to High(Folders) do
-      if Folders[i].Id = Id then
-      begin
-        Found := i;
-        Break;
-      end;
-    if Found < 0 then
-      Break;
-    Seg := Folders[Found].Name;
+    Seg := Sanitize(Parts[i]);
     if Seg = '' then
-      Seg := Folders[Found].Id;
-    Chain := SanitizeSeg(Seg) + '/' + Chain;
-    Id := Folders[Found].ParentId;
-    Inc(Depth);
+      Continue;
+    if Result <> '' then
+      Result := Result + '/';
+    Result := Result + Seg;
   end;
-  if Chain <> '' then
-    SetLength(Chain, Length(Chain) - 1);
-  Result := Chain;
 end;
 
 function DBeaverDetectEngine(const Provider, Driver: string): TDBeaverEngine;
@@ -813,15 +900,20 @@ var
   CredPath: string;
   Host2, Db2: string;
   Port2: Integer;
+  LoadErr: string;
 begin
   AResult.Entries := nil;
   AResult.ImportedCount := 0;
   AResult.SkippedCount := 0;
   AResult.NeedsPasswordCount := 0;
   AResult.CredentialsDecrypted := False;
+  AResult.LoadError := '';
 
-  if not DBeaverLoadDataSources(Workspace, Root, DataSources, Folders) then
+  if not DBeaverLoadDataSources(Workspace, Root, DataSources, Folders, LoadErr) then
+  begin
+    AResult.LoadError := LoadErr;
     Exit(False);
+  end;
 
   Creds := nil;
   CredsDecrypted := False;
@@ -843,7 +935,7 @@ begin
         Entry.Name := ds.Id;
       Entry.Engine := DBeaverDetectEngine(ds.Provider, ds.Driver);
       Entry.Reason := '';
-      Entry.FolderPath := DBeaverFolderPath(Folders, ds.FolderId);
+      Entry.FolderPath := DBeaverFolderPath(ds.FolderId);
 
       if Entry.Engine = dbeNone then
       begin
