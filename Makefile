@@ -14,6 +14,12 @@ BINQT6ARM := ./out/qt6arm/heidisql
 BINMACOS := ./out/macos/heidisql
 PEFLAGS := ./extra/peflags/peflags.exe
 
+# Wine + Inno Setup (for building the Windows installer on Linux/macOS via Wine)
+WINEPREFIX_DIR ?= /data/wine-data/wine-heidisql
+WINE ?= WINEPREFIX=$(WINEPREFIX_DIR) wine
+ISCC := $(WINE) "C:\users\boe\AppData\Local\Programs\Inno Setup 7\ISCC.exe"
+ISS := create-windows-installer.iss
+
 # Make shell magic to get version from somewhere
 #VERSION := shell magic
 
@@ -29,7 +35,7 @@ endif
 
 VERSION := $(shell echo $(tag) | sed "s/v//")
 
-.PHONY: all clean copy-locale build-mo build-win64 run-win64 build-gtk2 run-gtk2 build-qt5 run-qt5 build-qt6 run-qt6 build-macos deb-package tar-gtk2 tar-qt5 tar-qt6
+.PHONY: all clean copy-locale build-mo build-win64 run-win64 build-installer build-gtk2 run-gtk2 build-qt5 run-qt5 build-qt6 run-qt6 build-macos deb-package tar-gtk2 tar-qt5 tar-qt6
 
 all: clean build-win64 build-gtk2 build-qt5 build-qt6 build-macos deb-package tar-gtk2 tar-qt5 tar-qt6
 
@@ -54,6 +60,19 @@ build-win64:
 
 run-win64:
 	@echo "Not implemented yet."
+
+# Build the Windows installer (Setup.exe) via Inno Setup running under Wine.
+# Requires: out/win64/heidisql.exe (run "make build-win64" or scripts/cross-build-win64.sh first).
+# The .iss expects the exe at out/heidisql.exe (the Win build path); we stage it
+# there from out/win64/ so ISCC finds it without modifying the .iss.
+build-installer:
+	@echo "=== Building Windows installer"
+	@test -f "$(BINWIN64)" || { echo "ERROR: $(BINWIN64) not found. Run 'make build-win64' first."; exit 1; }
+	@cp -f "$(BINWIN64)" ./out/heidisql.exe
+	$(ISCC) "$(ISS)"
+	@rm -f ./out/heidisql.exe
+	@echo "=== Installer built:"
+	@ls -lh ./out/HeidiSQL_*_Setup.exe
 
 build-gtk2:
 	@echo "=== Building GTK2"
