@@ -272,8 +272,12 @@ var
   i: Integer;
   ExeFiles: TStringList;
 begin
-  Width := AppSettings.ReadInt(asSessionManagerWindowWidth);
-  Height := AppSettings.ReadInt(asSessionManagerWindowHeight);
+  if AppSettings.ReadBool(asSessionManagerWindowMaximized) then
+    WindowState := wsMaximized;
+  if WindowState <> wsMaximized then begin
+    Width := AppSettings.ReadInt(asSessionManagerWindowWidth);
+    Height := AppSettings.ReadInt(asSessionManagerWindowHeight);
+  end;
   // Move to visible area if window was on a now plugged off monitor previously
   MakeFullyVisible;
   pnlLeft.Width := AppSettings.ReadInt(asSessionManagerListWidth);
@@ -487,8 +491,11 @@ procedure Tconnform.FormDestroy(Sender: TObject);
 begin
   // Save GUI stuff
   AppSettings.WriteInt(asSessionManagerListWidth, ScaleFormToDesign(pnlLeft.Width));
-  AppSettings.WriteInt(asSessionManagerWindowWidth, ScaleFormToDesign(Width));
-  AppSettings.WriteInt(asSessionManagerWindowHeight, ScaleFormToDesign(Height));
+  if WindowState <> wsMaximized then begin
+    AppSettings.WriteInt(asSessionManagerWindowWidth, ScaleFormToDesign(Width));
+    AppSettings.WriteInt(asSessionManagerWindowHeight, ScaleFormToDesign(Height));
+  end;
+  AppSettings.WriteBool(asSessionManagerWindowMaximized, WindowState=wsMaximized);
   SaveListSetup(ListSessions);
 end;
 

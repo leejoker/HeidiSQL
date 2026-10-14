@@ -923,6 +923,7 @@ type
     procedure actLoadSQLExecute(Sender: TObject);
     procedure actNewWindowExecute(Sender: TObject);
     procedure actSessionManagerExecute(Sender: TObject);
+    function ShowSessionManager: TModalResult;
     procedure actPreferencesExecute(Sender: TObject);
     procedure actQueryFindReplaceExecute(Sender: TObject);
     procedure actQueryStopOnErrorsExecute(Sender: TObject);
@@ -1508,7 +1509,14 @@ uses
   FileInfo, winpeimagereader, elfreader, machoreader, About, data_sorting, column_selection, loaddata, editvar,
   copytable, csv_detector, exportgrid, usermanager, rolemanagerpg, reformatter, connections, sqlhelp, updatecheck,
   insertfiles, texteditor, preferences, table_editor, view, routine_editor, trigger_editor, event_editor, grideditlinks,
-  crashdialog, selectdbobject, redis_newkey, redisclient, dbeaver_import_dlg;
+  crashdialog, selectdbobject, redis_newkey, redisclient, dbeaver_import_dlg
+{$IFDEF LCLQt6}
+  , qt6, qtint, qtwidgets
+{$ENDIF}
+{$IFDEF UNIX}
+  , x, xlib
+{$ENDIF}
+  ;
 
 {$R *.lfm}
 
@@ -2629,11 +2637,63 @@ begin
 end;
 
 
+// Show the session manager as a non-modal window and wait until it closes.
+//
+// On Linux with LCL Qt6 + Mutter/Muffin, using ShowModal (or Show with
+// PopupParent) makes LCL set WM_TRANSIENT_FOR and the fsModal state, so
+// Qt marks the window as _NET_WM_WINDOW_TYPE_DIALOG. Mutter hides the
+// maximize button on dialog windows even when biMaximize is set. Creating
+// the form without an owner and removing WM_TRANSIENT_FOR after Show keeps
+// the window _NET_WM_WINDOW_TYPE_NORMAL, where Mutter shows the maximize
+// button. The busy loop below keeps this method alive until the form is
+// closed, so callers can still read ModalResult afterwards.
+function TMainForm.ShowSessionManager: TModalResult;
+{$IFDEF UNIX}
+var
+  LCLDisplay: PDisplay;
+  TransientAtom: TAtom;
+
+  procedure RemoveTransientFor;
+  begin
+    if not connform.HandleAllocated then
+      Exit;
+    LCLDisplay := XOpenDisplay(nil);
+    if LCLDisplay = nil then
+      Exit;
+    try
+      TransientAtom := XInternAtom(LCLDisplay, 'WM_TRANSIENT_FOR', False);
+      if TransientAtom <> 0 then
+        XDeleteProperty(LCLDisplay,
+          QWidget_winId(TQtWidget(connform.Handle).Widget), TransientAtom);
+    finally
+      XCloseDisplay(LCLDisplay);
+    end;
+  end;
+{$ENDIF}
+begin
+  Result := mrNone;
+  connform := TConnForm.Create(nil);
+{$IFDEF UNIX}
+  // Qt may set WM_TRANSIENT_FOR asynchronously, so keep removing it in
+  // the loop below until the form closes.
+  RemoveTransientFor;
+{$ENDIF}
+  connform.Show;
+  while connform.Visible and not Application.Terminated do begin
+    Application.ProcessMessages;
+    CheckSynchronize;
+{$IFDEF UNIX}
+    RemoveTransientFor;
+{$ENDIF}
+  end;
+  Result := connform.ModalResult;
+  FreeAndNil(connform);
+end;
+
+
 procedure TMainForm.actSessionManagerExecute(Sender: TObject);
 begin
-  connform := TConnForm.Create(Self);
-  connform.ShowModal;
-  FreeAndNil(connform);
+  ShowSessionManager;
 end;
 
 
@@ -2652,9 +2712,7 @@ begin
   // TODO: focus last session?
   SelectNode(DBtree, GetNextNode(DBtree, nil));
   if FConnections.Count = 0 then begin
-    connform := TConnForm.Create(Self);
-    DlgResult := connform.ShowModal;
-    FreeAndNil(connform);
+    DlgResult := ShowSessionManager;
     if DlgResult = mrCancel then
       actExitApplication.Execute;
   end;
@@ -2855,9 +2913,7 @@ begin
   // Display session manager
   if Connections.Count = 0 then begin
     // Cannot be done in OnCreate because we need ready forms here:
-    connform := TConnForm.Create(Self);
-    DlgResult := connform.ShowModal;
-    FreeAndNil(connform);
+    DlgResult := ShowSessionManager;
     if DlgResult = mrCancel then begin
       actExitApplicationExecute(nil);
       Visible := False;
