@@ -551,6 +551,9 @@ type
       function GetVar(SQL: String; Column: String): String; overload;
       function Ping(Reconnect: Boolean): Boolean; virtual; abstract;
       function RefreshAllDatabases: TStringList;
+      // Physical database names, for the connection dialog's database picker.
+      // Differs from AllDatabases on PostgreSQL, where AllDatabases lists schemata for the tree.
+      function GetDatabaseNames: TStringList; virtual;
       function GetDBObjects(db: String; Refresh: Boolean=False; OnlyNodeType: TListNodeType=lntNone): TDBObjectList;
       function DbObjectsCached(db: String): Boolean;
       function ParseDateTime(Str: String): TDateTime;
@@ -740,6 +743,7 @@ type
       function Ping(Reconnect: Boolean): Boolean; override;
       function GetCreateCode(Obj: TDBObject): String; override;
       function ConnectionInfo: TStringList; override;
+      function GetDatabaseNames: TStringList; override;
       property LastRawResults: TPGRawResults read FLastRawResults;
       property RegClasses: TOidStringPairs read FRegClasses;
       function GetTableKeys(Table: TDBObject): TTableKeyList; override;
@@ -4863,6 +4867,12 @@ begin
 end;
 
 
+function TDBConnection.GetDatabaseNames: TStringList;
+begin
+  Result := AllDatabases;
+end;
+
+
 function TMySQLConnection.GetAllDatabases: TStringList;
 begin
   Result := inherited;
@@ -4924,6 +4934,13 @@ begin
     ApplyIgnoreDatabasePattern(FAllDatabases);
   end;
   Result := FAllDatabases;
+end;
+
+
+function TPGConnection.GetDatabaseNames: TStringList;
+begin
+  // Physical databases, while AllDatabases lists schemata for the tree
+  Result := GetCol(FSqlProvider.GetSql(qListDatabases));
 end;
 
 
