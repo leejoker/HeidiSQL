@@ -1329,6 +1329,12 @@ begin
 end;
 
 
+// PostgreSQL cannot connect without an existing database: libpq would fall back to
+// the user name, so use the maintenance database when the session provides none.
+const
+  PG_FALLBACK_DATABASE = 'postgres';
+
+
 procedure Tconnform.editDatabasesRightButtonClick(Sender: TObject);
 var
   Connection: TDBConnection;
@@ -1341,7 +1347,11 @@ begin
     // Try to connect and lookup database names
     Params := CurrentParams;
     Connection := Params.CreateConnection(Self);
-    Connection.Parameters.AllDatabasesStr := '';
+    if Params.NetTypeGroup = ngPgSQL then begin
+      if Connection.Parameters.AllDatabasesStr.IsEmpty then
+        Connection.Parameters.AllDatabasesStr := PG_FALLBACK_DATABASE;
+    end else
+      Connection.Parameters.AllDatabasesStr := '';
     Connection.LogPrefix := SelectedSessionPath;
     Connection.OnLog := Mainform.LogSQL;
     FPopupDatabases := TPopupMenu.Create(Self);
@@ -1349,10 +1359,7 @@ begin
     Screen.Cursor := crHourglass;
     try
       Connection.Active := True;
-      if Params.NetTypeGroup = ngPgSQL then
-        Databases := Connection.GetCol('SELECT datname FROM pg_database WHERE datistemplate=FALSE')
-      else
-        Databases := Connection.AllDatabases;
+      Databases := Connection.GetDatabaseNames;
       for DB in Databases do begin
         Item := TMenuItem.Create(FPopupDatabases);
         Item.Caption := DB;
