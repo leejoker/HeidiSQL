@@ -71,6 +71,20 @@ Ansgar
 ./scripts/cross-build-win64.sh [--debug]
 ```
 
+### 4. 会话管理器最大化
+
+会话管理器标题栏提供最小化/最大化按钮，并持久化最大化状态——最大化后关闭，下次打开
+仍为最大化；取消最大化则恢复此前保存的窗口尺寸。
+
+在 Linux/Qt6 + Mutter/Muffin 下，`ShowModal` 会使窗口被标记为
+`_NET_WM_WINDOW_TYPE_DIALOG`，Mutter 对对话框窗口隐藏最大化按钮。会话管理器改为非模态
+显示并移除 `WM_TRANSIENT_FOR`，保持 `_NET_WM_WINDOW_TYPE_NORMAL` 使最大化按钮可见。
+
+### 5. Windows 安装包构建
+
+`make build-installer`：通过 Wine 调用 Inno Setup 7 的 `ISCC.exe` 构建 Windows 安装包，
+需先执行 `make build-win64` 生成 `out/win64/heidisql.exe`。
+
 ---
 
 ### Building
