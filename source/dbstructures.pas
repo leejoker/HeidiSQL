@@ -76,7 +76,8 @@ type
     qPgRolemanObjPrivGrant,
     qPgRolemanObjPrivRevoke,
     qPgRolemanDefaultPrivGrant,
-    qPgRolemanDefaultPrivRevoke
+    qPgRolemanDefaultPrivRevoke,
+    qListDatabases
     );
   TSqlProvider = class
     strict protected

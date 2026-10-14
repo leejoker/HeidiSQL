@@ -925,6 +925,11 @@ begin
     qPgRolemanDefaultPrivRevoke: Result :=
       'ALTER DEFAULT PRIVILEGES FOR ROLE %s%s REVOKE %s ON %s FROM %s';
 
+    // Physical database names, for the connection dialog's database picker.
+    // pg_database is cluster-wide, so this works from any connected database.
+    qListDatabases: Result :=
+      'SELECT datname FROM pg_catalog.pg_database WHERE datistemplate = FALSE';
+
     qAutoInc: Result := 'SERIAL';
     qCastAsText: Result := '%s::text';
     else Result := inherited;
