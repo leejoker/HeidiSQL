@@ -77,7 +77,7 @@ type
     qPgRolemanObjPrivRevoke,
     qPgRolemanDefaultPrivGrant,
     qPgRolemanDefaultPrivRevoke,
-    qListDatabases
+    qListDatabases // implemented by TPostgreSQLProvider only, so far
     );
   TSqlProvider = class
     strict protected

@@ -553,6 +553,8 @@ type
       function RefreshAllDatabases: TStringList;
       // Physical database names, for the connection dialog's database picker.
       // Differs from AllDatabases on PostgreSQL, where AllDatabases lists schemata for the tree.
+      // Ownership differs per engine: the base implementation returns the connection-owned
+      // AllDatabases cache, TPGConnection returns a fresh list the caller must free.
       function GetDatabaseNames: TStringList; virtual;
       function GetDBObjects(db: String; Refresh: Boolean=False; OnlyNodeType: TListNodeType=lntNone): TDBObjectList;
       function DbObjectsCached(db: String): Boolean;
@@ -4939,7 +4941,8 @@ end;
 
 function TPGConnection.GetDatabaseNames: TStringList;
 begin
-  // Physical databases, while AllDatabases lists schemata for the tree
+  // Fresh list, the caller owns it.
+  // Not filtered by IgnoreDatabasePattern, unlike the base AllDatabases path.
   Result := GetCol(FSqlProvider.GetSql(qListDatabases));
 end;
 
