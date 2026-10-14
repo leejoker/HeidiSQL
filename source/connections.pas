@@ -149,6 +149,7 @@ type
     procedure btnNewDropdown(Sender: TObject);
     procedure FormCreate(Sender: TObject);
     procedure btnOpenClick(Sender: TObject);
+    procedure btnCancelClick(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
     procedure FormShow(Sender: TObject);
     procedure btnSaveClick(Sender: TObject);
@@ -475,9 +476,12 @@ begin
   TimerButtonAnimation.Enabled := True;
   Screen.Cursor := crHourglass;
   Connection := nil;
-  if Mainform.InitConnection(Params, True, Connection) then
-    ModalResult := mrOK
-  else begin
+  if Mainform.InitConnection(Params, True, Connection) then begin
+    ModalResult := mrOK;
+    // The form is shown non-modal (see TMainForm.ShowSessionManager), so
+    // setting ModalResult alone does not close it. Close explicitly.
+    Close;
+  end else begin
     TimerStatistics.OnTimer(Sender);
     ModalResult := mrNone;
   end;
@@ -485,6 +489,15 @@ begin
   btnOpen.Enabled := True;
   btnOpen.Caption := _('Open');
   Screen.Cursor := crDefault;
+end;
+
+
+procedure Tconnform.btnCancelClick(Sender: TObject);
+begin
+  // The form is shown non-modal (see TMainForm.ShowSessionManager), so
+  // setting ModalResult alone does not close it. Close explicitly.
+  ModalResult := mrCancel;
+  Close;
 end;
 
 procedure Tconnform.FormDestroy(Sender: TObject);

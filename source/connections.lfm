@@ -1302,6 +1302,7 @@ object connform: Tconnform
       Caption = 'Cancel'
       Constraints.MinWidth = 84
       ModalResult = 2
+      OnClick = btnCancelClick
       TabOrder = 4
     end
     object btnNew: TBitBtn

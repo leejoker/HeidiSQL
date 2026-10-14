@@ -2686,7 +2686,12 @@ begin
     RemoveTransientFor;
 {$ENDIF}
   end;
+  // Closing via the window manager X button leaves ModalResult at mrNone;
+  // ShowModal would have reported mrCancel in that case, so keep callers
+  // (which check for mrCancel to abort startup) behaving the same way.
   Result := connform.ModalResult;
+  if Result = mrNone then
+    Result := mrCancel;
   FreeAndNil(connform);
 end;
 
