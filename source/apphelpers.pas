@@ -148,6 +148,7 @@ type
     property WarningCount: Int64 read FWarningCount;
     property Aborted: Boolean read FAborted write FAborted;
     property ErrorMessage: String read FErrorMessage;
+    property BatchInOneGo: Boolean read FBatchInOneGo;
     constructor Create(Connection: TDBConnection; Batch: TSQLBatch; TabNumber: Integer);
     procedure Execute; override;
     procedure LogFromThread(Msg: String; Category: TDBLogCategory);
@@ -3209,7 +3210,15 @@ begin
       end;
     end;
     FConnection.SetLockedByThread(nil);
-    Synchronize(AfterQuery);
+    try
+      Synchronize(AfterQuery);
+    except
+      // Synchronize re-raises here. Without BatchFinished, the tab would stay in running state forever.
+      on E:Exception do begin
+        FErrorMessage := E.Message;
+        ErrorAborted := True;
+      end;
+    end;
     // Check if FAborted is set by the main thread, to avoid proceeding the loop in case
     // FStopOnErrors is set to false
     if FAborted or ErrorAborted then
