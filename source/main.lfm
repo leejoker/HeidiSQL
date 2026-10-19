@@ -9,7 +9,7 @@ object MainForm: TMainForm
   ClientWidth = 798
   Menu = MainMenu1
   Position = poMainFormCenter
-  LCLVersion = '4.4.0.0'
+  LCLVersion = '4.8.0.0'
   OnActivate = FormActivate
   OnChangeBounds = FormChangeBounds
   OnCloseQuery = FormCloseQuery
@@ -992,7 +992,6 @@ object MainForm: TMainForm
         OnGetNodeDataSize = DBtreeGetNodeDataSize
         OnInitChildren = DBtreeInitChildren
         OnInitNode = DBtreeInitNode
-        OnMouseMove = DBtreeMouseMove
         OnMouseUp = DBtreeMouseUp
       end
     end

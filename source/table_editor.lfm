@@ -5,7 +5,7 @@ object frmTableEditor: TfrmTableEditor
   Width = 700
   ClientHeight = 501
   ClientWidth = 700
-  LCLVersion = '4.4.0.0'
+  LCLVersion = '4.8.0.0'
   ParentFont = False
   TabOrder = 0
   object SplitterTopBottom: TSplitter
@@ -350,7 +350,6 @@ object frmTableEditor: TfrmTableEditor
         Top = 0
         Width = 625
         Align = alClient
-        DragMode = dmAutomatic
         DragType = dtVCL
         EditDelay = 0
         Header.AutoSizeIndex = -1
@@ -1106,7 +1105,6 @@ object frmTableEditor: TfrmTableEditor
     Align = alTop
     Anchors = [akTop, akLeft, akRight, akBottom]
     Constraints.MinHeight = 20
-    DragMode = dmAutomatic
     DragType = dtVCL
     EditDelay = 0
     Header.AutoSizeIndex = -1

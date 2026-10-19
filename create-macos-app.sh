@@ -94,6 +94,9 @@ brew list sqlite >/dev/null 2>&1 || brew install sqlite
 
 # MariaDB Connector/C (libmariadb*.dylib)
 brew list mariadb-connector-c >/dev/null 2>&1 || brew install mariadb-connector-c
+# FreeTDS (libsybdb.dylib) for MS SQL Server
+brew list freetds >/dev/null 2>&1 || brew install freetds
+
 
 # OpenSSL 1.1 for TFPHTTPClient (deprecated in Homebrew, may be unavailable on CI runners)
 if ! brew list openssl@1.1 >/dev/null 2>&1; then
@@ -107,6 +110,7 @@ MARIADB_LIB_DIR="${BREW_PREFIX}/opt/mariadb-connector-c/lib"
 MYSQL_PLUGIN_DIR="${MYSQL_LIB_DIR}/plugin"
 MARIADB_PLUGIN_DIR="${MARIADB_LIB_DIR}/mariadb/plugin"
 OPENSSL11_LIB_DIR="${BREW_PREFIX}/opt/openssl@1.1/lib"
+FREETDS_LIB_DIR="${BREW_PREFIX}/opt/freetds/lib"
 
 ### PREPARE APP BUNDLE STRUCTURE
 
@@ -255,6 +259,34 @@ else
   echo "WARNING: No libmariadb*.dylib found in ${MARIADB_LIB_DIR}" >&2
 fi
 
+# libsybdb.dylib (FreeTDS, for MS SQL Server)
+if ls "${FREETDS_LIB_DIR}"/libsybdb*.dylib >/dev/null 2>&1; then
+  for f in "${FREETDS_LIB_DIR}"/libsybdb*.dylib; do
+    copy_and_rewrite_dylib "${f}"
+  done
+else
+  echo "WARNING: No libsybdb*.dylib found in ${FREETDS_LIB_DIR}" >&2
+fi
+
+# libfbclient.dylib (Firebird/Interbase client; there is no homebrew formula, so use
+# the official Firebird framework from https://firebirdsql.org if installed on the build machine)
+FBCLIENT_CANDIDATES=(
+  "/Library/Frameworks/Firebird.framework/Versions/A/Libraries/libfbclient.dylib"
+  "${BREW_PREFIX}/opt/firebird/lib/libfbclient.dylib"
+)
+FBCLIENT_SRC=""
+for fbclient_candidate in "${FBCLIENT_CANDIDATES[@]}"; do
+  if [[ -f "${fbclient_candidate}" ]]; then
+    FBCLIENT_SRC="${fbclient_candidate}"
+    break
+  fi
+done
+if [[ -n "${FBCLIENT_SRC}" ]]; then
+  copy_and_rewrite_dylib "${FBCLIENT_SRC}"
+else
+  echo "WARNING: No libfbclient.dylib found - Firebird/Interbase connections will need the Firebird client installed by the user" >&2
+fi
+
 # MARIADB PLUGIN .so FILES
 if ls "${MARIADB_PLUGIN_DIR}"/*.so >/dev/null 2>&1; then
   for f in "${MARIADB_PLUGIN_DIR}"/*.so; do
@@ -314,6 +346,7 @@ rewrite_exe_dep "libmysqlclient"
 rewrite_exe_dep "libpq"
 rewrite_exe_dep "libsqlite3"
 rewrite_exe_dep "libmariadb"
+rewrite_exe_dep "libsybdb"
 rewrite_exe_dep "libssl.3"
 rewrite_exe_dep "libssl" # OpenSSL 1.1
 rewrite_exe_dep "libcrypto"

@@ -13,7 +13,7 @@ object connform: Tconnform
   Constraints.MinWidth = 440
   Position = poMainFormCenter
   ShowHint = True
-  LCLVersion = '4.4.0.0'
+  LCLVersion = '4.8.0.0'
   OnClose = FormClose
   OnCloseQuery = FormCloseQuery
   OnCreate = FormCreate
@@ -85,6 +85,38 @@ object connform: Tconnform
         Anchors = [akTop, akLeft, akRight]
         BorderSpacing.Around = 5
         Caption = 'Previous portable settings must be imported once in this version. To do this, click on the button above and open your old .txt file.'
+        Visible = False
+        WordWrap = True
+      end
+      object btnImportSessions: TSpeedButton
+        AnchorSideLeft.Control = tabStart
+        AnchorSideTop.Control = lblHelpPortable
+        AnchorSideTop.Side = asrBottom
+        Left = 5
+        Height = 26
+        Top = 91
+        Width = 141
+        AutoSize = True
+        BorderSpacing.Around = 5
+        Caption = 'Import sessions from Windows registry'
+        Images = MainForm.ImageListMain
+        ImageIndex = 101
+        OnClick = btnImportSessionsClick
+        Visible = False
+      end
+      object lblImportSessions: TLabel
+        AnchorSideLeft.Control = tabStart
+        AnchorSideTop.Control = btnImportSessions
+        AnchorSideTop.Side = asrBottom
+        AnchorSideRight.Control = tabStart
+        AnchorSideRight.Side = asrBottom
+        Left = 5
+        Height = 45
+        Top = 122
+        Width = 503
+        Anchors = [akTop, akLeft, akRight]
+        BorderSpacing.Around = 5
+        Caption = 'Previous versions of HeidiSQL stored your sessions in the Windows registry. Click on the button above to copy them over into the new session storage, so they will appear in the list on the left. This import is only needed once. If you have an exported settings file (.txt), use the top button instead, which also imports your sessions along with all other settings.'
         Visible = False
         WordWrap = True
       end
@@ -266,7 +298,7 @@ object connform: Tconnform
         TabOrder = 2
         OnChange = editHostChange
         OnDblClick = editHostDblClick
-        OnExit = editTrim
+        OnExit = editHostExit
       end
       object comboNetType: TComboBoxEx
         AnchorSideLeft.Side = asrBottom
@@ -1154,7 +1186,6 @@ object connform: Tconnform
       Top = 28
       Width = 200
       Align = alClient
-      DragMode = dmAutomatic
       DragType = dtVCL
       Header.AutoSizeIndex = -1
       Header.Columns = <      

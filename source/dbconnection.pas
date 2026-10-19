@@ -2,10 +2,6 @@ unit dbconnection;
 
 {$mode delphi}{$H+}
 
-{$IF defined(LINUX) or defined(WINDOWS)}
-  {$DEFINE HASMSSQL}
-{$ENDIF}
-
 interface
 
 uses
@@ -13,7 +9,7 @@ uses
   DateUtils, Types, Math, Dialogs, Graphics, ExtCtrls, StrUtils,
   Controls, Forms, IniFiles, Variants, FileUtil,
   RegExpr, process, Pipes, SQLDB, LConvEncoding,
-  {$IFDEF HASMSSQL}MSSQLConn, SQLDBLib, DB, {$ENDIF}
+  MSSQLConn, IBConnection, ibase60dyn, SQLDBLib, DB,
   generic_types, lazaruscompat,
   dbstructures, dbstructures.mysql, dbstructures.mssql, dbstructures.postgresql, dbstructures.sqlite, dbstructures.interbase,
   dbstructures.redis, redisclient;
@@ -689,7 +685,6 @@ type
       procedure SetLockedByThread(Value: TThread); override;
   end;
 
-  {$IFDEF HASMSSQL}
   TSqlSrvResults = TObjectList<TSQLQuery>;
   TSqlSrvConnection = class(TDBConnection)
     private
@@ -717,7 +712,6 @@ type
       function GetTableKeys(Table: TDBObject): TTableKeyList; override;
       function GetTableForeignKeys(Table: TDBObject): TForeignKeyList; override;
   end;
-  {$ENDIF}
 
   TPGRawResults = Array of PPGresult;
   TPQerrorfields = (PG_DIAG_SEVERITY, PG_DIAG_SQLSTATE, PG_DIAG_MESSAGE_PRIMARY, PG_DIAG_MESSAGE_DETAIL, PG_DIAG_MESSAGE_HINT, PG_DIAG_STATEMENT_POSITION, PG_DIAG_INTERNAL_POSITION, PG_DIAG_INTERNAL_QUERY, PG_DIAG_CONTEXT, PG_DIAG_SOURCE_FILE, PG_DIAG_SOURCE_LINE, PG_DIAG_SOURCE_FUNCTION);
@@ -789,21 +783,16 @@ type
       procedure GetColumnDefaultExpressions(Items: TStrings); override;
   end;
 
-  {TInterbaseRawResults = Array of String; // TFDQuery;
-  TIbDrivers = TDictionary<String, String>; //TFDPhysIBDriverLink>;
-  TFbDrivers = TDictionary<String, String>; //TFDPhysFBDriverLink>;
+  TInterbaseRawResults = TObjectList<TSQLQuery>;
   TInterbaseConnection = class(TDBConnection)
     private
-      FFDHandle: TObject; // TFDConnection;
+      FHandle: TIBConnection;
+      FTransaction: TSQLTransaction;
       FLastError: String;
       FLastErrorCode: Integer;
       FLastRawResults: TInterbaseRawResults;
-      class var FIbDrivers: TStringList; // TIbDrivers;
-      class var FFbDrivers: TStringList; // TFbDrivers;
       procedure SetActive(Value: Boolean); override;
-      procedure DoBeforeConnect; override;
       function GetThreadId: Int64; override;
-      procedure OnFdError(ASender: TObject; AInitiator: TObject; var AException: Exception);
       function GetLastErrorCode: Cardinal; override;
       function GetLastErrorMsg: String; override;
       function GetAllDatabases: TStringList; override;
@@ -813,12 +802,14 @@ type
       destructor Destroy; override;
       procedure Query(SQL: String; DoStoreResult: Boolean=False; LogCategory: TDBLogCategory=lcSQL); override;
       function Ping(Reconnect: Boolean): Boolean; override;
+      function ConnectionInfo: TStringList; override;
+      function GetLastResults: TDBQueryList; override;
       function GetCreateCode(Obj: TDBObject): String; override;
       property LastRawResults: TInterbaseRawResults read FLastRawResults;
       function GetTableColumns(Table: TDBObject): TTableColumnList; override;
       function GetTableKeys(Table: TDBObject): TTableKeyList; override;
       function GetTableForeignKeys(Table: TDBObject): TForeignKeyList; override;
-  end;}
+  end;
 
   { TRedisConnection — Redis 键值存储连接。复用 TDBConnection 生命周期/日志/线程,
     但 Query() 把 SQL 字符串解释为空格分词的 RESP 命令。不实现 SQL 表/列/键方法
@@ -971,7 +962,6 @@ type
       function TableName(Column: Integer): String; overload; override;
   end;
 
-  {$IFDEF HASMSSQL}
   TSqlSrvQuery = class(TDBQuery)
     private
       FCurrentResults: TSQLQuery;
@@ -991,7 +981,6 @@ type
       function DatabaseName: String; override;
       function TableName(Column: Integer): String; overload; override;
   end;
-  {$ENDIF}
 
   TPGQuery = class(TDBQuery)
     private
@@ -1079,17 +1068,17 @@ type
     property RedisKeyType: String read FKeyType;
   end;
 
-  {TInterbaseQuery = class(TDBQuery)
+  TInterbaseQuery = class(TDBQuery)
     private
       FConnection: TInterbaseConnection;
-      FCurrentResults: TStringList; //TFDDataSet;
-      FRecNoLocal: Integer;
+      FCurrentResults: TSQLQuery;
       FResultList: TInterbaseRawResults;
       procedure SetRecNo(Value: Int64); override;
     public
       constructor Create(AOwner: TComponent); override;
       destructor Destroy; override;
       procedure Execute(AddResult: Boolean=False; UseRawResult: Integer=-1); override;
+      function GetColBinData(Column: Integer; var baData: TBytes): Boolean; override;
       function Col(Column: Integer; IgnoreErrors: Boolean=False): String; overload; override;
       function ColIsPrimaryKeyPart(Column: Integer): Boolean; override;
       function ColIsUniqueKeyPart(Column: Integer): Boolean; override;
@@ -1098,7 +1087,7 @@ type
       function HasResult: Boolean; override;
       function DatabaseName: String; override;
       function TableName(Column: Integer): String; overload; override;
-  end;}
+  end;
 
 procedure SQLite_CollationNeededCallback(userData:Pointer; ppDb:Psqlite3; eTextRep:integer; zName:PAnsiChar); cdecl;
 function SQLite_Collation(userData: Pointer; lenA: Integer; strA: PAnsiChar; lenB: Integer; strB: PAnsiChar): Integer; cdecl;
@@ -1589,18 +1578,16 @@ begin
   case NetTypeGroup of
     ngMySQL:
       Result := TMySQLConnection.Create(AOwner);
-    {$IFDEF HASMSSQL}
     ngMSSQL:
       Result := TSqlSrvConnection.Create(AOwner);
-    {$ENDIF}
     ngPgSQL:
       Result := TPgConnection.Create(AOwner);
     ngSQLite:
       Result := TSQLiteConnection.Create(AOwner);
     ngRedis:
       Result := TRedisConnection.Create(AOwner);
-    //ngInterbase:
-    //  Result := TInterbaseConnection.Create(AOwner);
+    ngInterbase:
+      Result := TInterbaseConnection.Create(AOwner);
     else
       raise Exception.CreateFmt(_(MsgUnhandledNetType), [Integer(FNetType)]);
   end;
@@ -1613,18 +1600,16 @@ begin
   case NetTypeGroup of
     ngMySQL:
       Result := TMySQLQuery.Create(Connection);
-    {$IFDEF HASMSSQL}
     ngMSSQL:
       Result := TSqlSrvQuery.Create(Connection);
-    {$ENDIF}
     ngPgSQL:
       Result := TPGQuery.Create(Connection);
     ngSQLite:
       Result := TSQLiteQuery.Create(Connection);
     ngRedis:
       Result := TRedisQuery.Create(Connection);
-    //ngInterbase:
-    //  Result := TInterbaseQuery.Create(Connection);
+    ngInterbase:
+      Result := TInterbaseQuery.Create(Connection);
     else
       raise Exception.CreateFmt(_(MsgUnhandledNetType), [Integer(FNetType)]);
   end;
@@ -2078,7 +2063,14 @@ begin
         {$EndIf}
       end;
       ngInterbase:
-        rx.Expression := '^(gds32|ibclient|fbclient).*\.' + SharedSuffix;
+        {$If defined(LINUX)}
+        // libfbclient.so.2 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libfbclient.so.2
+        rx.Expression := '^\s*(libfbclient|libgds|fbclient|gds32|ibclient)[^=]*=>\s*(\S+)$';
+        {$ElseIf defined(FREEBSD)}
+        rx.Expression := '(libfbclient|libgds|fbclient|gds32|ibclient)[^=]+=>\s*(\S+)$';
+        {$Else}
+        rx.Expression := '^((lib)?fbclient|gds32|ibclient).*\.' + SharedSuffix;
+        {$EndIf}
     end;
     case NetTypeGroup of
       ngMySQL, ngMSSQL, ngPgSQL, ngSQLite, ngInterbase: begin
@@ -2212,7 +2204,6 @@ begin
     FDatatypes[i] := MySQLDatatypes[i];
 end;
 
-{$IFDEF HASMSSQL}
 constructor TSqlSrvConnection.Create(AOwner: TComponent);
 var
   i: Integer;
@@ -2225,7 +2216,6 @@ begin
   FMaxRowsPerInsert := 1000;
   FLastRawResults := TSqlSrvResults.Create(False);
 end;
-{$ENDIF}
 
 constructor TPgConnection.Create(AOwner: TComponent);
 var
@@ -2260,7 +2250,7 @@ begin
 end;
 
 
-{constructor TInterbaseConnection.Create(AOwner: TComponent);
+constructor TInterbaseConnection.Create(AOwner: TComponent);
 var
   i: Integer;
 begin
@@ -2270,7 +2260,8 @@ begin
     FDatatypes[i] := InterbaseDatatypes[i];
   // Interbase does not have IS:
   FInfSch := '';
-end;}
+  FLastRawResults := TInterbaseRawResults.Create(False);
+end;
 
 
 destructor TDBConnection.Destroy;
@@ -2292,7 +2283,6 @@ begin
   inherited;
 end;
 
-{$IFDEF HASMSSQL}
 destructor TSqlSrvConnection.Destroy;
 begin
   if Active then Active := False;
@@ -2306,7 +2296,6 @@ begin
   end;
   inherited;
 end;
-{$ENDIF}
 
 destructor TPgConnection.Destroy;
 begin
@@ -2325,12 +2314,14 @@ begin
 end;
 
 
-{destructor TInterbaseConnection.Destroy;
+destructor TInterbaseConnection.Destroy;
 begin
   if Active then Active := False;
-  FreeAndNil(FFdHandle);
+  FreeAndNil(FLastRawResults);
+  FreeAndNil(FTransaction);
+  FreeAndNil(FHandle);
   inherited;
-end;}
+end;
 
 
 function TDBConnection.GetDatatypeByName(var DataType: String; DeleteFromSource: Boolean; Identifier: String=''): TDBDatatype;
@@ -2739,7 +2730,6 @@ begin
 
 end;
 
-{$IFDEF HASMSSQL}
 procedure TSqlSrvConnection.SetActive(Value: Boolean);
 var
   Error, ServerVersion, ErrorHint: String;
@@ -2857,7 +2847,6 @@ begin
     Log(lcInfo, f_(MsgDisconnect, [FParameters.Hostname, DateTimeToStr(Now)]));
   end;
 end;
-{$ENDIF}
 
 procedure TPgConnection.SetActive(Value: Boolean);
 var
@@ -3106,78 +3095,82 @@ begin
 end;
 
 
-{procedure TInterbaseConnection.SetActive(Value: Boolean);
+procedure TInterbaseConnection.SetActive(Value: Boolean);
 var
-  DriverId: String;
-  IbDriver: TFDPhysIBDriverLink;
-  FbDriver: TFDPhysFBDriverLink;
+  Error, ErrorHint: String;
+  FinalHost: String;
+  FinalPort: Integer;
+  CandidateLibs: TStringList;
+  CandidateLib: String;
 begin
   if Value then begin
     DoBeforeConnect;
 
-    FFDHandle := TFDConnection.Create(Owner);
-    FFDHandle.OnError := OnFdError;
-    //FFDHandle.DriverName := Parameters.LibraryOrProvider; // Auto-sets Params.DriverID
-    FFDHandle.LoginPrompt := False;
-
-    // Create virtual Interbase or Firebird driver id, once
-    DriverId := Parameters.LibraryOrProvider;
-    if Parameters.IsInterbase then begin
-      if not Assigned(FIbDrivers) then begin
-        FIbDrivers := TIbDrivers.Create;
+    // Load the client library (fbclient.dll / libfbclient.so / gds32.dll etc.) once per process.
+    // ibase60dyn refuses a second, different library, so log instead when that happens.
+    if IBaseLoadedLibrary = '' then begin
+      CandidateLibs := TStringList.Create;
+      try
+        // Prefer the library selected in the session settings, then the auto-detected ones
+        if not Parameters.LibraryOrProvider.IsEmpty then
+          CandidateLibs.Add(Parameters.LibraryOrProvider);
+        CandidateLibs.AddStrings(Parameters.GetLibraries);
+        for CandidateLib in CandidateLibs do begin
+          if CandidateLib.IsEmpty then
+            Continue;
+          try
+            InitialiseIBase60(CandidateLib);
+            Break;
+          except
+            on E:EInOutError do
+              Log(lcInfo, 'Could not load Firebird/Interbase client library "'+CandidateLib+'": '+E.Message);
+          end;
+        end;
+        if IBaseLoadedLibrary = '' then begin
+          // Last resort: try default names, e.g. fbembed.dll, fbclient.dll, libfbclient.so, gds32.dll
+          try
+            InitialiseIBase60;
+          except
+            on E:EInOutError do
+              raise EDbError.Create(_('Could not load any Firebird/Interbase client library (fbclient, gds32 or ibclient). Install one, or check the library setting in your session.'));
+          end;
+        end;
+      finally
+        CandidateLibs.Free;
       end;
-      if not FIbDrivers.ContainsKey(DriverId) then begin
-        Log(lcInfo, 'Creating virtual driver id with '+Parameters.LibraryOrProvider);
-        IbDriver := TFDPhysIBDriverLink.Create(Owner);
-        IbDriver.VendorLib := Parameters.LibraryOrProvider;
-        IbDriver.DriverID := DriverId;
-        FIbDrivers.Add(DriverId, IbDriver);
-      end;
-      FIbDrivers.TryGetValue(DriverId, IbDriver);
-      FFDHandle.Params.Values['DriverID'] := IbDriver.DriverID;
     end
-    else if Parameters.IsFirebird then begin
-      if not Assigned(FFbDrivers) then begin
-        FFbDrivers := TFbDrivers.Create;
-      end;
-      if not FFbDrivers.ContainsKey(DriverId) then begin
-        Log(lcInfo, 'Creating virtual driver id link with '+Parameters.LibraryOrProvider);
-        FbDriver := TFDPhysFBDriverLink.Create(Owner);
-        FbDriver.VendorLib := Parameters.LibraryOrProvider;
-        FbDriver.DriverID := DriverId;
-        FFbDrivers.Add(DriverId, FbDriver);
-      end;
-      FFbDrivers.TryGetValue(DriverId, FbDriver);
-      FFDHandle.Params.Values['DriverID'] := FbDriver.DriverID;
-    end;
+    else if not SameText(IBaseLoadedLibrary, Parameters.LibraryOrProvider) then
+      Log(lcInfo, f_('Firebird/Interbase client already loaded from library %s, ignoring selected library %s',
+        [IBaseLoadedLibrary, Parameters.LibraryOrProvider]));
 
+    FinalHost := Parameters.Hostname;
+    FinalPort := Parameters.Port;
+    StartSSHTunnel(FinalHost, FinalPort);
+
+    FHandle := TIBConnection.Create(nil);
+    FTransaction := TSQLTransaction.Create(nil);
+    FTransaction.Database := FHandle;
+    FHandle.Transaction := FTransaction;
+    FHandle.UserName := Parameters.Username;
+    FHandle.Password := Parameters.Password;
     // TCP/IP or local?
     case Parameters.NetType of
       ntInterbase_TCPIP, ntFirebird_TCPIP: begin
-        FFDHandle.Params.Values['Protocol'] := 'ipTCPIP';
-        FFDHandle.Params.Values['Server'] := Parameters.Hostname;
-        FFDHandle.Params.Values['Port'] := Parameters.Port.ToString;
+        FHandle.HostName := FinalHost;
+        FHandle.Port := FinalPort;
       end;
       ntInterbase_Local, ntFirebird_Local: begin
-        FFDHandle.Params.Values['Protocol'] := 'ipLocal';
+        // Empty hostname makes the client use the local connection protocol
       end;
     end;
-
-    FFDHandle.Params.Values['Database'] := Parameters.AllDatabasesStr;
-    FFDHandle.Params.Values['User_Name'] := Parameters.Username;
-    FFDHandle.Params.Values['Password'] := Parameters.Password;
-    FFDHandle.Params.Values['CharacterSet'] := 'UTF8';
-    FFDHandle.Params.Values['ExtendedMetadata'] := 'True';
+    FHandle.DatabaseName := Parameters.AllDatabasesStr;
+    FHandle.CharSet := 'UTF8';
 
     try
-      FFDHandle.Connected := True;
-    except
-      // Let OnFdError set FLastError
-    end;
-
-    if FFDHandle.Connected then begin
+      FHandle.Open;
       FActive := True;
-      //! Query('PRAGMA busy_timeout='+(Parameters.QueryTimeout*1000).ToString);
+      FConnectionStarted := GetTickCount64 div 1000;
+      FServerUptime := -1;
 
       FServerDateTimeOnStartup := GetVar('SELECT ' + FSqlProvider.GetSql(qFuncNow));
 
@@ -3185,27 +3178,45 @@ begin
         FServerVersionUntouched := ''
       else
         FServerVersionUntouched := GetVar('SELECT rdb$get_context(''SYSTEM'', ''ENGINE_VERSION'') as version from rdb$database');
-      FConnectionStarted := GetTickCount div 1000;
-      FServerUptime := -1;
+
+      FRealHostname := Parameters.Hostname;
 
       // Triggers OnDatabaseChange event for <no db>
       Database := '';
       DoAfterConnect;
 
-    end else begin
-      Log(lcError, LastErrorMsg);
-      FConnectionStarted := 0;
-      raise EDbError.Create(LastErrorMsg);
+    except
+      on E:Exception do begin
+        FLastError := E.Message;
+        Error := LastErrorMsg;
+        Log(lcError, Error);
+        FConnectionStarted := 0;
+        if (FParameters.DefaultLibrary <> '') and (FParameters.LibraryOrProvider <> FParameters.DefaultLibrary) then begin
+          ErrorHint := f_('You could try the default library %s in your session settings. (Current: %s)',
+            [FParameters.DefaultLibrary, FParameters.LibraryOrProvider]
+            );
+        end else begin
+          ErrorHint := '';
+        end;
+        raise EDbError.Create(Error, LastErrorCode, ErrorHint);
+      end;
     end;
   end else begin
-    if FFdHandle <> nil then begin
-      ClearCache(False);
-      FFdHandle.Connected := False;
-      FActive := False;
-      Log(lcInfo, f_(MsgDisconnect, [Parameters.Hostname, DateTimeToStr(Now)]));
+    if FHandle <> nil then begin
+      try
+        FHandle.Close;
+      except
+        on E:Exception do
+          Log(lcError, 'Error while closing handle: '+E.Message);
+      end;
     end;
+    FActive := False;
+    ClearCache(False);
+    FConnectionStarted := 0;
+    EndSSHTunnel;
+    Log(lcInfo, f_(MsgDisconnect, [FParameters.Hostname, DateTimeToStr(Now)]));
   end;
-end;}
+end;
 
 
 procedure TMySQLConnection.SetOption(Option: Integer; Arg: Pointer);
@@ -3358,13 +3369,6 @@ begin
   Log(lcDebug, FLib.DllFile + ' v' + ServerVersionUntouched + ' loaded.');
   inherited;
 end;
-
-
-{procedure TInterbaseConnection.DoBeforeConnect;
-begin
-  // Todo
-  inherited;
-end;}
 
 
 procedure TDBConnection.StartSSHTunnel(var FinalHost: String; var FinalPort: Integer);
@@ -3532,7 +3536,6 @@ begin
   end;
 end;
 
-{$IFDEF HASMSSQL}
 procedure TSqlSrvConnection.DoAfterConnect;
 begin
   inherited;
@@ -3558,7 +3561,6 @@ begin
     'VIEW_TABLE_USAGE,'+
     'VIEWS';
 end;
-{$ENDIF}
 
 procedure TPgConnection.DoAfterConnect;
 var
@@ -3596,7 +3598,6 @@ begin
   RestartKeepAliveTimer;
 end;
 
-{$IFDEF HASMSSQL}
 function TSqlSrvConnection.Ping(Reconnect: Boolean): Boolean;
 begin
   Log(lcDebug, 'Ping server ...');
@@ -3614,7 +3615,6 @@ begin
   Result := FActive;
   RestartKeepAliveTimer;
 end;
-{$ENDIF}
 
 function TPGConnection.Ping(Reconnect: Boolean): Boolean;
 var
@@ -3670,17 +3670,23 @@ begin
 end;
 
 
-{function TInterbaseConnection.Ping(Reconnect: Boolean): Boolean;
+function TInterbaseConnection.Ping(Reconnect: Boolean): Boolean;
 begin
   Log(lcDebug, 'Ping server ...');
-  if FActive then begin
-    FFDHandle.Ping;
+  if FActive then try
+    FHandle.ExecuteDirect('SELECT 1 FROM rdb$database');
+  except
+    on E:Exception do begin
+      FLastError := E.Message;
+      Log(lcError, E.Message);
+      Active := False;
+      if Reconnect then
+        Active := True;
+    end;
   end;
   Result := FActive;
-  // Restart keep-alive timer
-  FKeepAliveTimer.Enabled := False;
-  FKeepAliveTimer.Enabled := True;
-end;}
+  RestartKeepAliveTimer;
+end;
 
 
 procedure TDBConnection.RestartKeepAliveTimer;
@@ -3812,7 +3818,6 @@ begin
   end;
 end;
 
-{$IFDEF HASMSSQL}
 type
   // Grants access to the protected Cursor, see TSqlSrvConnection.Query
   TSQLQueryAccess = class(TSQLQuery);
@@ -3862,7 +3867,6 @@ begin
     end;
   end;
 end;
-{$ENDIF}
 
 procedure TPGConnection.Query(SQL: String; DoStoreResult: Boolean=False; LogCategory: TDBLogCategory=lcSQL);
 var
@@ -4009,43 +4013,51 @@ begin
 end;
 
 
-{procedure TInterbaseConnection.Query(SQL: String; DoStoreResult: Boolean=False; LogCategory: TDBLogCategory=lcSQL);
+procedure TInterbaseConnection.Query(SQL: String; DoStoreResult: Boolean=False; LogCategory: TDBLogCategory=lcSQL);
 var
-  TimerStart: Cardinal;
-  FdQuery: TFDQuery;
+  TimerStart: QWord;
+  QueryResult: TSQLQuery;
+  HasRows: Boolean;
 begin
   inherited;
 
-  TimerStart := GetTickCount;
-  SetLength(FLastRawResults, 0);
-  FdQuery := TFDQuery.Create(Self);
-  FdQuery.Connection := FFDHandle;
-  // Todo: suppress mouse cursor updates
+  TimerStart := GetTickCount64;
+  FLastRawResults.Clear;
+  QueryResult := nil;
   try
-    FdQuery.ResourceOptions.CmdExecTimeout := Parameters.QueryTimeout;
-    if DoStoreResult then begin
-      FdQuery.SQL.Text := SQL;
-      if FdQuery.OpenOrExecute then begin
-        FRowsFound := FdQuery.RecordCount;
-        SetLength(FLastRawResults, Length(FLastRawResults)+1);
-        FLastRawResults[Length(FLastRawResults)-1] := FdQuery;
-      end;
-    end else begin
-      FdQuery.ExecSQL(SQL);
-      FRowsAffected := FdQuery.RowsAffected;
-      FdQuery.Free;
+    QueryResult := TSQLQuery.Create(FHandle);
+    FLastRawResults.Add(QueryResult);
+    QueryResult.DataBase := FHandle;
+    QueryResult.Transaction := FTransaction;
+    QueryResult.SQL.Text := SQL;
+    QueryResult.Options := [sqoAutoApplyUpdates, sqoAutoCommit, sqoCancelUpdatesOnRefresh];
+    QueryResult.PacketRecords := 10000;
+    // Prepare explicitly, so the cursor survives ExecSQL and tells us whether a result set came back
+    QueryResult.Prepare;
+    QueryResult.ExecSQL;
+    Inc(FRowsAffected, QueryResult.RowsAffected);
+    HasRows := TSQLQueryAccess(QueryResult).Cursor.FSelectable;
+    QueryResult.UnPrepare;
+    if not HasRows then begin
+      // Opening a statement without result set would execute it a second time, and then raise
+      // "Cannot open a non-select statement". See issue #2392
+      FLastRawResults.Remove(QueryResult);
+      FreeAndNil(QueryResult);
     end;
-    FLastQueryDuration := GetTickCount - TimerStart;
+    FLastQueryDuration := GetTickCount64 - TimerStart;
     FLastQueryNetworkDuration := 0;
   except
-    on E:EFDDBEngineException do begin
-      SetLength(FLastRawResults, 0);
-      Log(lcError, GetLastErrorMsg + ' :: ' + E.Message);
+    on E:Exception do begin
+      FLastError := E.Message;
+      if E is ESQLDatabaseError then
+        FLastErrorCode := ESQLDatabaseError(E).ErrorCode;
+      FLastRawResults.Clear;
+      QueryResult.Free;
+      Log(lcError, GetLastErrorMsg);
       raise EDbError.Create(GetLastErrorMsg);
     end;
   end;
-  FLastQueryNetworkDuration := GetTickCount - TimerStart;
-end;}
+end;
 
 
 function TDBConnection.GetLastResults: TDBQueryList;
@@ -4062,7 +4074,6 @@ begin
   end;
 end;
 
-{$IFDEF HASMSSQL}
 function TSqlSrvConnection.GetLastResults: TDBQueryList;
 var
   r: TDBQuery;
@@ -4083,7 +4094,6 @@ begin
   end;
   Batch.Free;
 end;
-{$ENDIF}
 
 function TMySQLConnection.GetCreateCode(Obj: TDBObject): String;
 var
@@ -4199,10 +4209,11 @@ begin
 end;
 
 
-{function TInterbaseConnection.GetCreateCode(Obj: TDBObject): String;
+function TInterbaseConnection.GetCreateCode(Obj: TDBObject): String;
 begin
   // Todo
-end;}
+  Result := '';
+end;
 
 
 function TMySQLConnection.GetCreateViewCode(Database, Name: String): String;
@@ -4539,7 +4550,6 @@ begin
   Result := FThreadID;
 end;
 
-{$IFDEF HASMSSQL}
 function TSqlSrvConnection.GetThreadId: Int64;
 begin
   if FThreadId = 0 then begin
@@ -4549,7 +4559,6 @@ begin
   end;
   Result := FThreadID;
 end;
-{$ENDIF}
 
 function TPGConnection.GetThreadId: Int64;
 begin
@@ -4573,11 +4582,11 @@ begin
 end;
 
 
-{function TInterbaseConnection.GetThreadId: Int64;
+function TInterbaseConnection.GetThreadId: Int64;
 begin
   // Todo
   Result := 0;
-end;}
+end;
 
 
 {**
@@ -4634,12 +4643,10 @@ begin
   Result := FLib.mysql_errno(FHandle);
 end;
 
-{$IFDEF HASMSSQL}
 function TSqlSrvConnection.GetLastErrorCode: Cardinal;
 begin
   Result := 0;
 end;
-{$ENDIF}
 
 function TPgConnection.GetLastErrorCode: Cardinal;
 begin
@@ -4653,23 +4660,11 @@ begin
 end;
 
 
-{function TInterbaseConnection.GetLastErrorCode: Cardinal;
+function TInterbaseConnection.GetLastErrorCode: Cardinal;
 begin
   // Note: there seem to be negative codes
   Result := Abs(FLastErrorCode);
-end;}
-
-
-{procedure TInterbaseConnection.OnFdError(ASender: TObject; AInitiator: TObject; var AException: Exception);
-var
-  oExc: EFDDBEngineException;
-begin
-  if AException is EFDDBEngineException then begin
-    oExc := EFDDBEngineException(AException);
-    FLastErrorCode := oExc.ErrorCode;
-    FLastError := oExc.Message;
-  end;
-end;}
+end;
 
 
 
@@ -4705,7 +4700,6 @@ begin
   end;
 end;
 
-{$IFDEF HASMSSQL}
 function TSqlSrvConnection.GetLastErrorMsg: String;
 begin
   if FLastError <> '' then
@@ -4713,7 +4707,6 @@ begin
   else
     Result := '';
 end;
-{$ENDIF}
 
 function TPgConnection.GetLastErrorMsg: String;
 begin
@@ -4730,10 +4723,13 @@ begin
 end;
 
 
-{function TInterbaseConnection.GetLastErrorMsg: String;
+function TInterbaseConnection.GetLastErrorMsg: String;
 begin
-  Result := f_(MsgSQLError, [LastErrorCode, FLastError]);
-end;}
+  if FLastError <> '' then
+    Result := f_(MsgSQLError, [LastErrorCode, FLastError])
+  else
+    Result := '';
+end;
 
 
 
@@ -4896,7 +4892,6 @@ begin
   end;
 end;
 
-{$IFDEF HASMSSQL}
 function TSqlSrvConnection.GetAllDatabases: TStringList;
 begin
   Result := inherited;
@@ -4910,7 +4905,6 @@ begin
     Result := FAllDatabases;
   end;
 end;
-{$ENDIF}
 
 function TPGConnection.GetAllDatabases: TStringList;
 var
@@ -4965,16 +4959,44 @@ begin
 end;
 
 
-{function TInterbaseConnection.GetAllDatabases: TStringList;
+function TInterbaseConnection.GetAllDatabases: TStringList;
 begin
   Result := inherited;
   if not Assigned(Result) then begin
+    // Interbase and Firebird know one database per session: the file we are connected to
     FAllDatabases := TStringList.Create;
-    FFDHandle.GetCatalogNames('', FAllDatabases);
+    FAllDatabases.Add(Parameters.AllDatabasesStr);
     ApplyIgnoreDatabasePattern(FAllDatabases);
     Result := FAllDatabases;
   end;
-end;}
+end;
+
+
+function TInterbaseConnection.ConnectionInfo: TStringList;
+begin
+  Result := Inherited;
+  if FActive then begin
+    Result.Values[_('Server type')] := FHandle.GetConnectionInfo(citServerType);
+    Result.Values[_('Server version')] := FHandle.GetConnectionInfo(citServerVersionString);
+    Result.Values[_('Client name')] := FHandle.GetConnectionInfo(citClientName);
+    Result.Values[_('Client library')] := IBaseLoadedLibrary;
+  end;
+end;
+
+
+function TInterbaseConnection.GetLastResults: TDBQueryList;
+var
+  r: TDBQuery;
+  i: Integer;
+begin
+  Result := TDBQueryList.Create(False);
+  for i:=0 to FLastRawResults.Count-1 do begin
+    r := Parameters.CreateQuery(Self);
+    r.SQL := FLastQuerySQL;
+    r.Execute(False, i);
+    Result.Add(r);
+  end;
+end;
 
 
 function TDBConnection.RefreshAllDatabases: TStringList;
@@ -6035,7 +6057,6 @@ begin
   end;
 end;
 
-{$IFDEF HASMSSQL}
 function TSqlSrvConnection.GetTableColumns(Table: TDBObject): TTableColumnList;
 var
   Comments: TDBQuery;
@@ -6076,7 +6097,6 @@ begin
   end;
 
 end;
-{$ENDIF}
 
 function TSQLiteConnection.GetTableColumns(Table: TDBObject): TTableColumnList;
 var
@@ -6114,22 +6134,21 @@ begin
 end;
 
 
-{function TInterbaseConnection.GetTableColumns(Table: TDBObject): TTableColumnList;
+function TInterbaseConnection.GetTableColumns(Table: TDBObject): TTableColumnList;
 var
   ColQuery: TDBQuery;
   Col: TTableColumn;
 begin
-  // Todo
   Result := TTableColumnList.Create(True);
   ColQuery := GetResults(FSqlProvider.GetSql(qGetTableColumns, [EscapeString(Table.Name)]));
   while not ColQuery.Eof do begin
     Col := TTableColumn.Create(Self);
     Result.Add(Col);
-    Col.Name := ColQuery.Col('FIELD_NAME');
+    Col.Name := ColQuery.Col('field_name');
     Col.OldName := Col.Name;
     //Col.ParseDatatype(ColQuery.Col('type'));
-    Col.DataType := GetDatatypeByNativeType(MakeInt(ColQuery.Col('FIELD_TYPE')));
-    Col.AllowNull := ColQuery.IsNull('NULL_FLAG');
+    Col.DataType := GetDatatypeByNativeType(MakeInt(ColQuery.Col('field_type')));
+    Col.AllowNull := ColQuery.IsNull('null_flag');
     Col.DefaultType := cdtNothing;
     Col.DefaultText := '';
     Col.OnUpdateType := cdtNothing;
@@ -6137,7 +6156,7 @@ begin
     ColQuery.Next;
   end;
   ColQuery.Free;
-end;}
+end;
 
 
 function TDBConnection.GetTableKeys(Table: TDBObject): TTableKeyList;
@@ -6370,7 +6389,6 @@ begin
   KeyQuery.Free;
 end;
 
-{$IFDEF HASMSSQL}
 function TSqlSrvConnection.GetTableKeys(Table: TDBObject): TTableKeyList;
 var
   KeyQuery: TDBQuery;
@@ -6413,7 +6431,6 @@ begin
   end;
   KeyQuery.Free;
 end;
-{$ENDIF}
 
 
 function TSQLiteConnection.GetTableKeys(Table: TDBObject): TTableKeyList;
@@ -6467,10 +6484,11 @@ begin
 end;
 
 
-{function TInterbaseConnection.GetTableKeys(Table: TDBObject): TTableKeyList;
+function TInterbaseConnection.GetTableKeys(Table: TDBObject): TTableKeyList;
 begin
+  // Todo
   Result := TTableKeyList.Create(True);
-end;}
+end;
 
 
 function TDBConnection.GetTableForeignKeys(Table: TDBObject): TForeignKeyList;
@@ -6538,7 +6556,6 @@ begin
   end;
 end;
 
-{$IFDEF HASMSSQL}
 function TSqlSrvConnection.GetTableForeignKeys(Table: TDBObject): TForeignKeyList;
 var
   ForeignQuery: TDBQuery;
@@ -6579,7 +6596,6 @@ begin
   end;
   ForeignQuery.Free;
 end;
-{$ENDIF}
 
 function TPgConnection.GetTableForeignKeys(Table: TDBObject): TForeignKeyList;
 var
@@ -6692,12 +6708,11 @@ begin
 end;
 
 
-{function TInterbaseConnection.GetTableForeignKeys(Table: TDBObject): TForeignKeyList;
+function TInterbaseConnection.GetTableForeignKeys(Table: TDBObject): TForeignKeyList;
 var
   ForeignQuery: TDBQuery;
   ForeignKey: TForeignKey;
 begin
-  // SQLite: query PRAGMA foreign_key_list
   Result := TForeignKeyList.Create(True);
   ForeignQuery := GetResults(
             'select strc.rdb$relation_name' +#13#10+
@@ -6726,12 +6741,12 @@ begin
       ForeignKey.OnUpdate := ForeignQuery.Col('rdb$update_rule');
       ForeignKey.OnDelete := ForeignQuery.Col('rdb$delete_rule');
     end;
-    ForeignKey.Columns.Add(ForeignQuery.Col('from'));
-    ForeignKey.ForeignColumns.Add(ForeignQuery.Col('to'));
+    ForeignKey.Columns.Add(Trim(ForeignQuery.Col('from')));
+    ForeignKey.ForeignColumns.Add(Trim(ForeignQuery.Col('to')));
     ForeignQuery.Next;
   end;
   ForeignQuery.Free;
-end;}
+end;
 
 procedure TSQLiteConnection.GetColumnDefaultExpressions(Items: TStrings);
 begin
@@ -6933,16 +6948,14 @@ begin
   case Parameters.NetTypeGroup of
     ngMySQL:
       Result := Length(TMySQLConnection(Self).LastRawResults);
-    {$IFDEF HASMSSQL}
     ngMSSQL:
       Result := TSqlSrvConnection(Self).LastRawResults.Count;
-    {$ENDIF}
     ngPgSQL:
       Result := Length(TPGConnection(Self).LastRawResults);
     ngSQLite:
       Result := Length(TSQLiteConnection(Self).LastRawResults);
-    //ngInterbase:
-    //  Result := Length(TInterbaseConnection(Self).LastRawResults);
+    ngInterbase:
+      Result := TInterbaseConnection(Self).LastRawResults.Count;
     ngRedis:
       Result := TRedisConnection(Self).LastResultCount;
     else
@@ -7421,7 +7434,6 @@ begin
   end;
 end;
 
-{$IFDEF HASMSSQL}
 procedure TSqlSrvConnection.FetchDbObjects(db: String; var Cache: TDBObjectList);
 var
   obj: TDBObject;
@@ -7479,7 +7491,6 @@ begin
     FreeAndNil(Results);
   end;
 end;
-{$ENDIF}
 
 procedure TPGConnection.FetchDbObjects(db: String; var Cache: TDBObjectList);
 var
@@ -7644,7 +7655,7 @@ begin
 end;
 
 
-{procedure TInterbaseConnection.FetchDbObjects(db: String; var Cache: TDBObjectList);
+procedure TInterbaseConnection.FetchDbObjects(db: String; var Cache: TDBObjectList);
 var
   obj: TDBObject;
   Results: TDBQuery;
@@ -7756,7 +7767,7 @@ begin
     on E:EDbError do;
   end;
 
-end;}
+end;
 
 
 function TDBConnection.GetKeyColumns(Columns: TTableColumnList; Keys: TTableKeyList): TTableColumnList;
@@ -7874,7 +7885,6 @@ begin
   end;
 end;
 
-{$IFDEF HASMSSQL}
 function TSqlSrvConnection.ConnectionInfo: TStringList;
 begin
   Result := Inherited;
@@ -7885,7 +7895,6 @@ begin
     Result.Values[_('Client version')] := FHandle.GetConnectionInfo(citClientVersion);
   end;
 end;
-{$ENDIF}
 
 
 function TPgConnection.ConnectionInfo: TStringList;
@@ -8176,11 +8185,12 @@ begin
 end;
 
 
-{constructor TInterbaseQuery.Create(AOwner: TComponent);
+constructor TInterbaseQuery.Create(AOwner: TComponent);
 begin
   inherited Create(AOwner);
   FConnection := AOwner as TInterbaseConnection;
-end;}
+  FResultList := TInterbaseRawResults.Create(False);
+end;
 
 
 destructor TDBQuery.Destroy;
@@ -8213,7 +8223,6 @@ begin
   inherited;
 end;
 
-{$IFDEF HASMSSQL}
 constructor TSqlSrvQuery.Create(AOwner: TComponent);
 begin
   inherited;
@@ -8233,7 +8242,6 @@ begin
   FResultList.Clear;
   inherited;
 end;
-{$ENDIF}
 
 destructor TPGQuery.Destroy;
 var
@@ -8261,19 +8269,20 @@ begin
 end;
 
 
-{destructor TInterbaseQuery.Destroy;
+destructor TInterbaseQuery.Destroy;
 var
   i: Integer;
 begin
   if HasResult and (FConnection <> nil) and (FConnection.Active) then begin
-    for i:=Low(FResultList) to High(FResultList) do begin
+    for i:=0 to FResultList.Count-1 do begin
       FResultList[i].Close;
       FResultList[i].Free;
     end;
   end;
-  SetLength(FResultList, 0);
+  FResultList.Clear;
+  FreeAndNil(FResultList);
   inherited;
-end;}
+end;
 
 
 procedure TDBQuery.LogMetaInfo(NumResult: Integer);
@@ -8381,7 +8390,6 @@ begin
   end;
 end;
 
-{$IFDEF HASMSSQL}
 procedure TSqlSrvQuery.Execute(AddResult: Boolean=False; UseRawResult: Integer=-1);
 var
   i, j, NumFields, NumResults: Integer;
@@ -8497,7 +8505,6 @@ begin
     end;
   end;
 end;
-{$ENDIF}
 
 procedure TPGQuery.Execute(AddResult: Boolean=False; UseRawResult: Integer=-1);
 var
@@ -8644,29 +8651,32 @@ begin
 end;
 
 
-{procedure TInterbaseQuery.Execute(AddResult: Boolean; UseRawResult: Integer);
+procedure TInterbaseQuery.Execute(AddResult: Boolean; UseRawResult: Integer);
 var
   i, j, NumFields, NumResults: Integer;
   TypeIndex: TDBDatatypeIndex;
-  LastResult:  TFDQuery;
+  LastResult: TSQLQuery;
 begin
   if UseRawResult = -1 then begin
     Connection.Query(FSQL, FStoreResult);
     UseRawResult := 0;
   end;
   if Connection.ResultCount > UseRawResult then begin
-    LastResult := TInterbaseConnection(Connection).LastRawResults[UseRawResult]
+    LastResult := TInterbaseConnection(Connection).LastRawResults[UseRawResult];
+    LastResult.Open;
   end else begin
     LastResult := nil;
   end;
-  if AddResult and (Length(FResultList) = 0) then
+  if AddResult and (FResultList.Count = 0) then
     AddResult := False;
   if AddResult then
-    NumResults := Length(FResultList)+1
+    NumResults := FResultList.Count+1
   else begin
-    for i:=Low(FResultList) to High(FResultList) do begin
+    for i:=0 to FResultList.Count-1 do begin
+      FResultList[i].Close;
       FResultList[i].Free;
     end;
+    FResultList.Clear;
     NumResults := 1;
     FRecordCount := 0;
     FAutoIncrementColumn := -1;
@@ -8674,13 +8684,13 @@ begin
   end;
   if LastResult <> nil then begin
     LogMetaInfo(NumResults);
-    SetLength(FResultList, NumResults);
-    FResultList[NumResults-1] := LastResult;
+    FResultList.Add(LastResult);
     FRecordCount := FRecordCount + LastResult.RecordCount;
   end;
+
+  // Set up columns and data types
   if not AddResult then begin
     if HasResult then begin
-      // FCurrentResults is normally done in SetRecNo, but never if result has no rows
       FCurrentResults := LastResult;
       NumFields := LastResult.FieldCount;
       SetLength(FColumnTypes, NumFields);
@@ -8690,10 +8700,10 @@ begin
       FColumnOrgNames.Clear;
       for i:=0 to NumFields-1 do begin
         FColumnNames.Add(LastResult.Fields[i].FieldName);
-        FColumnOrgNames.Add(FColumnNames[FColumnNames.Count-1]);
+        FColumnOrgNames.Add(FColumnNames[i]);
         case LastResult.Fields[i].DataType of
           ftSmallint, ftWord:
-            TypeIndex := dbdtMediumInt;
+            TypeIndex := dbdtSmallint;
           ftInteger:
             TypeIndex := dbdtInt;
           ftAutoInc: begin
@@ -8701,29 +8711,25 @@ begin
             FAutoIncrementColumn := i;
           end;
           ftLargeint:
-            TypeIndex := dbdtBigInt;
-          ftBCD, ftFMTBcd:
-            TypeIndex := dbdtDecimal;
+            TypeIndex := dbdtBigint;
+          ftBoolean:
+            TypeIndex := dbdtBool;
+          ftBCD, ftFMTBcd, ftCurrency:
+            TypeIndex := dbdtNumeric;
           ftFixedChar, ftFixedWideChar:
             TypeIndex := dbdtChar;
-          ftString, ftWideString, ftBoolean, ftGuid:
+          ftString, ftWideString, ftGuid:
             TypeIndex := dbdtVarchar;
-          ftMemo, ftWideMemo:
-            TypeIndex := dbdtText;
-          ftBlob, ftVariant:
-            TypeIndex := dbdtMediumBlob;
-          ftBytes:
-            TypeIndex := dbdtBinary;
-          ftVarBytes:
-            TypeIndex := dbdtVarbinary;
-          ftFloat, ftSingle:
-            TypeIndex := dbdtFloat;
+          ftMemo, ftWideMemo, ftBlob, ftVariant:
+            TypeIndex := dbdtBlob;
+          ftFloat:
+            TypeIndex := dbdtDouble;
           ftDate:
             TypeIndex := dbdtDate;
           ftTime:
             TypeIndex := dbdtTime;
-          ftDateTime, ftTimeStamp:
-            TypeIndex := dbdtDateTime;
+          ftDateTime:
+            TypeIndex := dbdtTimestamp;
           else
             raise EDbError.CreateFmt(_('Unknown data type for column #%d - %s: %d'), [i, FColumnNames[i], Integer(LastResult.Fields[i].DataType)]);
         end;
@@ -8740,7 +8746,7 @@ begin
       SetLength(FColumnFlags, 0);
     end;
   end;
-end;}
+end;
 
 
 procedure TDBQuery.SetColumnOrgNames(Value: TStringList);
@@ -8833,7 +8839,6 @@ begin
   end;
 end;
 
-{$IFDEF HASMSSQL}
 procedure TSqlSrvQuery.SetRecNo(Value: Int64);
 var
   i, j: Integer;
@@ -8892,7 +8897,6 @@ begin
     FEof := False;
   end;
 end;
-{$ENDIF}
 
 procedure TPGQuery.SetRecNo(Value: Int64);
 var
@@ -8994,7 +8998,7 @@ begin
 end;
 
 
-{procedure TInterbaseQuery.SetRecNo(Value: Int64);
+procedure TInterbaseQuery.SetRecNo(Value: Int64);
 var
   i, j: Integer;
   RowFound: Boolean;
@@ -9027,7 +9031,7 @@ begin
     if not RowFound then begin
       NumRows := 0;
       try
-        for i:=Low(FResultList) to High(FResultList) do begin
+        for i:=0 to FResultList.Count-1 do begin
           Inc(NumRows, FResultList[i].RecordCount);
           if NumRows > Value then begin
             FCurrentResults := FResultList[i];
@@ -9041,14 +9045,17 @@ begin
         end;
       except
         // Catch broken connection
-        raise;
+        on E:Exception do begin
+          FConnection.Active := False;
+          FConnection.Log(lcError, E.Message);
+        end;
       end;
     end;
 
     FRecNo := Value;
     FEof := False;
   end;
-end;}
+end;
 
 
 function TDBQuery.ColumnCount: Integer;
@@ -9165,7 +9172,6 @@ begin
     Result := TextInvalidColumn;
 end;
 
-{$IFDEF HASMSSQL}
 function TSqlSrvQuery.GetColBinData(Column: Integer; var baData: TBytes): Boolean;
 var
   Stream: TMemoryStream;
@@ -9217,7 +9223,6 @@ begin
   else
     Result := TextInvalidColumn;
 end;
-{$ENDIF}
 
 function TPGQuery.Col(Column: Integer; IgnoreErrors: Boolean=False): String;
 var
@@ -9277,18 +9282,52 @@ begin
 end;
 
 
-{function TInterbaseQuery.Col(Column: Integer; IgnoreErrors: Boolean): String;
+function TInterbaseQuery.GetColBinData(Column: Integer; var baData: TBytes): Boolean;
+var
+  Stream: TMemoryStream;
+begin
+  Result := False;
+  if ColumnExists(Column) and (not IsNull(Column)) then begin
+    if FCurrentResults.Fields[Column] is TBlobField then begin
+      Stream := TMemoryStream.Create;
+      try
+        TBlobField(FCurrentResults.Fields[Column]).SaveToStream(Stream);
+        SetLength(baData, Stream.Size);
+        if Stream.Size > 0 then
+          Move((Stream.Memory)^, baData[0], Stream.Size);
+        Result := True;
+      finally
+        Stream.Free;
+      end;
+    end else
+      Raise EDbError.Create(SNotImplemented);
+  end;
+end;
+
+
+function TInterbaseQuery.Col(Column: Integer; IgnoreErrors: Boolean): String;
 begin
   if ColumnExists(Column) then begin
     if FEditingPrepared and Assigned(FCurrentUpdateRow) then begin
       Result := FCurrentUpdateRow[Column].NewText;
     end else begin
-      Result := FCurrentResults.Fields[Column].AsString;
+      try
+        case Datatype(Column).Category of
+          dtcReal:
+            Result := FloatToStr(FCurrentResults.Fields[Column].AsFloat, FFormatSettings);
+          dtcTemporal:
+            Result := FormatDateTime(Datatype(Column).Format, FCurrentResults.Fields[Column].AsFloat);
+          else
+            Result := FCurrentResults.Fields[Column].AsString;
+        end;
+      except
+        Result := String(FCurrentResults.Fields[Column].AsAnsiString);
+      end;
     end;
   end
   else
     Result := TextInvalidColumn;
-end;}
+end;
 
 
 function TDBQuery.Col(ColumnName: String; IgnoreErrors: Boolean=False): String;
@@ -9432,13 +9471,11 @@ begin
   Result := (FColumnFlags[Column] and PRI_KEY_FLAG) = PRI_KEY_FLAG;
 end;
 
-{$IFDEF HASMSSQL}
 function TSqlSrvQuery.ColIsPrimaryKeyPart(Column: Integer): Boolean;
 begin
 //  Result := FCurrentResults.Fields[0].KeyFields
   Result := False;
 end;
-{$ENDIF}
 
 function TPGQuery.ColIsPrimaryKeyPart(Column: Integer): Boolean;
 begin
@@ -9470,11 +9507,11 @@ begin
 end;
 
 
-{function TInterbaseQuery.ColIsPrimaryKeyPart(Column: Integer): Boolean;
+function TInterbaseQuery.ColIsPrimaryKeyPart(Column: Integer): Boolean;
 begin
   // Todo
   Result := False;
-end; }
+end;
 
 
 function TMySQLQuery.ColIsUniqueKeyPart(Column: Integer): Boolean;
@@ -9482,12 +9519,10 @@ begin
   Result := (FColumnFlags[Column] and UNIQUE_KEY_FLAG) = UNIQUE_KEY_FLAG;
 end;
 
-{$IFDEF HASMSSQL}
 function TSqlSrvQuery.ColIsUniqueKeyPart(Column: Integer): Boolean;
 begin
   Result := False;
 end;
-{$ENDIF}
 
 function TPGQuery.ColIsUniqueKeyPart(Column: Integer): Boolean;
 begin
@@ -9501,11 +9536,11 @@ begin
 end;
 
 
-{function TInterbaseQuery.ColIsUniqueKeyPart(Column: Integer): Boolean;
+function TInterbaseQuery.ColIsUniqueKeyPart(Column: Integer): Boolean;
 begin
   // Todo
   Result := False;
-end;}
+end;
 
 
 function TMySQLQuery.ColIsKeyPart(Column: Integer): Boolean;
@@ -9513,12 +9548,10 @@ begin
   Result := (FColumnFlags[Column] and MULTIPLE_KEY_FLAG) = MULTIPLE_KEY_FLAG;
 end;
 
-{$IFDEF HASMSSQL}
 function TSqlSrvQuery.ColIsKeyPart(Column: Integer): Boolean;
 begin
   Result := FCurrentResults.Fields[Column].IsIndexField;
 end;
-{$ENDIF}
 
 function TPGQuery.ColIsKeyPart(Column: Integer): Boolean;
 begin
@@ -9532,11 +9565,11 @@ begin
 end;
 
 
-{function TInterbaseQuery.ColIsKeyPart(Column: Integer): Boolean;
+function TInterbaseQuery.ColIsKeyPart(Column: Integer): Boolean;
 begin
   // Todo
   Result := False;
-end;}
+end;
 
 
 function TDBQuery.ColIsVirtual(Column: Integer): Boolean;
@@ -9577,7 +9610,6 @@ begin
     Result := True;
 end;
 
-{$IFDEF HASMSSQL}
 function TSqlSrvQuery.IsNull(Column: Integer): Boolean;
 begin
   Result := False;
@@ -9597,7 +9629,6 @@ begin
     end;
   end;
 end;
-{$ENDIF}
 
 function TPGQuery.IsNull(Column: Integer): Boolean;
 begin
@@ -9617,13 +9648,13 @@ begin
 end;
 
 
-{function TInterbaseQuery.IsNull(Column: Integer): Boolean;
+function TInterbaseQuery.IsNull(Column: Integer): Boolean;
 begin
   if FEditingPrepared and Assigned(FCurrentUpdateRow) then
     Result := FCurrentUpdateRow[Column].NewIsNull
   else
     Result := FCurrentResults.Fields[Column].IsNull;
-end;}
+end;
 
 
 function TDBQuery.IsFunction(Column: Integer): Boolean;
@@ -9640,12 +9671,10 @@ begin
   Result := Length(FResultList) > 0;
 end;
 
-{$IFDEF HASMSSQL}
 function TSqlSrvQuery.HasResult: Boolean;
 begin
   Result := FResultList.Count > 0;
 end;
-{$ENDIF}
 
 function TPGQuery.HasResult: Boolean;
 begin
@@ -9659,10 +9688,10 @@ begin
 end;
 
 
-{function TInterbaseQuery.HasResult: Boolean;
+function TInterbaseQuery.HasResult: Boolean;
 begin
-  Result := Length(FResultList) > 0;
-end;}
+  Result := FResultList.Count > 0;
+end;
 
 
 procedure TDBQuery.PrepareColumnAttributes;
@@ -10099,12 +10128,10 @@ begin
   end;
 end;
 
-{$IFDEF HASMSSQL}
 function TSqlSrvQuery.DatabaseName: String;
 begin
   Result := Connection.Database;
 end;
-{$ENDIF}
 
 function TPGQuery.DatabaseName: String;
 begin
@@ -10120,11 +10147,11 @@ begin
 end;
 
 
-{function TInterbaseQuery.DatabaseName: String;
+function TInterbaseQuery.DatabaseName: String;
 begin
   // Todo
   Result := Connection.Database;
-end;}
+end;
 
 
 function TDBQuery.TableName: String;
@@ -10196,13 +10223,11 @@ begin
   end;
 end;
 
-{$IFDEF HASMSSQL}
 function TSqlSrvQuery.TableName(Column: Integer): String;
 begin
   // Mostly empty on MSSQL, so the poor regex in TDBQuery.TableName has to be sufficient
   Result := FCurrentResults.Fields[Column].Origin;
 end;
-{$ENDIF}
 
 function TPGQuery.TableName(Column: Integer): String;
 var
@@ -10235,10 +10260,11 @@ begin
 end;
 
 
-{function TInterbaseQuery.TableName(Column: Integer): String;
+function TInterbaseQuery.TableName(Column: Integer): String;
 begin
   // Todo
-end;}
+  Result := '';
+end;
 
 
 function TDBQuery.QuotedDbAndTableName: String;

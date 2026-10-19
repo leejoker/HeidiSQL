@@ -863,8 +863,8 @@ type
       var Handled: Boolean);
     procedure DataGridContextPopup(Sender: TObject; MousePos: TPoint;
       var Handled: Boolean);
-    procedure DBtreeMouseMove(Sender: TObject; Shift: TShiftState; X, Y: Integer
-      );
+    procedure AnyGridMouseMove(Sender: TObject; Shift: TShiftState; X,
+      Y: Integer);
     procedure FormActivate(Sender: TObject);
     procedure ImageListGetWidthForPPI(Sender: TCustomImageList;
       AImageWidth, APPI: Integer; var AResultWidth: Integer);
@@ -1869,7 +1869,7 @@ begin
   AppSettings.WriteInt(asQuerymemoheight, ScaleFormToDesign(pnlQueryMemo.Height));
   AppSettings.WriteInt(asQueryhelperswidth, ScaleFormToDesign(pnlQueryHelpers.Width));
   AppSettings.WriteInt(asCompletionProposalWidth, SynCompletionProposal.TheForm.ScaleFormToDesign(SynCompletionProposal.TheForm.Width));
-  AppSettings.WriteInt(asCompletionProposalNbLinesInWindow, SynCompletionProposal.TheForm.ScaleFormToDesign(SynCompletionProposal.LinesInWindow));
+  AppSettings.WriteInt(asCompletionProposalNbLinesInWindow, SynCompletionProposal.LinesInWindow);
   AppSettings.WriteInt(asDbtreewidth, ScaleFormToDesign(pnlLeft.width));
   AppSettings.WriteBool(asGroupTreeObjects, actGroupObjects.Checked);
   AppSettings.WriteBool(asTreeShowColumns, actTreeShowColumns.Checked);
@@ -2184,7 +2184,14 @@ begin
   end;
 
   // Completion proposal window
-  SynCompletionProposal.TheForm.Width := Min(Max(AppSettings.ReadInt(asCompletionProposalWidth), 50), 350);
+  // The LCL scales the proposal form again when it is shown on a monitor with
+  // a different DPI, which inflates its height on every show. Keep Scaled off
+  // and handle DPI awareness ourselves, as the Delphi trunk does.
+  SynCompletionProposal.TheForm.Scaled := False;
+  // Width is stored in design units, so scale it back to the form's current DPI
+  SynCompletionProposal.TheForm.Width := SynCompletionProposal.TheForm.ScaleDesignToForm(
+    Min(Max(AppSettings.ReadInt(asCompletionProposalWidth), 50), 350)
+  );
   SynCompletionProposal.TheForm.BackgroundColor := clBtnFace;
   SynCompletionProposal.TheForm.OnKeyDown := SynCompletionProposalFormKeyDown;
   SynCompletionProposal.LinesInWindow := Min(AppSettings.ReadInt(asCompletionProposalNbLinesInWindow), 10);
@@ -2542,7 +2549,13 @@ begin
       if not BackupFilename.IsEmpty then begin
         if FileExists(BackupFilename) then begin
           Tab := GetOrCreateEmptyQueryTab(False);
-          Tab.Uid := Section;
+          if Section.IsEmpty then begin
+            // Fix broken tab section with empty name, see issue #2637
+            Tab.Uid := TQueryTab.GenerateUid;
+            TabsIni.EraseSection(Section);
+          end else begin
+            Tab.Uid := Section;
+          end;
           Tab.LoadContents(BackupFilename, True, Encoding);
           Tab.MemoFilename := Filename;
           Tab.Memo.Modified := True;
@@ -2566,7 +2579,13 @@ begin
       end else if not Filename.IsEmpty then begin
         if FileExists(Filename) then begin
           Tab := GetOrCreateEmptyQueryTab(False);
-          Tab.Uid := Section;
+          if Section.IsEmpty then begin
+            // Fix broken tab section with empty name, see issue #2637
+            Tab.Uid := TQueryTab.GenerateUid;
+            TabsIni.EraseSection(Section);
+          end else begin
+            Tab.Uid := Section;
+          end;
           Tab.LoadContents(Filename, True, Encoding);
           Tab.MemoFilename := Filename;
           if not TabCaption.IsEmpty then
@@ -4783,14 +4802,19 @@ begin
   Handled := Tree.Header.InHeader(MousePos);
 end;
 
-procedure TMainForm.DBtreeMouseMove(Sender: TObject; Shift: TShiftState; X,
+procedure TMainForm.AnyGridMouseMove(Sender: TObject; Shift: TShiftState; X,
   Y: Integer);
+var
+  VT: TLazVirtualStringTree;
 begin
   // Required step with DragMode=dmManual
   // We use dmManual to fix a non appearing context menu in conjunction with DragType=dtVCL
   // This reserves left-clicks for dragging, leaving right-clicks for context menu
-  if (ssLeft in Shift) and (not DBtree.Dragging) then
-    DBtree.BeginDrag(False);
+  if not (ssLeft in Shift) then
+    Exit;
+  VT := Sender as TLazVirtualStringTree;
+  if (VT.DragMode = dmManual) and (VT.DragType = dtVCL) and (not VT.Dragging) then
+    VT.BeginDrag(False);
 end;
 
 procedure TMainForm.FormActivate(Sender: TObject);
@@ -13725,7 +13749,9 @@ begin
   end;
   AppSettings.DeleteValue(asCompletionProposalWidth);
   AppSettings.DeleteValue(asCompletionProposalNbLinesInWindow);
-  SynCompletionProposal.TheForm.Width := Max(AppSettings.ReadInt(asCompletionProposalWidth), 50);
+  SynCompletionProposal.TheForm.Width := SynCompletionProposal.TheForm.ScaleDesignToForm(
+    Max(AppSettings.ReadInt(asCompletionProposalWidth), 50)
+  );
   SynCompletionProposal.LinesInWindow := AppSettings.ReadInt(asCompletionProposalNbLinesInWindow);
 end;
 

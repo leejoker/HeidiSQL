@@ -5,7 +5,7 @@ object frmRoutineEditor: TfrmRoutineEditor
   Width = 700
   ClientHeight = 500
   ClientWidth = 700
-  LCLVersion = '4.4.0.0'
+  LCLVersion = '4.8.0.0'
   ParentFont = False
   TabOrder = 0
   object lblSQLcode: TLabel
@@ -418,7 +418,6 @@ object frmRoutineEditor: TfrmRoutineEditor
         Width = 599
         Align = alClient
         DragImageKind = diMainColumnOnly
-        DragMode = dmAutomatic
         DragType = dtVCL
         EditDelay = 0
         Header.AutoSizeIndex = 1

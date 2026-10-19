@@ -91,6 +91,28 @@ Ansgar
 Install Lazarus 4.8 and FreePascal. Then load the `.lpi` file in the root directory in the Lazarus IDE.
 Alternatively, use `/usr/bin/lazbuild heidisql.lpi` on the command line.
 
+### Patching Lazarus 4.8
+Local fixes for Lazarus 4.8 live in `extra/lazarus-patches/4.8/`. The CI applies all of them to the
+Lazarus installation before building, and local builds should do the same:
+
+```bash
+for p in extra/lazarus-patches/4.8/*.patch; do
+  patch -d /path/to/lazarus -p1 --dry-run < "$p" && patch -d /path/to/lazarus -p1 < "$p"
+done
+```
+On Windows, use `patch --binary -p1` instead: without `--binary`, GNU patch strips the CRs from
+the patch and rewrites the entire target file with LF line endings.
+
+Patches are stored with LF line endings in the repository, so they match the LF line endings of
+the Linux Lazarus installation applied by the CI. With `core.autocrlf=true` the Windows checkout
+has CRLF line endings, matching the CRLF Lazarus installation for local application.
+
+Generate new patches as commits in a git baseline of the local Lazarus installation and export them
+with `git diff`, then convert to CRLF with `unix2dos` before applying locally with `patch --binary`.
+
+The Cocoa patches fix undersized fonts and icons in all VirtualTree controls on retina displays,
+caused by the blit scaling changes in Lazarus 4.6+ (upstream issues #41313/#41299).
+
 ### Icons8 copyright
 Icons added in January 2019 are copyright by [Icons8](https://icons8.com). Used with a special permission
 from Icons8 given to Ansgar for this project only. Do not copy them for anything else other than building
