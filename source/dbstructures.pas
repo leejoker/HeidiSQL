@@ -36,7 +36,7 @@ type
     ntRedis_Cluster
     );
   TNetTypeGroup = (ngMySQL, ngMSSQL, ngPgSQL, ngSQLite, ngInterbase, ngRedis);
-  TNetTypeLibs = TDictionary<TNetType, TStringList>;
+  TNetTypeLibs = TDictionary<Integer, TStringList>; // Key = Ord(TNetType), see issue #2640
 
   // SQL query ids and provider
   TStringMap = TDictionary<string,string>;

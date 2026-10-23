@@ -52,7 +52,7 @@ copy-locale:
 
 build-win64:
 	@echo "=== Building Win64"
-	lazbuild $(OPTS) $(LPI)
+	bash ./lazbuild-with-buildnr.sh lazbuild $(OPTS) $(LPI)
 	@mkdir -p ./out/win64
 	@mv -v "$(BIN).exe" "$(BINWIN64)"
 	@"$(PEFLAGS)" "$(BINWIN64)" --set --all
@@ -76,7 +76,7 @@ build-installer:
 
 build-gtk2:
 	@echo "=== Building GTK2"
-	$(LAZBUILD) $(OPTS) $(LPI)
+	bash ./lazbuild-with-buildnr.sh $(LAZBUILD) $(OPTS) $(LPI)
 	@mkdir -p ./out/gtk2
 	@mv -v $(BIN) $(BINGTK)
 
@@ -90,7 +90,7 @@ run-gtk2: build-gtk2
 
 build-qt5:
 	@echo "=== Building QT5"
-	$(LAZBUILD) $(OPTS) $(OPTSQT5) $(LPI)
+	bash ./lazbuild-with-buildnr.sh $(LAZBUILD) $(OPTS) $(OPTSQT5) $(LPI)
 	@mkdir -p ./out/qt5
 	@mv -v $(BIN) $(BINQT5)
 
@@ -104,13 +104,13 @@ run-qt5: build-qt5
 
 build-qt6:
 	@echo "=== Building QT6"
-	$(LAZBUILD) $(OPTS) $(OPTSQT6) $(LPI)
+	bash ./lazbuild-with-buildnr.sh $(LAZBUILD) $(OPTS) $(OPTSQT6) $(LPI)
 	@mkdir -p ./out/qt6
 	@mv -v $(BIN) $(BINQT6)
 
 build-qt6arm:
 	@echo "=== Building QT6 ARM64"
-	$(LAZBUILD) $(OPTS) $(OPTSQT6) $(LPI)
+	bash ./lazbuild-with-buildnr.sh $(LAZBUILD) $(OPTS) $(OPTSQT6) $(LPI)
 	@mkdir -p ./out/qt6arm
 	@mv -v $(BIN) $(BINQT6ARM)
 
@@ -124,7 +124,7 @@ run-qt6: build-qt6
 
 build-macos:
 	@echo "=== Building macOS"
-	$(LAZBUILD) $(OPTS) $(LPI)
+	bash ./lazbuild-with-buildnr.sh $(LAZBUILD) $(OPTS) $(LPI)
 	@mkdir -p ./out/macos
 	@mv -v $(BIN) $(BINMACOS)
 

@@ -2030,7 +2030,7 @@ begin
     FLibraries := TNetTypeLibs.Create;
   end;
 
-  if not FLibraries.ContainsKey(NetType) then begin
+  if not FLibraries.ContainsKey(Ord(NetType)) then begin
     FoundLibs := TStringList.Create;
     rx := TRegExpr.Create;
     rx.ModifierI := True;
@@ -2107,9 +2107,10 @@ begin
       end;
     end;
     rx.Free;
-    FLibraries.Add(NetType, FoundLibs);
+    FLibraries.Add(Ord(NetType), FoundLibs);
   end;
-  FLibraries.TryGetValue(NetType, Result);
+  if not FLibraries.TryGetValue(Ord(NetType), Result) then
+    Result := TStringList.Create;
 end;
 
 
@@ -4345,15 +4346,18 @@ var
   FkDeferrable, FkInitiallyDeferred: Boolean;
 begin
   Result := '';
+  FkDeferrable := False;
+  FkInitiallyDeferred := False;
   case Obj.NodeType of
 
     lntTable: begin
       Lines := TStringList.Create;
       try
-        // Columns. Identity columns need Firebird 3+, and array dimensions
-        // use LIST(), available since Firebird 2.1+ / recent InterBase.
-        // Fall back on older servers:
-        try
+        // Columns. Identity columns need Firebird 3+, and array dimensions use
+        // LIST(), available since Firebird 2.1+. InterBase has neither, so pick
+        // the query by server family and version instead of probing and
+        // catching query errors, which would spam the SQL log.
+        if Parameters.IsFirebird and (ServerVersionInt >= 30000) then
           Q := GetResults(
             'SELECT r.RDB$FIELD_NAME AS field_name, r.RDB$NULL_FLAG AS null_flag,'+
             ' r.RDB$DEFAULT_SOURCE AS default_source, r.RDB$IDENTITY_TYPE AS identity_type,'+
@@ -4372,10 +4376,9 @@ begin
             ' LEFT JOIN RDB$COLLATIONS collr ON collr.RDB$COLLATION_ID = r.RDB$COLLATION_ID AND collr.RDB$CHARACTER_SET_ID = f.RDB$CHARACTER_SET_ID'+
             ' LEFT JOIN RDB$COLLATIONS collf ON collf.RDB$COLLATION_ID = f.RDB$COLLATION_ID AND collf.RDB$CHARACTER_SET_ID = f.RDB$CHARACTER_SET_ID'+
             ' WHERE r.RDB$RELATION_NAME = '+EscapeString(Obj.Name)+
-            ' ORDER BY r.RDB$FIELD_POSITION');
-        except
-          on E:EDbError do
-            Q := GetResults(
+            ' ORDER BY r.RDB$FIELD_POSITION')
+        else
+          Q := GetResults(
               'SELECT r.RDB$FIELD_NAME AS field_name, r.RDB$NULL_FLAG AS null_flag,'+
               ' r.RDB$DEFAULT_SOURCE AS default_source, CAST(NULL AS SMALLINT) AS identity_type,'+
               ' f.RDB$FIELD_TYPE AS field_type, f.RDB$FIELD_SUB_TYPE AS field_subtype,'+
@@ -4393,7 +4396,6 @@ begin
               ' LEFT JOIN RDB$COLLATIONS collf ON collf.RDB$COLLATION_ID = f.RDB$COLLATION_ID AND collf.RDB$CHARACTER_SET_ID = f.RDB$CHARACTER_SET_ID'+
               ' WHERE r.RDB$RELATION_NAME = '+EscapeString(Obj.Name)+
               ' ORDER BY r.RDB$FIELD_POSITION');
-        end;
         while not Q.Eof do begin
           Line := '  '+QuoteIdent(Trim(Q.Col('field_name')))+' '+
             FieldTypeText(MakeInt(Q.Col('field_type')), MakeInt(Q.Col('field_subtype')),
@@ -4735,8 +4737,9 @@ begin
         else
           Q.Free;
       except
-        // Not available on old InterBase versions, or external function
-        on E:EDbError do
+        // Not available on old InterBase versions, or external function.
+        // InterBase has no RDB$FUNCTION_SOURCE at all.
+        on E:Exception do
           Result := '';
       end;
     end;
@@ -4744,6 +4747,11 @@ begin
     else
       Result := '';
   end;
+  // Callers such as the export's Output() append their own semicolon and line
+  // break for every finished query, so do not terminate the last statement,
+  // matching TMySQLConnection.GetCreateCode. See #2591
+  while (Result <> '') and ((Result[Length(Result)] = ';') or (Result[Length(Result)] = #10) or (Result[Length(Result)] = #13)) do
+    Delete(Result, Length(Result), 1);
 end;
 
 
@@ -8304,7 +8312,8 @@ begin
       Results := GetResults('SELECT RDB$RELATION_NAME, RDB$DESCRIPTION, RDB$RELATION_TYPE AS '+QuoteIdent('ViewContext')+
         ', RDB$VIEW_SOURCE FROM RDB$RELATIONS WHERE RDB$RELATIONS.RDB$SYSTEM_FLAG = 0');
     except
-      on E:EDbError do
+      // Old servers do not have RDB$RELATION_TYPE
+      on E:Exception do
         Results := GetResults('SELECT RDB$RELATION_NAME, RDB$DESCRIPTION, NULL AS '+QuoteIdent('ViewContext')+
           ', RDB$VIEW_SOURCE FROM RDB$RELATIONS WHERE RDB$RELATIONS.RDB$SYSTEM_FLAG = 0');
     end;
@@ -11491,10 +11500,10 @@ var
   ColumnsInCache: TTableColumnList;
 begin
   // Return columns from table object
-  if not FConnection.FColumnCache.ContainsKey(QuotedDbAndTableName) then begin
-    FConnection.FColumnCache.AddOrSetValue(QuotedDbAndTableName, Connection.GetTableColumns(Self));
+  if not FConnection.FColumnCache.TryGetValue(QuotedDbAndTableName, ColumnsInCache) then begin
+    ColumnsInCache := Connection.GetTableColumns(Self);
+    FConnection.FColumnCache.AddOrSetValue(QuotedDbAndTableName, ColumnsInCache);
   end;
-  FConnection.FColumnCache.TryGetValue(QuotedDbAndTableName, ColumnsInCache);
   Result := TTableColumnList.Create;
   Result.Assign(ColumnsInCache);
 end;
@@ -11504,10 +11513,10 @@ var
   KeysInCache: TTableKeyList;
 begin
   // Return keys from table object
-  if not FConnection.FKeyCache.ContainsKey(QuotedDbAndTableName) then begin
-    FConnection.FKeyCache.AddOrSetValue(QuotedDbAndTableName, Connection.GetTableKeys(Self));
+  if not FConnection.FKeyCache.TryGetValue(QuotedDbAndTableName, KeysInCache) then begin
+    KeysInCache := Connection.GetTableKeys(Self);
+    FConnection.FKeyCache.AddOrSetValue(QuotedDbAndTableName, KeysInCache);
   end;
-  FConnection.FKeyCache.TryGetValue(QuotedDbAndTableName, KeysInCache);
   Result := TTableKeyList.Create;
   Result.Assign(KeysInCache);
 end;
@@ -11517,10 +11526,10 @@ var
   ForeignKeysInCache: TForeignKeyList;
 begin
   // Return foreign keys from table object
-  if not FConnection.FForeignKeyCache.ContainsKey(QuotedDbAndTableName) then begin
-    FConnection.FForeignKeyCache.AddOrSetValue(QuotedDbAndTableName, Connection.GetTableForeignKeys(Self));
+  if not FConnection.FForeignKeyCache.TryGetValue(QuotedDbAndTableName, ForeignKeysInCache) then begin
+    ForeignKeysInCache := Connection.GetTableForeignKeys(Self);
+    FConnection.FForeignKeyCache.AddOrSetValue(QuotedDbAndTableName, ForeignKeysInCache);
   end;
-  FConnection.FForeignKeyCache.TryGetValue(QuotedDbAndTableName, ForeignKeysInCache);
   Result := TForeignKeyList.Create;
   Result.Assign(ForeignKeysInCache);
 end;
@@ -11530,10 +11539,10 @@ var
   CheckConstraintsInCache: TCheckConstraintList;
 begin
   // Return check constraint from table object
-  if not FConnection.CheckConstraintCache.ContainsKey(QuotedDbAndTableName) then begin
-    FConnection.CheckConstraintCache.AddOrSetValue(QuotedDbAndTableName, Connection.GetTableCheckConstraints(Self));
+  if not FConnection.CheckConstraintCache.TryGetValue(QuotedDbAndTableName, CheckConstraintsInCache) then begin
+    CheckConstraintsInCache := Connection.GetTableCheckConstraints(Self);
+    FConnection.CheckConstraintCache.AddOrSetValue(QuotedDbAndTableName, CheckConstraintsInCache);
   end;
-  FConnection.CheckConstraintCache.TryGetValue(QuotedDbAndTableName, CheckConstraintsInCache);
   Result := TCheckConstraintList.Create;
   Result.Assign(CheckConstraintsInCache);
 end;
