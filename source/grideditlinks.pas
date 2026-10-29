@@ -10,23 +10,29 @@ uses
   Forms, Graphics, Messages, laz.VirtualTrees, ComCtrls, SysUtils, Classes,
   StdCtrls, ExtCtrls, CheckLst, Controls, Types, Dialogs, Menus, MaskEdit, DateUtils, Math,
   dbconnection, dbstructures, apphelpers, generic_types, texteditor, bineditor, lazaruscompat,
-  {$IFNDEF FREEBSD}System.UITypes,{$ENDIF} RegExpr, extra_controls, EditBtn, LCLType, LCLIntf;
+  {$IFNDEF FREEBSD}System.UITypes,{$ENDIF} RegExpr, extra_controls, EditBtn, LCLType, LCLIntf, TypInfo;
 
 type
-  // Radio buttons and checkboxes which do not pass <Enter> key to their parent control
-  // so a OnKeyDown event using <Enter> has the chance to end editing.
-  {TAllKeysRadioButton = class(TRadioButton)
-    procedure WMGetDlgCode(var Msg: TMessage); message WM_GETDLGCODE;
-  end;}
+  // Aliases of the radio buttons and checkboxes used in the column default
+  // editor. In trunk these are subclasses reporting DLGC_WANTALLKEYS, so
+  // a OnKeyDown event using <Enter> has the chance to end editing. The LCL
+  // passes <Enter> to OnKeyDown anyway.
   TAllKeysRadioButton = TRadioButton;
-  {TAllKeysCheckBox = class(TCheckBox)
-    procedure WMGetDlgCode(var Msg: TMessage); message WM_GETDLGCODE;
-  end;}
   TAllKeysCheckBox = TCheckBox;
+
+  // Captures the state of a Tab key press in a cell editor, to move the edit
+  // to the next editable cell after the current editor link was released,
+  // see TBaseGridEditorLink.Destroy.
+  TTabNextCellInfo = class
+    Tree: TVirtualStringTree;
+    Node: PVirtualNode;
+    Column: TColumnIndex;
+    Prev: Boolean;
+    procedure Run(Data: PtrInt);
+  end;
 
   TBaseGridEditorLink = class(TInterfacedObject, IVTEditLink)
   private
-    FInstanceId: Integer;
     FParentForm: TWinControl;      // A back reference to the main form
     FTree: TVirtualStringTree;        // A back reference to the tree calling.
     FNode: PVirtualNode;              // The node to be edited.
@@ -38,13 +44,10 @@ type
     FStopping: Boolean;               // Set to True when the edit link requests stopping the edit action.
     FLastKeyDown: Integer;            // Set in OnKeyDown on the editor's main control
     FLastShiftState: TShiftState;
-    FOldWindowProc: TWndMethod;       // Temporary switched to TempWindowProc to be able to catch Tab key
     FTableColumn: TTableColumn;
     FModified: Boolean;
     FAllowEdit: Boolean;
     FBeginEditTime: Cardinal;
-    procedure Log(Msg: String);
-    //procedure TempWindowProc(var Message: TMessage);
     procedure DoKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
     procedure DoEndEdit(Sender: TObject);
     procedure AsyncEndEdit(Data: PtrInt);
@@ -68,6 +71,11 @@ type
     function GetBounds: TRect; virtual; stdcall;     // Normally useless and unused
     procedure ProcessMessage(var Message: TMessage); stdcall;
     procedure SetBounds(R: TRect); virtual; stdcall; abstract;
+    // Called from destructors to free editor controls without losing the focus:
+    // the LCL moves the focus to the next control in the form's tab order when
+    // the focused control is destroyed. Also prevents the deferred control from
+    // calling back into this destroyed editor link via OnExit.
+    procedure ReleaseEditorControl(AControl: TWinControl);
   end;
 
   THexEditorLink = class(TBaseGridEditorLink)
@@ -231,25 +239,6 @@ uses
   main;
 
 
-{procedure TAllKeysRadioButton.WMGetDlgCode(var Msg: TMessage);
-begin
-  inherited;
-  Msg.Result := Msg.Result or DLGC_WANTALLKEYS;
-end;}
-
-
-{procedure TAllKeysCheckBox.WMGetDlgCode(var Msg: TMessage);
-begin
-  inherited;
-  Msg.Result := Msg.Result or DLGC_WANTALLKEYS;
-end;}
-
-procedure TBaseGridEditorLink.Log(Msg: String);
-begin
-  MainForm.LogSQL('#'+FInstanceId.ToString+': '+Msg, lcDebug);
-end;
-
-
 constructor TBaseGridEditorLink.Create;
 begin
   raise Exception.CreateFmt(_('Wrong constructor called: %s.%s. Instead, please call the overloaded version %s.%s.'),
@@ -259,7 +248,6 @@ end;
 constructor TBaseGridEditorLink.Create(Tree: TVirtualStringTree; AllowEdit: Boolean; Col: TTableColumn);
 begin
   inherited Create;
-  FInstanceId := Random(100);
   FTree := Tree;
   // Enable mouse scrolling, plus ensure the editor component
   // is not partly hidden when it pops up in a bottom cell
@@ -275,9 +263,7 @@ end;
 
 destructor TBaseGridEditorLink.Destroy;
 var
-  NewColumn, FirstCol, LastCol: TColumnIndex;
-  NewNode: PVirtualNode;
-  DoPrev: Boolean;
+  Info: TTabNextCellInfo;
 begin
   // Drop end/cancel calls which are still queued via DoEndEdit/DoCancelEdit.
   // They would fire after this link - and possibly the tree or its form - is
@@ -285,43 +271,66 @@ begin
   // session rename is active. See issue #2433.
   Application.RemoveAsyncCalls(Self);
   ActiveGridEditor := nil;
-  if Assigned(FMainControl) then begin
-    FMainControl.WindowProc := FOldWindowProc;
-    FMainControl := nil;
-  end;
+  FMainControl := nil;
   if FLastKeyDown = VK_TAB then begin
-    DoPrev := ssShift in FLastShiftState;
+    // Move the edit to the next cell asynchronously: FPC releases an interface
+    // (fpc_intf_assign) *before* clearing the variable, so the tree still holds
+    // this dying edit link at this point, and VirtualTrees' DoEdit refuses to
+    // start a new edit as long as its FEditLink is not nil.
+    Info := TTabNextCellInfo.Create;
+    Info.Tree := FTree;
+    Info.Node := FNode;
+    Info.Column := FColumn;
+    Info.Prev := ssShift in FLastShiftState;
+    Application.QueueAsyncCall(Info.Run, PtrInt(Info));
+  end;
+  inherited;
+end;
+
+procedure TTabNextCellInfo.Run(Data: PtrInt);
+var
+  NewColumn, FirstCol, LastCol: TColumnIndex;
+  NewNode: PVirtualNode;
+begin
+  try
     // Advance to next/previous visible column/node.
-    NewNode := FNode;
-    NewColumn := FColumn;
-    FirstCol := FTree.Header.Columns.GetFirstVisibleColumn;
-    LastCol := FTree.Header.Columns.GetLastVisibleColumn;
+    FirstCol := Tree.Header.Columns.GetFirstVisibleColumn;
+    LastCol := Tree.Header.Columns.GetLastVisibleColumn;
+    NewNode := Node;
+    NewColumn := Column;
     while true do begin
       // Find a column for the current node which can be focused.
-      if DoPrev then begin
+      if Prev then begin
         if NewColumn = FirstCol then begin
           NewColumn := LastCol;
-          NewNode := FTree.GetPreviousVisible(NewNode);
+          NewNode := Tree.GetPreviousVisible(NewNode);
         end else
-          NewColumn := FTree.Header.Columns.GetPreviousVisibleColumn(NewColumn);
+          NewColumn := Tree.Header.Columns.GetPreviousVisibleColumn(NewColumn);
       end else begin
         if NewColumn = LastCol then begin
           NewColumn := FirstCol;
-          NewNode := FTree.GetNextVisible(NewNode);
+          NewNode := Tree.GetNextVisible(NewNode);
         end else
-          NewColumn := FTree.Header.Columns.GetNextVisibleColumn(NewColumn);
+          NewColumn := Tree.Header.Columns.GetNextVisibleColumn(NewColumn);
       end;
       if not Assigned(NewNode) then
         Break;
-      if not FTree.CanEdit(NewNode, NewColumn) then
+      // Skip columns which cannot be focused or edited, e.g. the row number
+      // column in data grids, which no editor can be created for.
+      if not Tree.Header.AllowFocus(NewColumn) or not Tree.CanEdit(NewNode, NewColumn) then
         Continue;
-      FTree.ClearSelection;
-      FTree.Selected[NewNode] := True;
-      FTree.EditNode(NewNode, NewColumn);
+      Tree.ClearSelection;
+      Tree.Selected[NewNode] := True;
+      // EditNode only sets the focused node, not the focused column, so without
+      // this the cell focus stays on the previous column, visibly wrong when
+      // Tab jumps from the last column back to the first column of a row.
+      Tree.FocusedColumn := NewColumn;
+      Tree.EditNode(NewNode, NewColumn);
       Break;
     end;
+  finally
+    Free;
   end;
-  inherited;
 end;
 
 function TBaseGridEditorLink.PrepareEdit(Tree: TBaseVirtualTree; Node: PVirtualNode; Column: TColumnIndex): Boolean;
@@ -348,10 +357,6 @@ begin
     FCellFont.Color := AppColorSchemes.First.GridTextColors[FTableColumn.DataType.Category];
   end;
   FCellBackground := FTree.Header.Columns[FColumn].Color;
-  if Assigned(FMainControl) then begin
-    FOldWindowProc := FMainControl.WindowProc;
-    //FMainControl.WindowProc := TempWindowProc;
-  end;
   // Adjust editor position and allow repainting mainform
   SetBounds(FCellTextBounds);
   FParentForm.Repaint;
@@ -385,26 +390,24 @@ begin
     FTree.TrySetFocus;
 end;
 
-{procedure TBaseGridEditorLink.TempWindowProc(var Message: TMessage);
+procedure TBaseGridEditorLink.ReleaseEditorControl(AControl: TWinControl);
+var
+  NullMethod: TMethod;
 begin
-  case Message.Msg of
-    WM_CHAR: // Catch hotkeys
-      if not (TWMChar(Message).CharCode = VK_TAB) then
-        FOldWindowProc(Message);
-    WM_GETDLGCODE: // "WantTabs" mode for main control
-      Message.Result := Message.Result or DLGC_WANTARROWS or DLGC_WANTALLKEYS or DLGC_WANTTAB;
-    else begin
-      try
-        FOldWindowProc(Message);
-      except
-        // EAccessViolation occurring in some cases
-        on E:Exception do begin
-          Log(E.Message+' Message CharCode:'+TWMChar(Message).CharCode.ToString+' Msg:'+Message.Msg.ToString);
-        end;
-      end;
-    end;
-  end;
-end;}
+  if (csDestroying in AControl.ComponentState) or (csCreating in AControl.ControlState) then
+    Exit;
+  // Prevent the deferred control from calling back into this destroyed editor
+  // link. Most importantly, the OnExit event fires on the focus change when
+  // another editor link takes over the focus. Without this, the stale handler
+  // would queue an EndEditNode which ends the *new* edit immediately after it
+  // was started, and also run on freed memory.
+  NullMethod := Default(TMethod);
+  SetMethodProp(AControl, 'OnExit', NullMethod);
+  if FParentForm is TExtForm then
+    TExtForm(FParentForm).DeferFreeControl(AControl)
+  else
+    AControl.Free;
+end;
 
 procedure TBaseGridEditorLink.ProcessMessage(var Message: TMessage);
 begin
@@ -474,7 +477,13 @@ begin
     // Cancel by Escape
     VK_ESCAPE: DoCancelEdit(Sender);
     // Apply changes and end editing by [Ctrl +] Enter or Tab
-    VK_RETURN, VK_TAB: DoEndEdit(Sender);
+    VK_RETURN, VK_TAB: begin
+      DoEndEdit(Sender);
+      // DoEndEdit and its successor editor link took the focus already,
+      // so consume the key. Otherwise the LCL moves the focus to the next
+      // control in the parent form's tab order, e.g. the log panel.
+      Key := 0;
+    end;
   end;
 end;
 
@@ -598,9 +607,7 @@ destructor TDateTimeEditorLink.Destroy;
 begin
   AppSettings.WriteInt(asDateTimeEditorCursorPos, FMaskEdit.SelStart, IntToStr(Integer(FTableColumn.DataType.Category)));
   FreeAndNil(FTimer);
-  FreeAndNil(FUpDown);
-  FreeAndNil(FMaskEdit);
-  FreeAndNil(FPanel);
+  ReleaseEditorControl(FPanel);
   inherited;
 end;
 
@@ -952,7 +959,7 @@ end;
 
 destructor TEnumEditorLink.Destroy;
 begin
-  FCombo.Free;
+  ReleaseEditorControl(FCombo);
   inherited;
 end;
 
@@ -1070,7 +1077,7 @@ end;
 
 destructor TSetEditorLink.Destroy;
 begin
-  FreeAndNil(FPanel);
+  ReleaseEditorControl(FPanel);
   inherited;
 end;
 
@@ -1216,11 +1223,7 @@ end;
 
 destructor TInplaceEditorLink.Destroy;
 begin
-  if not ((csDestroying in FPanel.ComponentState) or (csCreating in FPanel.ControlState)) then begin
-    FEdit.Free;
-    FButton.Free;
-    FPanel.Free;
-  end;
+  ReleaseEditorControl(FPanel);
   inherited;
 end;
 
@@ -1475,7 +1478,7 @@ end;
 
 destructor TColumnDefaultEditorLink.Destroy;
 begin
-  FPanel.Free;
+  ReleaseEditorControl(FPanel);
   inherited;
 end;
 
@@ -1737,8 +1740,8 @@ end;
 
 destructor TDataTypeEditorLink.Destroy;
 begin
-  FreeAndNil(FTreeSelect);
-  FreeAndNil(FMemoHelp);
+  ReleaseEditorControl(FTreeSelect);
+  ReleaseEditorControl(FMemoHelp);
   inherited;
 end;
 

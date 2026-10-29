@@ -484,10 +484,10 @@ type
     tbtnDataColumns: TSpeedButton;
     tbtnDataFilter: TSpeedButton;
     pnlFilter: TPanel;
-    btnFilterApply: TButton;
+    btnFilterApply: TBitBtn;
     lblTableFilter: TLabel;
     editFilterSearch: TEdit;
-    btnFilterClear: TButton;
+    btnFilterClear: TBitBtn;
     popupFilter: TPopupMenu;
     menuFilterCopy: TMenuItem;
     menuFilterPaste: TMenuItem;
@@ -870,7 +870,6 @@ type
       AImageWidth, APPI: Integer; var AResultWidth: Integer);
     procedure menuConnectionsPopup(Sender: TObject);
     procedure actExitApplicationExecute(Sender: TObject);
-    //procedure WMCopyData(var Msg: TWMCopyData); message WM_COPYDATA;
     procedure FormDestroy(Sender: TObject);
     procedure FormCreate(Sender: TObject);
     procedure AfterFormCreate;
@@ -1451,7 +1450,6 @@ type
     function GetRegKeyTable: String;
     procedure UpdateEditorTab;
     procedure SetWindowCaption;
-    //procedure DefaultHandler(var Message); override;
     procedure SetupSynEditors; overload;
     procedure SetupSynEditors(BaseForm: TComponent); overload;
     procedure SetupSynEditor(Editor: TSynMemo);
@@ -1483,7 +1481,6 @@ type
 
 var
   MainForm: TMainForm;
-  SecondInstMsgId: Cardinal = 0;
   SysLanguage: String;
   MainFormCreated: Boolean = False;
   MainFormAfterCreateDone: Boolean = False;
@@ -1507,7 +1504,7 @@ implementation
 
 uses
   FileInfo, winpeimagereader, elfreader, machoreader, About, data_sorting, column_selection, loaddata, editvar,
-  copytable, csv_detector, exportgrid, usermanager, rolemanagerpg, reformatter, connections, sqlhelp, updatecheck,
+  copytable, csv_detector, exportgrid, usermanager, rolemanagerpg, rolemanagermssql, reformatter, connections, sqlhelp, updatecheck,
   insertfiles, texteditor, preferences, table_editor, view, routine_editor, trigger_editor, event_editor, grideditlinks,
   crashdialog, selectdbobject, redis_newkey, redisclient, dbeaver_import_dlg
 {$IFDEF LCLQt6}
@@ -2051,7 +2048,7 @@ begin
   // spltQuery and swallowing its mouse events
   tabsetQuery.BorderSpacing.Top := 6;
   {$ENDIF}
-  //InheritFont(QueryTab.tabsetQuery.Font);
+  InheritFont(QueryTab.tabsetQuery.Font);
   QueryTab.ResultTabs := TResultTabs.Create(True);
 
   QueryTabs := TQueryTabList.Create(True);
@@ -2962,6 +2959,10 @@ begin
   OnResize := FormResize;
   OnResize(Sender);
 
+  // Attach the word wrap plugin, now that all editors know their metrics, see issue #2141
+  if actQueryWordWrap.Checked then
+    SetupSynEditors;
+
   // Simulated link label, has non inherited blue font color
   lblExplainProcess.Font.Color := clBlue;
 
@@ -2994,6 +2995,7 @@ begin
   case ActiveConnection.Parameters.NetTypeGroup of
     ngMySQL: Dialog := TUserManagerForm.Create(Self);
     ngPgSQL: Dialog := TRoleManagerPgForm.Create(Self);
+    ngMSSQL: Dialog := TRoleManagerMssqlForm.Create(Self);
     else ErrorDialog(ActiveConnection.Parameters.NetTypeName(False) + ' not supported for managing users');
   end;
   if Dialog = nil then
@@ -3773,6 +3775,9 @@ var
   ExportDialog: TfrmExportGrid;
 begin
   // Save data in current dataset into various text file formats
+  // ActiveGrid can be nil, e.g. on host tab, which crashed the export dialog
+  if ActiveGrid = nil then
+    Exit;
   ExportDialog := TfrmExportGrid.Create(Self);
   ExportDialog.Grid := ActiveGrid;
   ExportDialog.ShowModal;
@@ -6746,9 +6751,9 @@ begin
       ListTables.TrySetFocus
     else if tab = tabData then begin
       DataGrid.TrySetFocus;
-    end else if IsQueryTab(tab.PageIndex, True) then begin
+    end else if IsQueryTab(tab.PageIndex, True) and (QueryTabs.ActiveMemo <> nil) then begin
       QueryTabs.ActiveMemo.TrySetFocus;
-      //QueryTabs.ActiveMemo.WordWrap := actQueryWordWrap.Checked;
+      ApplySynEditWordWrap(QueryTabs.ActiveMemo, actQueryWordWrap.Checked);
       SynMemoQueryStatusChange(QueryTabs.ActiveMemo, [scCaretX]);
     end;
   end;
@@ -7027,7 +7032,7 @@ begin
   actNextResult.Enabled := actPreviousResult.Enabled;
 
   // Activate export-options if we're in any list control
-  actExportData.Enabled := HasConnection;
+  actExportData.Enabled := HasConnection and (ActiveGrid <> nil);
   actDataSetNull.Enabled := HasConnection and inDataOrQueryTab and Assigned(Results) and Assigned(Grid.FocusedNode);
 
   // Help only supported on regular MySQL and MariaDB servers
@@ -10096,6 +10101,9 @@ begin
   if Sender = ListProcesses then begin
     Idx := Sender.GetNodeData(Node);
     Results := GridResult(Sender);
+    // Result sets get freed while disconnecting, a paint event may still come through then
+    if not Assigned(Results) then
+      Exit;
     if not Results.Connection.Active then
       Exit;
     Results.RecNo := Idx^;
@@ -10852,7 +10860,8 @@ begin
   // Check if some editor has unsaved changes
   if Assigned(ActiveObjectEditor) and Assigned(NewNode) and (NewNode <> OldNode) and (not FTreeRefreshInProgress) then begin
     Allowed := not (ActiveObjectEditor.DeInit in [mrAbort, mrCancel]);
-    DBTree.Selected[DBTree.FocusedNode] := not Allowed;
+    if Assigned(DBTree.FocusedNode) then
+      DBTree.Selected[DBTree.FocusedNode] := not Allowed;
   end else
     Allowed := NewNode <> OldNode;
 end;
@@ -11636,6 +11645,9 @@ begin
     Exit;
   // Paint a red triangle at the top left corner of the cell
   Results := GridResult(Sender);
+  // Result sets get freed while disconnecting, a paint event may still come through then
+  if not Assigned(Results) then
+    Exit;
   RowNum := Sender.GetNodeData(Node);
   Results.RecNo := RowNum^;
   if Results.Modified(ResultCol) then
@@ -14611,10 +14623,7 @@ begin
   //Editor.Gutter.RightOffset := BaseEditor.Gutter.RightOffset;
   //Editor.Gutter.ShowLineNumbers := BaseEditor.Gutter.ShowLineNumbers;
   if Editor <> SynMemoSQLLog then begin
-    // Probably use TLazSynEditLineWrapPlugin?
-    {Editor.WordWrap := actQueryWordWrap.Checked;
-    // Assignment of OnScanForFoldRanges event is required for UseCodeFolding
-    Editor.OnScanForFoldRanges := BaseEditor.OnScanForFoldRanges;}
+    ApplySynEditWordWrap(Editor, actQueryWordWrap.Checked);
     CodeFoldingPart := Editor.Gutter.CodeFoldPart(0);
     if Assigned(CodeFoldingPart) then begin
       CodeFoldingPart.Visible := actCodeFolding.Checked;
@@ -14880,40 +14889,6 @@ begin
   FDataGridSortItems.Clear;
   InvalidateVT(DataGrid, VTREE_NOTLOADED_PURGECACHE, False);
 end;
-
-
-{procedure TMainForm.WMCopyData(var Msg: TWMCopyData);
-var
-  i: Integer;
-  Connection: TDBConnection;
-  Tab: TQueryTab;
-  ConnectionParams: TConnectionParameters;
-  FileNames: TStringList;
-  RunFrom: String;
-begin
-  // Probably a second instance is posting its command line parameters here
-  if (Msg.CopyDataStruct.dwData = SecondInstMsgId) and (SecondInstMsgId <> 0) then begin
-    LogSQL(f_('Preventing second application instance - disabled in %s > %s > %s.', [_('Tools'), _('Preferences'), _('General')]), lcInfo);
-    ConnectionParams := nil;
-    ParseCommandLine(ParamBlobToStr(Msg.CopyDataStruct.lpData), ConnectionParams, FileNames, RunFrom);
-    OpenQueryFiles(FileNames, nil, False);
-    if ConnectionParams <> nil then
-      InitConnection(ConnectionParams, True, Connection);
-  end else
-    // Not the right message id
-    inherited;
-end;}
-
-
-{procedure TMainForm.DefaultHandler(var Message);
-begin
-  if TMessage(Message).Msg = SecondInstMsgId then begin
-    // A second instance asked for our handle. Post that into its message queue.
-    PostThreadMessage(TMessage(Message).WParam, SecondInstMsgId, Handle, 0);
-  end else
-    // Otherwise do what would happen without this overridden procedure
-    inherited;
-end;}
 
 
 procedure TMainForm.actBlobAsTextExecute(Sender: TObject);
@@ -15975,7 +15950,13 @@ begin
   if E <> nil then begin
     Report := Report + 'Exception class: ' + E.ClassName + LineEnding + 'Message: ' + E.Message + LineEnding + LineEnding;
   end;
-  Report := Report + 'Callstack:' + LineEnding;
+  // Raw frame addresses first, so a broken heap or failing line info
+  // cannot truncate the callstack completely
+  Report := Report + 'Raw addresses:' + LineEnding + '$' + IntToHex(PtrUInt(ExceptAddr), 16);
+  Frames := ExceptFrames;
+  for I := 0 to ExceptFrameCount - 1 do
+    Report := Report + LineEnding + '$' + IntToHex(PtrUInt(Frames[I]), 16);
+  Report := Report + LineEnding + LineEnding + 'Callstack:' + LineEnding;
   Report := Report + BackTraceStrFunc(ExceptAddr);
   Frames := ExceptFrames;
   for I := 0 to ExceptFrameCount - 1 do

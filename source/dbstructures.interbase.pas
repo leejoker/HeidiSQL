@@ -18,7 +18,7 @@ var
 
   // Interbase field types
   // Taken from https://docwiki.embarcadero.com/InterBase/2020/en/RDB$FIELDS
-  InterbaseDatatypes: Array[0..13] of TDBDatatype =
+  InterbaseDatatypes: Array[0..17] of TDBDatatype =
   (
     (
       Index:           dbdtUnknown;
@@ -44,7 +44,8 @@ var
     ),
     (
       Index:           dbdtBool;
-      NativeTypes:     '17';
+      // BOOLEAN is RDB$FIELD_TYPE 23 on Firebird and 17 on InterBase
+      NativeTypes:     '17|23';
       Name:            'BOOLEAN';
       HasLength:       False;
       RequiresLength:  False;
@@ -100,7 +101,7 @@ var
     (
       Index:           dbdtBigint;
       NativeTypes:     '16';
-      Name:            'INT64';
+      Name:            'BIGINT';
       HasLength:       False;
       RequiresLength:  False;
       HasBinary:       False;
@@ -173,6 +174,57 @@ var
       HasDefault:      False;
       LoadPart:        False;
       Category:        dtcTemporal;
+    ),
+    (
+      // Firebird 4+. Firebird requires the precision in DDL, but bare
+      // DECFLOAT is accepted and defaults to DECFLOAT(34), which is what
+      // the table editor emits. Both native ids are listed in RDB$TYPES.
+      Index:           dbdtDecfloat;
+      NativeTypes:     '24|25';
+      Name:            'DECFLOAT';
+      HasLength:       False;
+      RequiresLength:  False;
+      HasBinary:       False;
+      HasDefault:      False;
+      LoadPart:        False;
+      Category:        dtcReal;
+    ),
+    (
+      // Firebird 4+. Also the base of NUMERIC/DECIMAL with a precision
+      // above 18, see FieldTypeText in dbconnection.pas
+      Index:           dbdtInt128;
+      NativeTypes:     '26';
+      Name:            'INT128';
+      HasLength:       False;
+      RequiresLength:  False;
+      HasBinary:       False;
+      HasDefault:      False;
+      LoadPart:        False;
+      Category:        dtcInteger;
+    ),
+    (
+      // Firebird 4+
+      Index:           dbdtTime;
+      NativeTypes:     '28';
+      Name:            'TIME WITH TIME ZONE';
+      HasLength:       False;
+      RequiresLength:  False;
+      HasBinary:       False;
+      HasDefault:      False;
+      LoadPart:        False;
+      Category:        dtcTemporal;
+    ),
+    (
+      // Firebird 4+
+      Index:           dbdtDatetime2;
+      NativeTypes:     '29';
+      Name:            'TIMESTAMP WITH TIME ZONE';
+      HasLength:       False;
+      RequiresLength:  False;
+      HasBinary:       False;
+      HasDefault:      False;
+      LoadPart:        False;
+      Category:        dtcTemporal;
     )
   );
 
@@ -206,7 +258,14 @@ begin
     qKillProcess: Result := 'KILL %d';
     qFuncLength: Result := 'LENGTH';
     qFuncCeil: Result := 'CEIL';
-    qFuncLeft: Result := 'SUBSTR(%s, 1, %d)';
+    qFuncLeft: begin
+      if FNetType in [ntInterbase_TCPIP, ntInterbase_Local] then
+        // InterBase has no SUBSTRING or LEFT, and a CAST to a shorter type
+        // aborts with a string truncation error, so load text columns fully
+        Result := '%s'
+      else
+        Result := 'SUBSTRING(%s FROM 1 FOR %d)';
+    end;
     qFuncNow: Result := ' cast(''now'' as timestamp) from rdb$database';
     qFuncLastAutoIncNumber: Result := 'LAST_INSERT_ID()';
     qLockedTables: Result := '';

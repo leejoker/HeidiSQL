@@ -8,6 +8,7 @@ uses
   Classes, SysUtils, Generics.Collections, Controls, RegExpr, Math, FileUtil,
   StrUtils, Graphics, GraphUtil, LCLIntf, Forms, Clipbrd, Process, ActnList, Menus, Dialogs,
   Character, DateUtils, laz.VirtualTrees, SynEdit, SynCompletion, fphttpclient, IntfGraphics, FPImage,
+  SynEditFoldedView, SynEditWrappedView,
   {$IFDEF WINDOWS} Windows, Registry, uDarkStyleParams, {$ENDIF} DelphiCompat,
   dbconnection, dbstructures, jsonregistry, lazaruscompat, fpjson, SynEditKeyCmds, LazFileUtils, gettext, LazUTF8,
   IniFiles, GraphType, Sockets, Contnrs, StdCtrls
@@ -223,7 +224,7 @@ type
     asPromptSaveFileOnTabClose, asRestoreTabs, asTabCloseOnDoubleClick, asTabCloseOnMiddleClick, asTabsInMultipleLines, asTabIconsGrayscaleMode,
     asWarnUnsafeUpdates, asQueryGridLongSortRowNum,
     asCompletionProposal, asCompletionProposalInterval, asCompletionProposalSearchOnMid, asCompletionProposalWidth, asCompletionProposalNbLinesInWindow, asAutoUppercase,
-    asTabsToSpaces, asFilterPanel, asAllowMultipleInstances, asFindDialogSearchHistory, asGUIFontName, asGUIFontSize,
+    asTabsToSpaces, asFilterPanel, asAllowMultipleInstances, asFindDialogSearchHistory, asGUIFontName,
     asTheme, asThemeMode, asCurrentThemeIsDark, asIconPack, asWebSearchBaseUrl,
     asFindDialogReplaceHistory, asMaxQueryResults, asLogErrors,
     asLogUserSQL, asLogSQL, asLogInfos, asLogDebug, asLogScript, asLogTimestamp, asFieldColorNumeric,
@@ -402,9 +403,7 @@ type
   function DateTimeToStrDef(DateTime: TDateTime; Default: String): String;
   function TruncDef(X: Real; Default: Int64): Int64;
   function GetLightness(AColor: TColor): Byte;
-  //function ParamBlobToStr(lpData: Pointer): String;
-  //function ParamStrToBlob(out cbData: DWORD): Pointer;
-  //function CheckForSecondInstance: Boolean;
+  function CheckForSecondInstance: Boolean;
   function GetParentFormOrFrame(Comp: TWinControl): TWinControl;
   function GeneratePassword(Len: Integer): String;
   procedure InvalidateVT(VT: TLazVirtualStringTree; RefreshTag: Integer; ImmediateRepaint: Boolean);
@@ -435,7 +434,7 @@ type
   function IsPortFree(APort: Word; const AIP: string = '127.0.0.1'): Boolean;
   function GetThemeColor(Color: TColor): TColor;
   function ThemeIsDark: Boolean;
-  function ProcessExists(pid: Cardinal; ExeNamePattern: String): Boolean;
+  function ProcessExists(pid: Cardinal; ExeNamePattern: String; ExcludePid: Cardinal=0): Boolean;
   function PopupComponent(Sender: TObject): TComponent;
   procedure FindComponentInstances(BaseForm: TComponent; ClassType: TClass; var List: TComponentList);
   function GetOS: String;
@@ -448,12 +447,12 @@ type
   function GetApplicationName: String;
   procedure CopyImageList(SourceList, TargetList: TImageList; AppendDisabled: Boolean);
   procedure LightenBitmap(Bmp: Graphics.TBitmap; Amount: Byte);
+  procedure ApplySynEditWordWrap(Editor: TCustomSynEdit; Enable: Boolean);
 
 var
   AppSettings: TAppSettings;
   AppLanguageMoFile: TMOFile;
   AppLanguageMoBasePath: String;
-  MutexHandle: THandle = 0;
   SystemImageList: TImageList = nil;
   mtCriticalConfirmation: TMsgDlgType = mtWarning;
   //ConfirmIcon: TIcon;
@@ -1525,7 +1524,7 @@ begin
     {$if defined(LCLQt) or defined(LCLQt5) or defined(LCLQt6)}
   if VT is THeidiVirtualStringTree then begin
     VT.LineStyle := lsSolid;
-    VT.Colors.TreeLineColor := clGray;
+    VT.Colors.TreeLineColor := ColorAdjustBrightness(VT.Color, 30);
 
     if toUseExplorerTheme in VT.TreeOptions.PaintOptions then
       VT.TreeOptions.PaintOptions := VT.TreeOptions.PaintOptions + [toHotTrack]
@@ -1539,7 +1538,7 @@ begin
       toShowVertGridLines in VT.TreeOptions.PaintOptions);
     if (toShowHorzGridLines in VT.TreeOptions.PaintOptions) or
       (toShowVertGridLines in VT.TreeOptions.PaintOptions) then
-      VT.Colors.GridLineColor := clGray;
+      VT.Colors.GridLineColor := ColorAdjustBrightness(VT.Color, 30);
     VT.TreeOptions.PaintOptions := VT.TreeOptions.PaintOptions -
       [toShowHorzGridLines, toShowVertGridLines];
   end;
@@ -1563,7 +1562,9 @@ begin
   VT.ShowHint := True;
 
   if IsResultGrid then begin
-    VT.Colors.GridLineColor := clGray; // 50% black grid lines, should fit on both light and dark theme
+    // Theme-dependent grid lines: slightly darker than the cell background on
+    // light themes, slightly brighter on dark themes. Refs #2470
+    VT.Colors.GridLineColor := ColorAdjustBrightness(VT.Color, 30);
     if AppSettings.ReadBool(asIncrementalSearch) then begin
       // Apply case insensitive incremental search event
       VT.IncrementalSearch := isInitializedOnly;
@@ -2083,130 +2084,6 @@ begin
 end;
 
 
-
-
-// Following code taken from OneInst.pas, http://assarbad.net/de/stuff/!import/nico.old/
-// Slightly modified to better integrate that into our code, comments translated from german.
-
-// Fetch and separate command line parameters into strings
-{function ParamBlobToStr(lpData: Pointer): String;
-var
-  pStr: PChar;
-begin
-  pStr := lpData;
-  Result := string(pStr);
-end;}
-
-// Pack current command line parameters
-{function ParamStrToBlob(out cbData: DWORD): Pointer;
-var
-  cmd: String;
-begin
-  cmd := GetCommandLine;
-  cbData := Length(cmd)*2 + 3;
-  Result := PChar(cmd);
-end;}
-
-{procedure HandleSecondInstance;
-var
-  Run: DWORD;
-  Now: DWORD;
-  Msg: TMsg;
-  Wnd: HWND;
-  Dat: TCopyDataStruct;
-begin
-  // MessageBox(0, 'already running', nil, MB_ICONINFORMATION);
-  // Send a message to all main windows (HWND_BROADCAST) with the identical,
-  // previously registered message id. We should only get reply from 0 or 1
-  // instances.
-  // (Broadcast should only be called with registered message ids!)
-
-  SendMessage(HWND_BROADCAST, SecondInstMsgId, GetCurrentThreadId, 0);
-
-  // Waiting for reply by first instance. For those of you which didn't knew:
-  // Threads have message queues too ;o)
-  Wnd := 0;
-  Run := GetTickCount;
-  while True do
-  begin
-    if PeekMessage(Msg, 0, SecondInstMsgId, SecondInstMsgId, PM_NOREMOVE) then
-    begin
-      GetMessage(Msg, 0, SecondInstMsgId, SecondInstMsgId);
-      if Msg.message = SecondInstMsgId then
-      begin
-        Wnd := Msg.wParam;
-        Break;
-      end;
-    end;
-    Now := GetTickCount;
-    if Now < Run then
-      Run := Now;  // Avoid overflow, each 48 days.
-    if Now - Run > 5000 then
-      Break;
-  end;
-
-  if (Wnd <> 0) and IsWindow(Wnd) then
-  begin
-    // As a reply we got a handle to which we now send current parameters
-    Dat.dwData := SecondInstMsgId;
-    Dat.lpData := ParamStrToBlob(Dat.cbData);
-    SendMessage(Wnd, WM_COPYDATA, 0, LPARAM(@Dat));
-    // Leads to an AV in 64bit mode. See issue #3475:
-    // FreeMemory(Dat.lpData);
-
-    // Bring first instance to front
-    if IsIconic(Wnd) then
-      ShowWindow(Wnd, SW_RESTORE);
-    BringWindowToTop(Wnd);
-    SetForegroundWindow(Wnd);
-  end;
-end;}
-
-{function CheckForSecondInstance: Boolean;
-var
-  Loop: Integer;
-  MutexName: PChar;
-begin
-  // Try to create a system wide named kernel object (mutex). And check if that
-  // already exists.
-  // The name of such a mutex must not be longer than MAX_PATH (260) chars and
-  // can contain all chars but not '\'
-
-  Result := False;
-  MutexName := PChar(APPNAME);
-  for Loop := lstrlen(MutexName) to MAX_PATH - 1 do
-  begin
-    MutexHandle := CreateMutex(nil, False, MutexName);
-    if (MutexHandle = 0) and (GetLastError = INVALID_HANDLE_VALUE) then
-      // Looks like there is already a mutex using this name
-      // Try to solve that by appending an underscore
-      lstrcat(MutexName, '_')
-    else
-      // At least no naming conflict
-      Break;
-  end;
-
-  case GetLastError of
-    0: begin
-        // We created the mutex, so this is the first instance
-      end;
-    ERROR_ALREADY_EXISTS:
-      begin
-        // There is already one instance
-        try
-          HandleSecondInstance;
-        finally
-          // Terminating is done in .dpr file, before Application.Initialize
-          Result := True;
-        end;
-      end;
-  else
-    // No clue why we should get here. Oh, maybe Microsoft has changed rules, again.
-    // However, we return false and let the application start
-  end;
-end;}
-
-
 function GetParentFormOrFrame(Comp: TWinControl): TWinControl;
 begin
   Result := Comp;
@@ -2581,7 +2458,7 @@ const
   ShortOpts: String = 'd:n:h:l:u:p:S:P:';
   LongOpts: array[0..24] of String = (
     'description:',
-    'nettype:', 'host:', 'library:', 'user:', 'password:', 'cleartextenabled:', 'socket:', 'port:', 'databases:', 'winauth:',
+    'nettype:', 'host:', 'library:', 'user:', 'password:', 'cleartextenabled::', 'socket:', 'port:', 'databases:', 'winauth:',
     'ssl:', 'sslprivatekey:', 'sslcacertificate:', 'sslcertificate:', 'sslcipher:', 'sslverification:',
     'ssh-executable:', 'ssh-host:', 'ssh-port:', 'ssh-local-port:', 'ssh-user:', 'ssh-password:', 'ssh-key:', 'ssh-timeout:'
   );
@@ -2619,6 +2496,9 @@ begin
   User := Application.GetOptionValue('u', 'user');
   Pass := Application.GetOptionValue('p', 'password');
   CleartextPluginEnabled := StrToIntDef(Application.GetOptionValue('cleartextenabled'), -1);
+  // Also accept value-less "--cleartextenabled", see issue #296
+  if (CleartextPluginEnabled = -1) and Application.HasOption('cleartextenabled') then
+    CleartextPluginEnabled := 1;
   Socket := Application.GetOptionValue('S', 'socket');
   Port := Application.GetOptionValue('P', 'port');
   AllDatabases := Application.GetOptionValue('databases');
@@ -2928,26 +2808,139 @@ begin
   {$ENDIF}
 end;
 
-function ProcessExists(pid: Cardinal; ExeNamePattern: String): Boolean;
-{var
+{$IFDEF WINDOWS}
+const
+  TH32CS_SNAPPROCESS = $00000002;
+
+type
+  // Matches PROCESSENTRY32W, declared statically so the API calls show up
+  // in the import table - deliberately avoiding dynamic API resolution,
+  // which antivirus heuristics tend to flag.
+  TProcessEntry32 = record
+    dwSize: DWORD;
+    cntUsage: DWORD;
+    th32ProcessID: DWORD;
+    th32DefaultHeapID: PtrUInt;
+    th32ModuleID: DWORD;
+    cntThreads: DWORD;
+    th32ParentProcessID: DWORD;
+    pcPriClassBase: LongInt;
+    dwFlags: DWORD;
+    szExeFile: array[0..MAX_PATH-1] of WideChar;
+  end;
+
+function CreateToolhelp32Snapshot(dwFlags, th32ProcessID: DWORD): THandle; stdcall; external 'kernel32' name 'CreateToolhelp32Snapshot';
+function Process32FirstW(hSnapshot: THandle; var lppe: TProcessEntry32): BOOL; stdcall; external 'kernel32' name 'Process32FirstW';
+function Process32NextW(hSnapshot: THandle; var lppe: TProcessEntry32): BOOL; stdcall; external 'kernel32' name 'Process32NextW';
+{$ENDIF}
+
+
+function ProcessExists(pid: Cardinal; ExeNamePattern: String; ExcludePid: Cardinal=0): Boolean;
+{$IFDEF WINDOWS}
+var
   Proc: TProcessEntry32;
   SnapShot: THandle;
-  ContinueLoop: Boolean;}
+  ContinueLoop: Boolean;
 begin
-  // Check if a given process id exists
-  // Todo: convert code for cross-platforming
+  // Walk through all processes with the help of a snapshot.
+  // A pid of 0 means "any pid", an empty ExeNamePattern matches any process.
   Result := False;
-  {SnapShot := CreateToolhelp32Snapshot(TH32CS_SnapProcess, 0);
-  Proc.dwSize := Sizeof(Proc);
-  Result := False;
-  ContinueLoop := Process32First(SnapShot, Proc);
-  while ContinueLoop do begin
-    Result := (Proc.th32ProcessID = pid) and ContainsText(Proc.szExeFile, ExeNamePattern);
-    if Result then
-      Break;
-    ContinueLoop := Process32Next(SnapShot, Proc);
+  SnapShot := CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if SnapShot <> INVALID_HANDLE_VALUE then begin
+    try
+      Proc.dwSize := Sizeof(Proc);
+      ContinueLoop := Process32FirstW(SnapShot, Proc);
+      while ContinueLoop do begin
+        if (Proc.th32ProcessID <> ExcludePid)
+          and ((pid = 0) or (Proc.th32ProcessID = pid))
+          and (ExeNamePattern.IsEmpty or ContainsText(Proc.szExeFile, ExeNamePattern)) then begin
+          Result := True;
+          Break;
+        end;
+        ContinueLoop := Process32NextW(SnapShot, Proc);
+      end;
+    finally
+      CloseHandle(Snapshot);
+    end;
   end;
-  CloseHandle(Snapshot);}
+end;
+{$ELSE}
+{$IFDEF LINUX}
+var
+  SR: TSearchRec;
+  Fs: TFileStream;
+  Buffer, ProcName: String;
+  FoundPid: Cardinal;
+begin
+  // Linux: scan /proc/<pid>/comm, which contains the executable name.
+  // A pid of 0 means "any pid", an empty ExeNamePattern matches any process.
+  Result := False;
+  if FindFirst('/proc/*', faDirectory, SR) = 0 then begin
+    try
+      repeat
+        if (SR.Name <> '') and (SR.Name[1] in ['0'..'9']) then begin
+          FoundPid := Cardinal(StrToInt64Def(SR.Name, 0));
+          if (FoundPid <> ExcludePid) and ((pid = 0) or (FoundPid = pid)) then begin
+            ProcName := '';
+            try
+              Fs := TFileStream.Create('/proc/' + SR.Name + '/comm', fmOpenRead or fmShareDenyNone);
+              try
+                SetLength(Buffer, 64);
+                SetLength(Buffer, Fs.Read(Buffer[1], 64));
+              finally
+                Fs.Free;
+              end;
+              ProcName := Buffer.TrimRight;
+            except
+              // Process vanished in the meantime, ignore it
+            end;
+            if ExeNamePattern.IsEmpty or ContainsText(ProcName, ExeNamePattern) then begin
+              Result := True;
+              Break;
+            end;
+          end;
+        end;
+      until FindNext(SR) <> 0;
+    finally
+      FindClose(SR);
+    end;
+  end;
+end;
+{$ELSE}
+var
+  Buffer, Line, ProcName: String;
+  PidNumber: Cardinal;
+  i: Integer;
+begin
+  // Other Unix platforms without a /proc filesystem, e.g. macOS: use "ps".
+  // A pid of 0 means "any pid", an empty ExeNamePattern matches any process.
+  Result := False;
+  if RunCommand('ps', ['-axo', 'pid=,comm='], Buffer) then begin
+    for Line in Buffer.Split([#10, #13], TStringSplitOptions.ExcludeEmpty) do begin
+      i := Pos(' ', Line);
+      if i > 0 then begin
+        PidNumber := Cardinal(StrToInt64Def(Copy(Line, 1, i-1), 0));
+        if (PidNumber <> ExcludePid) and ((pid = 0) or (PidNumber = pid)) then begin
+          ProcName := Trim(Copy(Line, i+1, MaxInt));
+          if ExeNamePattern.IsEmpty or ContainsText(ProcName, ExeNamePattern) then begin
+            Result := True;
+            Break;
+          end;
+        end;
+      end;
+    end;
+  end;
+end;
+{$ENDIF}
+{$ENDIF}
+
+
+function CheckForSecondInstance: Boolean;
+begin
+  // Simple approach to detect a running first instance: check if any other
+  // process has a similar name as our own executable. Deliberately without
+  // any message passing between the instances - the second instance just quits.
+  Result := ProcessExists(0, GetApplicationName, GetProcessId);
 end;
 
 
@@ -3621,7 +3614,21 @@ procedure TCustomComboBoxHelper.AutoSizeItemWidth;
 var
   I, TextW, MaxTextW, MaxW: Integer;
   ExtraPad: Integer;
+  Ctl: TWinControl;
 begin
+  // Measuring text forces creation of the control canvas, which requires a
+  // parent window somewhere in the ancestor chain. Skip when there is none,
+  // e.g. when called from a frame constructor before it is parented.
+  // See issue #2605.
+  Ctl := Self;
+  while Ctl <> nil do begin
+    if Ctl.HandleAllocated or (Ctl is TCustomForm) then
+      Break;
+    if Ctl.Parent = nil then
+      Exit;
+    Ctl := Ctl.Parent;
+  end;
+
   MaxW := Scale96ToForm(500);
 
   Canvas.Font.Assign(Font);
@@ -3928,7 +3935,6 @@ begin
   InitSetting(asFindDialogSearchHistory,          'FindDialogSearchHistory',               0, False, '');
   InitSetting(asFindDialogReplaceHistory,         'FindDialogReplaceHistory',              0, False, '');
   InitSetting(asGUIFontName,                      'GUIFontName',                           0, False, '');
-  InitSetting(asGUIFontSize,                      'GUIFontSize',                           8);
   InitSetting(asTheme,                            'Theme',                                 0, False, 'Windows');
   InitSetting(asThemeMode,                        'ThemeMode',                             0);
   InitSetting(asCurrentThemeIsDark,               'CurrentThemeIsDark',                    0, False);
@@ -4719,6 +4725,44 @@ function TUTF8NoBOMEncoding.GetPreamble: TBytes;
 begin
   Result := [];
   SetLength(Result, 0);
+end;
+
+
+procedure ApplySynEditWordWrap(Editor: TCustomSynEdit; Enable: Boolean);
+var
+  i: Integer;
+  WrapPlugin: TLazSynEditLineWrapPlugin;
+  FoldedView: TSynEditFoldedView;
+begin
+  // Lazarus' SynEdit has no WordWrap property. Wrapping is enabled by attaching
+  // the (experimental) TLazSynEditLineWrapPlugin, and disabled by freeing it, see issue #2141.
+  if Editor = nil then
+    Exit;
+  // SynEdit-attached plugins live in the editor's internal plugin list,
+  // not in its Components collection, see TLazSynEditPlugin.Create
+  WrapPlugin := nil;
+  for i:=0 to Editor.PluginCount-1 do begin
+    if Editor.Plugin[i] is TLazSynEditLineWrapPlugin then begin
+      WrapPlugin := TLazSynEditLineWrapPlugin(Editor.Plugin[i]);
+      break;
+    end;
+  end;
+  if Enable then begin
+    if WrapPlugin = nil then begin
+      // Editor not visible yet or without known metrics: the wrap plugin crashes
+      // with negative wrap column when validating long lines, so it gets attached
+      // on a later call of SetupSynEditors instead
+      if Editor.CharsInWindow < 2 then
+        Exit;
+      // The wrap plugin conflicts with the folded view, so disable folding
+      FoldedView := TSynEditFoldedView(Editor.TextViewsManager.SynTextViewByClass[TSynEditFoldedView]);
+      if FoldedView <> nil then
+        FoldedView.FoldProvider.Enabled := False;
+      TLazSynEditLineWrapPlugin.Create(Editor);
+    end;
+  end
+  else if WrapPlugin <> nil then
+    WrapPlugin.Free;
 end;
 
 

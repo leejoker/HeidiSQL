@@ -77,6 +77,24 @@ type
     qPgRolemanObjPrivRevoke,
     qPgRolemanDefaultPrivGrant,
     qPgRolemanDefaultPrivRevoke,
+    qPgRoleAttributes,
+    qPgRoleMemberships,
+    qPgRoleCreate,
+    qPgRoleAlter,
+    qPgRoleRename,
+    qPgRoleDrop,
+    qPgRoleMembershipGrant,
+    qPgRoleMembershipRevoke,
+    qMssqlLoginAttributes,
+    qMssqlServerRoles,
+    qMssqlLoginMemberships,
+    qMssqlDatabases,
+    qMssqlLoginCreate,
+    qMssqlLoginAlter,
+    qMssqlLoginRename,
+    qMssqlLoginDrop,
+    qMssqlRoleMembershipGrant,
+    qMssqlRoleMembershipRevoke,
     qListDatabases // implemented by TPostgreSQLProvider only, so far
     );
   TSqlProvider = class
@@ -104,7 +122,8 @@ type
     dbdtBinary, dbdtVarbinary, dbdtTinyblob, dbdtBlob, dbdtMediumblob, dbdtLongblob, dbdtVector, dbdtImage,
     dbdtEnum, dbdtSet, dbdtBit, dbdtVarBit, dbdtBool, dbdtRegClass, dbdtRegProc, dbdtUnknown,
     dbdtCursor, dbdtSqlvariant, dbdtTable, dbdtUniqueidentifier, dbdtInet4, dbdtInet6, dbdtHierarchyid, dbdtXML,
-    dbdtPoint, dbdtLinestring, dbdtLineSegment, dbdtPolygon, dbdtGeometry, dbdtBox, dbdtPath, dbdtCircle, dbdtMultipoint, dbdtMultilinestring, dbdtMultipolygon, dbdtGeometrycollection
+    dbdtPoint, dbdtLinestring, dbdtLineSegment, dbdtPolygon, dbdtGeometry, dbdtBox, dbdtPath, dbdtCircle, dbdtMultipoint, dbdtMultilinestring, dbdtMultipolygon, dbdtGeometrycollection,
+    dbdtDecfloat, dbdtInt128
     );
 
   // Column type categorization

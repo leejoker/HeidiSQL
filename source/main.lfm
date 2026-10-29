@@ -9,6 +9,7 @@ object MainForm: TMainForm
   ClientWidth = 798
   Menu = MainMenu1
   Position = poMainFormCenter
+  ShowHint = True
   LCLVersion = '4.8.0.0'
   OnActivate = FormActivate
   OnChangeBounds = FormChangeBounds
@@ -22,6 +23,7 @@ object MainForm: TMainForm
     Height = 23
     Top = 357
     Width = 798
+    AutoHint = True
     Panels = <    
       item
         Width = 120
@@ -48,9 +50,7 @@ object MainForm: TMainForm
         Style = psOwnerDraw
         Width = 200
       end>
-    ParentShowHint = False
     SimplePanel = False
-    ShowHint = True
     OnClick = StatusBarClick
     OnDrawPanel = StatusBarDrawPanel
   end
@@ -63,8 +63,6 @@ object MainForm: TMainForm
     Caption = 'ToolBarMainButtons'
     EdgeBorders = []
     Images = ImageListMain
-    ParentShowHint = False
-    ShowHint = True
     TabOrder = 1
     Wrapable = False
     object ToolButton9: TToolButton
@@ -801,8 +799,6 @@ object MainForm: TMainForm
           Caption = 'ToolBarPreview'
           EdgeBorders = []
           Images = ImageListMain
-          ParentShowHint = False
-          ShowHint = True
           TabOrder = 0
           object btnPreviewCopy: TToolButton
             Left = 1
@@ -2312,10 +2308,10 @@ object MainForm: TMainForm
               AnchorSideTop.Control = pnlFilter
               AnchorSideRight.Control = pnlFilter
               AnchorSideRight.Side = asrBottom
-              Left = 428
+              Left = 450
               Height = 15
               Top = 2
-              Width = 185
+              Width = 163
               Anchors = [akTop, akLeft, akRight]
               BorderSpacing.Around = 2
               Caption = 'Create multi column filter:'
@@ -2331,22 +2327,24 @@ object MainForm: TMainForm
               BorderSpacing.Around = 2
               Caption = 'Recent filters:'
             end
-            object btnFilterApply: TButton
+            object btnFilterApply: TBitBtn
               AnchorSideLeft.Control = SynMemoFilter
               AnchorSideLeft.Side = asrBottom
               AnchorSideTop.Control = editFilterSearch
               AnchorSideTop.Side = asrBottom
-              Left = 428
-              Height = 25
+              Left = 450
+              Height = 26
               Top = 44
-              Width = 109
+              Width = 87
               Action = actApplyFilter
               Anchors = [akTop, akLeft, akRight]
               AutoSize = True
               BorderSpacing.Around = 2
+              Images = ImageListMain
+              ImageIndex = 55
               TabOrder = 3
             end
-            object btnFilterClear: TButton
+            object btnFilterClear: TBitBtn
               AnchorSideLeft.Control = btnFilterApply
               AnchorSideLeft.Side = asrBottom
               AnchorSideTop.Control = editFilterSearch
@@ -2354,13 +2352,15 @@ object MainForm: TMainForm
               AnchorSideRight.Control = pnlFilter
               AnchorSideRight.Side = asrBottom
               Left = 539
-              Height = 25
+              Height = 26
               Top = 44
               Width = 74
               Action = actClearFilterEditor
               Anchors = [akTop, akLeft, akRight]
               AutoSize = True
               BorderSpacing.Around = 2
+              Images = ImageListMain
+              ImageIndex = 193
               TabOrder = 2
             end
             object editFilterSearch: TEdit
@@ -2370,10 +2370,10 @@ object MainForm: TMainForm
               AnchorSideTop.Side = asrBottom
               AnchorSideRight.Control = pnlFilter
               AnchorSideRight.Side = asrBottom
-              Left = 428
+              Left = 450
               Height = 23
               Top = 19
-              Width = 185
+              Width = 163
               Anchors = [akTop, akLeft, akRight]
               BorderSpacing.Around = 2
               TabOrder = 1
@@ -2388,7 +2388,7 @@ object MainForm: TMainForm
               Left = 75
               Height = 23
               Top = 2
-              Width = 351
+              Width = 373
               Anchors = [akTop, akLeft, akRight]
               AutoDropDown = True
               BorderSpacing.Around = 2
@@ -2407,7 +2407,7 @@ object MainForm: TMainForm
               Left = 2
               Height = 50
               Top = 27
-              Width = 424
+              Width = 446
               BorderSpacing.Around = 2
               Anchors = [akTop, akLeft, akRight, akBottom]
               Font.Height = -10
@@ -3024,9 +3024,7 @@ object MainForm: TMainForm
               Font.Quality = fqNonAntialiased
               ParentColor = False
               ParentFont = False
-              ParentShowHint = False
               PopupMenu = popupQuery
-              ShowHint = True
               TabOrder = 2
               OnDragDrop = SynMemoQueryDragDrop
               OnDragOver = SynMemoQueryDragOver
@@ -3522,8 +3520,6 @@ object MainForm: TMainForm
             OnChange = tabsetQueryClick
             OnGetImageIndex = tabsetQueryGetImageIndex
             Align = alTop
-            ParentShowHint = False
-            ShowHint = True
             TabOrder = 2
           end
           object QueryGrid: TLazVirtualStringTree
@@ -4495,9 +4491,8 @@ object MainForm: TMainForm
     end
     object actClearFilterEditor: TAction
       Category = 'Data'
-      Caption = 'Clear'
       Hint = 'Clear filter editor'
-      ImageIndex = 58
+      ImageIndex = 193
       ShortCut = 16471
       OnExecute = actClearEditorExecute
     end
@@ -20299,7 +20294,7 @@ object MainForm: TMainForm
     OnExecute = SynCompletionProposalExecute
     OnPaintItem = SynCompletionProposalPaintItem
     OnMeasureItem = SynCompletionProposalMeasureItem
-    Position = -1
+    Position = 0
     LinesInWindow = 6
     OnSearchPosition = SynCompletionProposalSearchPosition
     SelectedColor = clHighlight
@@ -21075,6 +21070,7 @@ object MainForm: TMainForm
     end
     object menuFilterClear: TMenuItem
       Action = actClearFilterEditor
+      Caption = 'Clear'
     end
     object N8a: TMenuItem
       Caption = '-'

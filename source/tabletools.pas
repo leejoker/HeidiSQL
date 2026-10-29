@@ -331,6 +331,8 @@ var
   Params: TConnectionParameters;
   Canv: TCanvas;
   ItemImageIndex: Integer;
+  ItemText, GrayText, NameText: String;
+  NameStart, TextX: Integer;
 begin
   Canv := comboExportOutputType.Canvas;
   if odSelected in State then begin
@@ -354,8 +356,34 @@ begin
     ItemImageIndex := MainForm.actExportTables.ImageIndex;
   end;
 
+  // Sessions: draw the full path from Items[] unchanged, with the folder part
+  // grayed out and path delimiters turned into a visible separator character.
+  GrayText := '';
+  NameText := comboExportOutputType.Items[Index];
+  if Assigned(Params) then begin
+    NameText := Copy(NameText, Length(OUTPUT_SERVER)+1, Length(NameText));
+    NameStart := RPos(AppSettings.PathDelimiter, NameText) + 1;
+    GrayText := Copy(comboExportOutputType.Items[Index], 1,
+      Length(comboExportOutputType.Items[Index])-Length(NameText)+NameStart-1);
+    GrayText := StringReplace(GrayText, AppSettings.PathDelimiter, ' › ', [rfReplaceAll]);
+    NameText := Copy(NameText, NameStart, Length(NameText));
+  end;
+
   Canv.FillRect(ARect);
-  Canv.TextRect(ARect, ARect.Left + Scale96ToForm(MainForm.ImageListMain.Width) + 4, ARect.Top, comboExportOutputType.Items[Index]);
+  TextX := ARect.Left + Scale96ToForm(MainForm.ImageListMain.Width) + 4;
+  if GrayText <> '' then begin
+    if odSelected in State then
+      Canv.Font.Color := clHighlightText
+    else
+      Canv.Font.Color := clGrayText;
+    Canv.TextRect(ARect, TextX, ARect.Top, GrayText);
+    Inc(TextX, Canv.TextWidth(GrayText));
+  end;
+  if odSelected in State then
+    Canv.Font.Color := clHighlightText
+  else
+    Canv.Font.Color := clWindowText;
+  Canv.TextRect(ARect, TextX, ARect.Top, NameText);
   MainForm.ImageListMain.DrawForControl(Canv, ARect.Left + 2, ARect.Top + 2, ItemImageIndex, MainForm.ImageListMain.Width, comboExportOutputType);
 end;
 
@@ -1003,10 +1031,22 @@ begin
       UpdateResultGrid;
     end;
 
-    // Activate ansi mode or whatever again, locally
-    Conn.Query('/*!40101 SET SQL_MODE=IFNULL(@OLD_LOCAL_SQL_MODE, '''') */');
+    // Activate ansi mode or whatever again, locally. Some servers or proxies
+    // reject these restore statements, e.g. MySQL error 1298 on the TIME_ZONE one.
+    // Logging instead of raising, as we do not want to abort the export with it.
+    try
+      Conn.Query('/*!40101 SET SQL_MODE=IFNULL(@OLD_LOCAL_SQL_MODE, '''') */');
+    except
+      on E:EDbError do
+        Conn.Log(lcError, E.Message);
+    end;
     // Reset timezone for reading to previous value
-    Conn.Query('/*!40103 SET TIME_ZONE=IFNULL(@OLD_TIME_ZONE, ''system'') */');
+    try
+      Conn.Query('/*!40103 SET TIME_ZONE=IFNULL(@OLD_TIME_ZONE, ''system'') */');
+    except
+      on E:EDbError do
+        Conn.Log(lcError, E.Message);
+    end;
   end;
   ExportLastDatabase := '';
 

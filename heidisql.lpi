@@ -25,7 +25,7 @@
     <VersionInfo>
       <UseVersionInfo Value="True"/>
       <MajorVersionNr Value="12"/>
-      <MinorVersionNr Value="21"/>
+      <MinorVersionNr Value="22"/>
       <RevisionNr Value="1"/>
       <BuildNr Value="0"/>
     </VersionInfo>
@@ -491,6 +491,13 @@ if TargetOS=&apos;win64&apos; then
         <Filename Value="source\dbeaver_import_dlg.pas"/>
         <IsPartOfProject Value="True"/>
         <ComponentName Value="frmDBeaverImport"/>
+        <HasResources Value="True"/>
+        <ResourceBaseClass Value="Form"/>
+      </Unit>
+      <Unit>
+        <Filename Value="source\rolemanagermssql.pas"/>
+        <IsPartOfProject Value="True"/>
+        <ComponentName Value="RoleManagerMssqlForm"/>
         <HasResources Value="True"/>
         <ResourceBaseClass Value="Form"/>
       </Unit>

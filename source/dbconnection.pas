@@ -793,6 +793,7 @@ type
       FLastError: String;
       FLastErrorCode: Integer;
       FLastRawResults: TInterbaseRawResults;
+      procedure UpdateDatatypes;
       procedure SetActive(Value: Boolean); override;
       function GetThreadId: Int64; override;
       function GetLastErrorCode: Cardinal; override;
@@ -1931,7 +1932,7 @@ begin
     end;
     ngInterbase: begin
       if IsInterbase then
-        Result := IfThen(GetExecutableBits=64, 'ibclient64.', 'gds32.') + SharedSuffix
+        Result := 'ibclient64.' + SharedSuffix
       else if IsFirebird then
         Result := 'fbclient.' + SharedSuffix;
     end
@@ -2071,13 +2072,25 @@ begin
         {$EndIf}
       end;
       ngInterbase:
+        // Do not offer InterBase clients (ibclient) for Firebird sessions and
+        // vice versa, or a Firebird server rejects the connection attempt with
+        // "connection rejected by remote interface". See issue #2527
         {$If defined(LINUX)}
         // libfbclient.so.2 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libfbclient.so.2
-        rx.Expression := '^\s*(libfbclient|libgds|fbclient|gds32|ibclient)[^=]*=>\s*(\S+)$';
+        if IsInterbase then
+          rx.Expression := '^\s*ibclient[^=]*=>\s*(\S+)$'
+        else
+          rx.Expression := '^\s*(libfbclient|fbclient)[^=]*=>\s*(\S+)$';
         {$ElseIf defined(FREEBSD)}
-        rx.Expression := '(libfbclient|libgds|fbclient|gds32|ibclient)[^=]+=>\s*(\S+)$';
+        if IsInterbase then
+          rx.Expression := 'ibclient[^=]+=>\s*(\S+)$'
+        else
+          rx.Expression := '(libfbclient|fbclient)[^=]+=>\s*(\S+)$';
         {$Else}
-        rx.Expression := '^((lib)?fbclient|gds32|ibclient).*\.' + SharedSuffix;
+        if IsInterbase then
+          rx.Expression := '^ibclient.*\.' + SharedSuffix
+        else
+          rx.Expression := '^(lib)?fbclient.*\.' + SharedSuffix;
         {$EndIf}
     end;
     case NetTypeGroup of
@@ -2273,6 +2286,29 @@ begin
 end;
 
 
+procedure TInterbaseConnection.UpdateDatatypes;
+var
+  i: Integer;
+begin
+  // Skip the Firebird-only column types when connecting to InterBase, which
+  // rejects them in DDL and never returns them: BIGINT (16), DECFLOAT (24/25),
+  // INT128 (26) and the time zone types (28/29), see RDB$TYPES.
+  // Called from SetActive, as the nettype is unknown in the constructor.
+  if Parameters.IsInterbase then begin
+    SetLength(FDatatypes, 0);
+    for i:=0 to High(InterbaseDatatypes) do begin
+      if InterbaseDatatypes[i].NativeTypes = '16' then Continue;
+      if InterbaseDatatypes[i].NativeTypes = '24|25' then Continue;
+      if InterbaseDatatypes[i].NativeTypes = '26' then Continue;
+      if InterbaseDatatypes[i].NativeTypes = '28' then Continue;
+      if InterbaseDatatypes[i].NativeTypes = '29' then Continue;
+      SetLength(FDatatypes, Length(FDatatypes)+1);
+      FDatatypes[High(FDatatypes)] := InterbaseDatatypes[i];
+    end;
+  end;
+end;
+
+
 destructor TDBConnection.Destroy;
 begin
   ClearCache(True);
@@ -2408,8 +2444,9 @@ begin
     // Skip if native ids / oid's are (yet) empty
     if Datatypes[i].NativeTypes.IsEmpty then
       Continue;
-    // Skip ? and e which have a special meaning
-    if Datatypes[i].NativeTypes.Length = 1 then
+    // Skip ? and e which have a special meaning in PostgreSQL. Do not skip
+    // single digit ids of other servers, e.g. Firebird's 7, 8 and 9.
+    if (Datatypes[i].NativeTypes = '?') or (Datatypes[i].NativeTypes = 'e') then
       Continue;
     rx.Expression := '\b('+Datatypes[i].NativeTypes+')\b';
     if rx.Exec(IntToStr(NativeType)) then begin
@@ -2984,7 +3021,11 @@ var
 begin
   // Support multiple filenames, and use first one as main database
   FileNames := Explode(DELIM, Parameters.Hostname);
-  MainFile := IfThen(FileNames.Count>=1, FileNames[0], '');
+  // Do not use IfThen() here, as it evaluates FileNames[0] eagerly, which crashes on an empty list
+  if FileNames.Count >= 1 then
+    MainFile := FileNames[0]
+  else
+    MainFile := '';
 
   if Value then begin
     // Fixes "out of memory" crash in sqlite3_open, see issue #1367
@@ -3114,8 +3155,9 @@ var
 begin
   if Value then begin
     DoBeforeConnect;
+    UpdateDatatypes;
 
-    // Load the client library (fbclient.dll / libfbclient.so / gds32.dll etc.) once per process.
+    // Load the client library (fbclient.dll / libfbclient.so / ibclient64.dll etc.) once per process.
     // ibase60dyn refuses a second, different library, so log instead when that happens.
     if IBaseLoadedLibrary = '' then begin
       CandidateLibs := TStringList.Create;
@@ -3136,12 +3178,12 @@ begin
           end;
         end;
         if IBaseLoadedLibrary = '' then begin
-          // Last resort: try default names, e.g. fbembed.dll, fbclient.dll, libfbclient.so, gds32.dll
+          // Last resort: try default names, e.g. fbembed.dll, fbclient.dll, libfbclient.so, ibclient64.dll
           try
             InitialiseIBase60;
           except
             on E:EInOutError do
-              raise EDbError.Create(_('Could not load any Firebird/Interbase client library (fbclient, gds32 or ibclient). Install one, or check the library setting in your session.'));
+              raise EDbError.Create(_('Could not load any Firebird/Interbase client library (fbclient or ibclient). Install one, or check the library setting in your session.'));
           end;
         end;
       finally
@@ -4041,11 +4083,14 @@ begin
     QueryResult.SQL.Text := SQL;
     QueryResult.Options := [sqoAutoApplyUpdates, sqoAutoCommit, sqoCancelUpdatesOnRefresh];
     QueryResult.PacketRecords := 10000;
-    // Prepare explicitly, so the cursor survives ExecSQL and tells us whether a result set came back
+    // Prepare explicitly, so the cursor tells us whether a result set came back.
+    // Read FSelectable before ExecSQL: unlike TSqlSrvConnection, TIBConnection keeps
+    // the default sqCommitEndsPrepared option, so the sqoAutoCommit commit inside
+    // ExecSQL unprepares the statement and frees the cursor. See issue #2527
     QueryResult.Prepare;
+    HasRows := TSQLQueryAccess(QueryResult).Cursor.FSelectable;
     QueryResult.ExecSQL;
     Inc(FRowsAffected, QueryResult.RowsAffected);
-    HasRows := TSQLQueryAccess(QueryResult).Cursor.FSelectable;
     QueryResult.UnPrepare;
     if not HasRows then begin
       // Opening a statement without result set would execute it a second time, and then raise
@@ -4224,9 +4269,9 @@ function TInterbaseConnection.GetCreateCode(Obj: TDBObject): String;
   var
     TypeName: String;
   begin
-    // NUMERIC/DECIMAL are stored on SMALLINT, INTEGER or INT64 columns,
-    // distinguished by RDB$FIELD_SUB_TYPE: 1=NUMERIC, 2=DECIMAL
-    if (TNr in [7, 8, 16]) and (STNr in [1, 2]) then begin
+    // NUMERIC/DECIMAL are stored on SMALLINT, INTEGER, INT64 or 128 bit
+    // columns, distinguished by RDB$FIELD_SUB_TYPE: 1=NUMERIC, 2=DECIMAL
+    if (TNr in [7, 8, 16, 26]) and (STNr in [1, 2]) then begin
       if STNr = 1 then
         TypeName := 'NUMERIC'
       else
@@ -4236,6 +4281,7 @@ function TInterbaseConnection.GetCreateCode(Obj: TDBObject): String;
           7: Prec := 4;
           8: Prec := 9;
           16: Prec := 18;
+          26: Prec := 38;
         end;
       end;
       Result := TypeName+'('+IntToStr(Prec)+', '+IntToStr(Abs(Scale))+')';
@@ -4252,7 +4298,16 @@ function TInterbaseConnection.GetCreateCode(Obj: TDBObject): String;
       12: Result := 'DATE';
       13: Result := 'TIME';
       35: Result := 'TIMESTAMP';
-      17: Result := 'BOOLEAN';
+      23: Result := 'BOOLEAN';  // Firebird
+      17: Result := 'BOOLEAN';  // InterBase
+      // Firebird 4+:
+      24: Result := 'DECFLOAT(16)';
+      25: Result := 'DECFLOAT(34)';
+      26: Result := 'INT128';
+      28: Result := 'TIME WITH TIME ZONE';
+      29: Result := 'TIMESTAMP WITH TIME ZONE';
+      // Internal type, listed in RDB$TYPES, but not usable in DDL:
+      45: Result := 'BLOB_ID';
       14: begin
         if CharLen > 0 then
           Len := CharLen;
@@ -7829,8 +7884,9 @@ begin
       else
         CacheAllTypes.Add(TempList[i]);
     end;
-    // Delete no longer existing
-    for i:=0 to CacheAllTypes.Count-1 do begin
+    // Delete no longer existing. Iterate backwards, as Delete() shrinks the list
+    // and a forward loop then runs out of bounds.
+    for i:=CacheAllTypes.Count-1 downto 0 do begin
       ObjIndex := -1;
       for j:=0 to TempList.Count-1 do begin
         if TempList[j].IsSameAs(CacheAllTypes[i]) then begin
@@ -11716,6 +11772,7 @@ function TTableColumn.SQLCode(OverrideCollation: String=''; Parts: TColumnParts=
 var
   IsVirtual: Boolean;
   QuoteCollation: Boolean;
+  NullClause, DefaultClause: String;
 
   function InParts(Part: TColumnPart): Boolean;
   begin
@@ -11756,36 +11813,35 @@ begin
     Result := Result + ' '; // Add space after each part
   end;
 
+  // Firebird and InterBase require DEFAULT before NOT NULL, while MySQL and
+  // most other servers accept both orders. Collect the clauses first and
+  // append them in the order the server expects.
+  NullClause := '';
   if InParts(cpAllowNull) and (not IsVirtual) and (not FConnection.Parameters.IsAnyMSSQL) then begin
     if not AllowNull then
-      Result := Result + 'NOT NULL '
+      NullClause := 'NOT NULL '
     else if not FConnection.Parameters.IsAnyInterbase then
-      Result := Result + 'NULL ';
+      NullClause := 'NULL ';
   end;
 
-  // SRID for spatial columns supported since MySQL 8.0
-  if InParts(cpSRID) and (DataType.Category = dtcSpatial) and FConnection.Has(frSrid) then begin
-    Result := Result + 'SRID ' + SRID.ToString + ' ';
-  end;
-
-
+  DefaultClause := '';
   if InParts(cpDefault) and (not IsVirtual) then begin
     if DefaultType <> cdtNothing then begin
       case DefaultType of
         // cdtNothing: leave out whole clause
-        cdtText:           Result := Result + 'DEFAULT '+FConnection.EscapeString(DefaultText);
-        cdtNull:           Result := Result + 'DEFAULT NULL';
+        cdtText:           DefaultClause := 'DEFAULT '+FConnection.EscapeString(DefaultText);
+        cdtNull:           DefaultClause := 'DEFAULT NULL';
         cdtAutoInc: begin
           case FConnection.Parameters.NetTypeGroup of
             ngPgSQL:;
-            else Result := Result + FConnection.SqlProvider.GetSql(qAutoInc);
+            else DefaultClause := FConnection.SqlProvider.GetSql(qAutoInc);
           end;
         end;
         cdtExpression: begin
           if FConnection.Has(frColumnDefaultParentheses) then
-            Result := Result + 'DEFAULT ('+DefaultText+')'
+            DefaultClause := 'DEFAULT ('+DefaultText+')'
           else
-            Result := Result + 'DEFAULT '+DefaultText;
+            DefaultClause := 'DEFAULT '+DefaultText;
         end;
       end;
       case OnUpdateType of
@@ -11794,11 +11850,25 @@ begin
         // cdtNull:    not supported, but may be valid in MariaDB?
         // cdtAutoInc: not valid in ON UPDATE
         cdtExpression: begin
-          Result := Result + ' ON UPDATE '+OnUpdateText;
+          DefaultClause := DefaultClause + ' ON UPDATE '+OnUpdateText;
         end;
       end;
-      Result := Result + ' ';
+      DefaultClause := DefaultClause + ' ';
     end;
+  end;
+
+  if FConnection.Parameters.IsAnyInterbase then begin
+    Result := Result + DefaultClause + NullClause;
+  end
+  else begin
+    Result := Result + NullClause;
+
+    // SRID for spatial columns supported since MySQL 8.0
+    if InParts(cpSRID) and (DataType.Category = dtcSpatial) and FConnection.Has(frSrid) then begin
+      Result := Result + 'SRID ' + SRID.ToString + ' ';
+    end;
+
+    Result := Result + DefaultClause;
   end;
 
   if InParts(cpVirtuality) and IsVirtual then begin
