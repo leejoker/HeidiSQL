@@ -81,7 +81,9 @@ get_version_from_lpi() {
   build=$(xmllint --xpath 'string(//CONFIG/ProjectOptions/VersionInfo/BuildNr/@Value)' "$lpi" 2>/dev/null || true)
   # BuildNr=0 means "not committed": derive it from the commit count, so the
   # app bundle version matches what lazbuild-with-buildnr.sh injected into the
-  # lpi while building.
+  # lpi while building. The element can also be missing entirely: the Lazarus
+  # IDE does not write BuildNr=0 (the default) back into the lpi, and then
+  # xmllint yields an empty string here, which this check catches as well.
   if [[ -z "$build" || "$build" == "0" ]]; then
     build=$(git rev-list --count HEAD 2>/dev/null || echo 0)
   fi
@@ -515,6 +517,22 @@ xcrun notarytool submit "${ZIP_PATH}" \
   --wait
 
 echo "Stapling notarization ticket..."
-xcrun stapler staple "${APP_DIR}"
+# Stapling fetches the notarization ticket from Apple's CloudKit endpoint and
+# intermittently fails with NSURLErrorDomain -1005 ("network connection was
+# lost", stapler exit code 68) even though the notarization itself was
+# accepted. Retry a few times before giving up.
+STAPLE_OK=0
+for attempt in 1 2 3 4 5; do
+  if xcrun stapler staple "${APP_DIR}"; then
+    STAPLE_OK=1
+    break
+  fi
+  echo "Staple attempt ${attempt} failed, retrying after a short wait..."
+  sleep $((attempt * 10))
+done
+if [ "${STAPLE_OK}" -ne 1 ]; then
+  echo "Stapling failed after 5 attempts. The notarization itself was accepted; rerun the job to retry stapling."
+  exit 1
+fi
 
 echo "Notarization complete. Distribute: ${APP_DIR}"

@@ -4973,6 +4973,10 @@ msgstr "Save changes to file %s ?"
 msgid "Save content of tab \"%s\"?"
 msgstr "Save content of tab \"%s\"?"
 
+#: extfiledialog.pas
+msgid "Modified"
+msgstr "Modified"
+
 #: main.pas:9582
 msgid "Modified query"
 msgstr "Modified query"
@@ -5822,16 +5826,24 @@ msgid "More"
 msgstr "More"
 
 #. Session manager > Start tab
-msgid "Import settings from Windows registry"
-msgstr "Import settings from Windows registry"
+msgid "Import settings and files from previous version"
+msgstr "Import settings and files from previous version"
 
 #. Session manager > Start tab
-msgid "Previous versions of HeidiSQL stored your settings and sessions in the Windows registry. Click on the button above to import them, so they will appear in this application. This import is only needed once. If you have an exported settings file (.txt), use the top button instead, which imports the same from that file."
-msgstr "Previous versions of HeidiSQL stored your settings and sessions in the Windows registry. Click on the button above to import them, so they will appear in this application. This import is only needed once. If you have an exported settings file (.txt), use the top button instead, which imports the same from that file."
+msgid "Previous versions of HeidiSQL stored your settings and sessions in the Windows registry, and additional files (logs, backups etc.) in your user profile directory. Click on the button above to import both, so they will appear in this application. This import is only needed once. If you have an exported settings file (.txt), use the top button instead, which imports the same from that file."
+msgstr "Previous versions of HeidiSQL stored your settings and sessions in the Windows registry, and additional files (logs, backups etc.) in your user profile directory. Click on the button above to import both, so they will appear in this application. This import is only needed once. If you have an exported settings file (.txt), use the top button instead, which imports the same from that file."
+
+#. Session manager > V12 import status
+msgid "Importing session: %s"
+msgstr "Importing session: %s"
+
+#. Session manager > V12 import status
+msgid "Importing file: %s"
+msgstr "Importing file: %s"
 
 #. Session manager > Start tab
-msgid "Imported settings and sessions from the Windows registry."
-msgstr "Imported settings and sessions from the Windows registry."
+msgid "Imported settings, sessions and files from a previous version."
+msgstr "Imported settings, sessions and files from a previous version."
 
 
 #. MessageDialog()
@@ -7077,3 +7089,23 @@ msgstr "Windows"
 
 msgid "Windows group"
 msgstr "Windows group"
+
+#: crashdialog.pas:72
+msgid "Report sent"
+msgstr "Report sent"
+
+#: crashdialog.pas:72
+msgid "The bug report was sent to %s. Thank you!"
+msgstr "The bug report was sent to %s. Thank you!"
+
+#: crashdialog.pas:74
+msgid "Sending the report failed"
+msgstr "Sending the report failed"
+
+#: extfiledialog.pas
+msgid "Switch to details view"
+msgstr "Switch to details view"
+
+#: extfiledialog.pas
+msgid "Switch to icon view"
+msgstr "Switch to icon view"

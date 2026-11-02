@@ -8,7 +8,7 @@ uses
   Classes, SysUtils, Generics.Collections, Controls, RegExpr, Math, FileUtil,
   StrUtils, Graphics, GraphUtil, LCLIntf, Forms, Clipbrd, Process, ActnList, Menus, Dialogs,
   Character, DateUtils, laz.VirtualTrees, SynEdit, SynCompletion, fphttpclient, IntfGraphics, FPImage,
-  SynEditFoldedView, SynEditWrappedView,
+  SynEditFoldedView, SynEditWrappedView, ExtCtrls,
   {$IFDEF WINDOWS} Windows, Registry, uDarkStyleParams, {$ENDIF} DelphiCompat,
   dbconnection, dbstructures, jsonregistry, lazaruscompat, fpjson, SynEditKeyCmds, LazFileUtils, gettext, LazUTF8,
   IniFiles, GraphType, Sockets, Contnrs, StdCtrls
@@ -32,6 +32,18 @@ type
   end;
 
   TLineBreaks = (lbsNone, lbsWindows, lbsUnix, lbsMac, lbsWide, lbsMixed);
+
+  { TSecondInstanceDialog }
+  // Simple dialog, shown by a blocked second application instance before it
+  // quits, auto-closing after a few seconds, counting down on the OK button
+  TSecondInstanceDialog = class(TForm)
+    private
+      FButton: TButton;
+      FSecondsLeft: Integer;
+    public
+      constructor Create; reintroduce;
+      procedure AutoClose(Sender: TObject);
+  end;
 
   TUTF8NoBOMEncoding = class(TUTF8Encoding)
     public
@@ -237,7 +249,7 @@ type
     asIncrementalSearch, asQueryHistoryEnabled, asQueryHistoryKeepDays,
     asColumnSelectorWidth, asColumnSelectorHeight, asDonatedEmail, asFavoriteObjects, asFavoriteObjectsOnly, asFullTableStatus, asLineBreakStyle,
     asPreferencesWindowWidth, asPreferencesWindowHeight,
-    asFileDialogEncoding, asFileDialogPreviousDir,
+    asFileDialogEncoding, asFileDialogPreviousDir, asFileDialogViewStyle,
     asThemePreviewWidth, asThemePreviewHeight, asThemePreviewTop, asThemePreviewLeft,
     asCreateDbCollation, asRealTrailingZeros,
     asSequalSuggestWindowWidth, asSequalSuggestWindowHeight, asSequalSuggestPrompt, asSequalSuggestRecentPrompts,
@@ -252,6 +264,7 @@ type
     DefaultString, CurrentString: String;
     Synced: Boolean;
   end;
+  TImportStatusProc = procedure(Status: String) of object;
   TAppSettings = class(TObject)
     private
       FReads, FWrites: Integer;
@@ -262,14 +275,18 @@ type
       FRestoreTabsInitValue: Boolean;
       FSettings: Array[TAppSettingIndex] of TAppSetting;
       FDirnameUserAppData: String;
+      FOnImportStatus: TImportStatusProc;
       const FPortableLockFileBase: String='portable.lock';
       procedure InitSetting(Index: TAppSettingIndex; Name: String;
         DefaultInt: Integer=0; DefaultBool: Boolean=False; DefaultString: String='';
         Session: Boolean=False);
       procedure SetSessionPath(Value: String);
       procedure PrepareRegistry;
+      procedure NotifyImportStatus(Status: String);
       {$IFDEF WINDOWS}
       procedure CopyWinRegistryKey(Reg: TRegistry; RegPath, TargetPath: String);
+      function WinUserAppDataDir: String;
+      procedure CopyWinUserAppDataFiles(SourceDir, TargetDir, RelativePath: String);
       {$ENDIF}
       procedure Read(Index: TAppSettingIndex; FormatName: String;
         DataType: TAppSettingDataType; out I: Integer; out B: Boolean; out S: String;
@@ -313,6 +330,11 @@ type
       // Settings stored in the Windows registry by previous versions
       function WinRegistryExists: Boolean;
       function ImportWinRegistrySettings: Boolean;
+      // Files stored by previous versions in the Windows user profile directory
+      function WinUserAppDataExists: Boolean;
+      function ImportWinUserAppDataFiles: Boolean;
+      // Called during imports, with the name of the session or file currently imported
+      property OnImportStatus: TImportStatusProc read FOnImportStatus write FOnImportStatus;
       procedure ImportSettings(Filename: String);
       function ExportSettings(Filename: String): Boolean;
       // Common directories
@@ -404,6 +426,7 @@ type
   function TruncDef(X: Real; Default: Int64): Int64;
   function GetLightness(AColor: TColor): Byte;
   function CheckForSecondInstance: Boolean;
+  procedure InformAboutSecondInstance;
   function GetParentFormOrFrame(Comp: TWinControl): TWinControl;
   function GeneratePassword(Len: Integer): String;
   procedure InvalidateVT(VT: TLazVirtualStringTree; RefreshTag: Integer; ImmediateRepaint: Boolean);
@@ -446,7 +469,7 @@ type
   // This returns a stable, lowercase name "heidisql", used for configuration files and translations
   function GetApplicationName: String;
   procedure CopyImageList(SourceList, TargetList: TImageList; AppendDisabled: Boolean);
-  procedure LightenBitmap(Bmp: Graphics.TBitmap; Amount: Byte);
+  procedure FadeBitmap(Bmp: Graphics.TBitmap; Amount: Byte);
   procedure ApplySynEditWordWrap(Editor: TCustomSynEdit; Enable: Boolean);
 
 var
@@ -1354,7 +1377,9 @@ begin
   Bytes := Encoding.GetBytes(Text); // Encode text
   Writer := TFileStream.Create(Filename, fmCreate);
   try
-    Writer.WriteBuffer(Bytes[0], Length(Bytes));
+    // Empty file: Bytes is an empty dynarray, Bytes[0] would trigger a range check error
+    if Length(Bytes) > 0 then
+      Writer.WriteBuffer(Bytes[0], Length(Bytes));
   finally
     Writer.Free;
   end;
@@ -1524,7 +1549,7 @@ begin
     {$if defined(LCLQt) or defined(LCLQt5) or defined(LCLQt6)}
   if VT is THeidiVirtualStringTree then begin
     VT.LineStyle := lsSolid;
-    VT.Colors.TreeLineColor := ColorAdjustBrightness(VT.Color, 30);
+    VT.Colors.TreeLineColor := ColorAdjustBrightness(clWindow, 30);
 
     if toUseExplorerTheme in VT.TreeOptions.PaintOptions then
       VT.TreeOptions.PaintOptions := VT.TreeOptions.PaintOptions + [toHotTrack]
@@ -1538,7 +1563,7 @@ begin
       toShowVertGridLines in VT.TreeOptions.PaintOptions);
     if (toShowHorzGridLines in VT.TreeOptions.PaintOptions) or
       (toShowVertGridLines in VT.TreeOptions.PaintOptions) then
-      VT.Colors.GridLineColor := ColorAdjustBrightness(VT.Color, 30);
+      VT.Colors.GridLineColor := ColorAdjustBrightness(clWindow, 30);
     VT.TreeOptions.PaintOptions := VT.TreeOptions.PaintOptions -
       [toShowHorzGridLines, toShowVertGridLines];
   end;
@@ -1564,7 +1589,7 @@ begin
   if IsResultGrid then begin
     // Theme-dependent grid lines: slightly darker than the cell background on
     // light themes, slightly brighter on dark themes. Refs #2470
-    VT.Colors.GridLineColor := ColorAdjustBrightness(VT.Color, 30);
+    VT.Colors.GridLineColor := ColorAdjustBrightness(clWindow, 30);
     if AppSettings.ReadBool(asIncrementalSearch) then begin
       // Apply case insensitive incremental search event
       VT.IncrementalSearch := isInitializedOnly;
@@ -2908,7 +2933,7 @@ begin
 end;
 {$ELSE}
 var
-  Buffer, Line, ProcName: String;
+  Buffer, Line, TrimmedLine, ProcName: String;
   PidNumber: Cardinal;
   i: Integer;
 begin
@@ -2917,11 +2942,15 @@ begin
   Result := False;
   if RunCommand('ps', ['-axo', 'pid=,comm='], Buffer) then begin
     for Line in Buffer.Split([#10, #13], TStringSplitOptions.ExcludeEmpty) do begin
-      i := Pos(' ', Line);
+      // ps right-aligns the pid column, so lines start with spaces. Without
+      // trimming, Pos(' ', ...) would be 1 and the pid would parse as 0,
+      // which never equals ExcludePid and so matches our own process.
+      TrimmedLine := Trim(Line);
+      i := Pos(' ', TrimmedLine);
       if i > 0 then begin
-        PidNumber := Cardinal(StrToInt64Def(Copy(Line, 1, i-1), 0));
+        PidNumber := Cardinal(StrToInt64Def(Copy(TrimmedLine, 1, i-1), 0));
         if (PidNumber <> ExcludePid) and ((pid = 0) or (PidNumber = pid)) then begin
-          ProcName := Trim(Copy(Line, i+1, MaxInt));
+          ProcName := Trim(Copy(TrimmedLine, i+1, MaxInt));
           if ExeNamePattern.IsEmpty or ContainsText(ProcName, ExeNamePattern) then begin
             Result := True;
             Break;
@@ -2938,9 +2967,87 @@ end;
 function CheckForSecondInstance: Boolean;
 begin
   // Simple approach to detect a running first instance: check if any other
-  // process has a similar name as our own executable. Deliberately without
-  // any message passing between the instances - the second instance just quits.
+  // process has a similar name as our own executable. The second instance
+  // just quits, after informing the user, see InformAboutSecondInstance().
   Result := ProcessExists(0, GetApplicationName, GetProcessId);
+end;
+
+
+procedure InformAboutSecondInstance;
+var
+  Dialog: TSecondInstanceDialog;
+begin
+  // Called by a blocked second instance before it quits, so the user knows
+  // why no new window appeared.
+  Dialog := TSecondInstanceDialog.Create;
+  try
+    Dialog.ShowModal;
+  finally
+    Dialog.Free;
+  end;
+end;
+
+
+{ TSecondInstanceDialog }
+
+constructor TSecondInstanceDialog.Create;
+var
+  lbl: TLabel;
+  btn: TButton;
+  Timer: TTimer;
+begin
+  inherited CreateNew(nil);
+  Caption := APPNAME;
+  Position := poScreenCenter;
+  BorderStyle := bsDialog;
+  AutoSize := True;
+  // Pin the width, so form AutoSize only computes the height from the
+  // word-wrapped label, instead of shrinking to the label's natural width
+  Constraints.MinWidth := 300;
+  Constraints.MaxWidth := 300;
+  ClientWidth := 300;
+  lbl := TLabel.Create(Self);
+  lbl.Parent := Self;
+  lbl.Caption := f_('Preventing second application instance - disabled in %s > %s > %s.', [_('Tools'), _('Preferences'), _('General')]);
+  lbl.WordWrap := True;
+  lbl.Anchors := [akTop, akLeft, akRight];
+  lbl.AnchorSideTop.Control := Self;
+  lbl.AnchorSideTop.Side := asrTop;
+  lbl.AnchorSideLeft.Control := Self;
+  lbl.AnchorSideLeft.Side := asrLeft;
+  lbl.AnchorSideRight.Control := Self;
+  lbl.AnchorSideRight.Side := asrBottom;
+  lbl.BorderSpacing.Around := 16;
+  btn := TButton.Create(Self);
+  btn.Parent := Self;
+  FButton := btn;
+  FSecondsLeft := 5;
+  btn.Caption := Format('%s (%ds)', [_('OK'), FSecondsLeft]);
+  btn.AutoSize := True;
+  btn.Anchors := [akTop, akRight];
+  btn.AnchorSideTop.Control := lbl;
+  btn.AnchorSideTop.Side := asrBottom;
+  btn.AnchorSideRight.Control := Self;
+  btn.AnchorSideRight.Side := asrBottom;
+  btn.BorderSpacing.Top := 12;
+  btn.BorderSpacing.Right := 16;
+  btn.BorderSpacing.Bottom := 16;
+  btn.ModalResult := mrOk;
+  btn.Default := True;
+  btn.Cancel := True;
+  Timer := TTimer.Create(Self);
+  Timer.Interval := 1000;
+  Timer.OnTimer := AutoClose;
+end;
+
+
+procedure TSecondInstanceDialog.AutoClose(Sender: TObject);
+begin
+  Dec(FSecondsLeft);
+  if FSecondsLeft > 0 then
+    FButton.Caption := Format('%s (%ds)', [_('OK'), FSecondsLeft])
+  else
+    ModalResult := mrOk;
 end;
 
 
@@ -3073,7 +3180,7 @@ begin
         ResWidth := Resolutions[ResIdx];
         TempBitmap := Graphics.TBitmap.Create;
         SourceList.Resolution[ResWidth].GetBitmap(i, TempBitmap, gdeNormal);
-        LightenBitmap(TempBitmap, 140);
+        FadeBitmap(TempBitmap, 140);
         TempBitmapList[ResIdx] := TempBitmap;
       end;
       TargetList.AddMultipleResolutions(TempBitmapList);
@@ -3081,7 +3188,7 @@ begin
   end;
 end;
 
-procedure LightenBitmap(Bmp: Graphics.TBitmap; Amount: Byte);
+procedure FadeBitmap(Bmp: Graphics.TBitmap; Amount: Byte);
 var
   x, y: Integer;
   Img: TLazIntfImage;
@@ -3091,6 +3198,8 @@ begin
   // Was grayscaled before (ImageList.Draw with gdeDisabled effect). But now this is
   // also used for unseen database tree objects, this mechanism looks better.
   // https://www.heidisql.com/forum.php?t=45161
+  // Reduce opacity instead of mixing with white, so the icon blends into the background
+  // like ghosted icons in the Delphi version, and does not get brighter on dark themes.
   Img := TLazIntfImage.Create(0, 0);
   try
     Img.LoadFromBitmap(Bmp.Handle, Bmp.MaskHandle);
@@ -3100,9 +3209,7 @@ begin
       begin
         C := Img.Colors[x, y];
 
-        C.red   := C.red   + ((65535 - C.red)   * Amount) div 255;
-        C.green := C.green + ((65535 - C.green) * Amount) div 255;
-        C.blue  := C.blue  + ((65535 - C.blue)  * Amount) div 255;
+        C.alpha := C.alpha - (C.alpha * Amount) div 255;
 
         Img.Colors[x, y] := C;
       end;
@@ -4000,6 +4107,7 @@ begin
   InitSetting(asPreferencesWindowHeight,          'PreferencesWindowHeight',               500);
   InitSetting(asFileDialogEncoding,               'FileDialogEncoding_%s',                 0);
   InitSetting(asFileDialogPreviousDir,            'FileDialogPreviousDir',                 0, False, '');
+  InitSetting(asFileDialogViewStyle,              'FileDialogViewStyle',                   0, False, 'report');
   InitSetting(asThemePreviewWidth,                'ThemePreviewWidth',                     300);
   InitSetting(asThemePreviewHeight,               'ThemePreviewHeight',                    200);
   InitSetting(asThemePreviewTop,                  'ThemePreviewTop',                       300);
@@ -4479,6 +4587,9 @@ begin
       // e.g. in a session name "A/B". Replace it by a dash first.
       // Same replacement as in session renaming, see issue #682.
       SubKey := StringReplace(SubKeys[i], PathDelimiter, '-', [rfReplaceAll]);
+      // Report every imported session and folder name to the status callback
+      if Copy(TargetPath, 1, Length(PathDelimiter+'Sessions'+PathDelimiter)) = PathDelimiter+'Sessions'+PathDelimiter then
+        NotifyImportStatus(f_('Importing session: %s', [SubKeys[i]]));
       CopyWinRegistryKey(Reg, RegPath+'\'+SubKeys[i], TargetPath+SubKey+PathDelimiter);
     end;
   finally
@@ -4514,6 +4625,117 @@ end;
 {$ELSE}
 begin
   // No Windows registry on this platform
+  Result := False;
+end;
+{$ENDIF}
+
+procedure TAppSettings.NotifyImportStatus(Status: String);
+begin
+  if Assigned(FOnImportStatus) then
+    FOnImportStatus(Status);
+end;
+
+{$IFDEF WINDOWS}
+function TAppSettings.WinUserAppDataDir: String;
+begin
+  // Directory in which a previous version stored its files (logs, backups,
+  // highlighters etc.), e.g. C:\Users\xyz\AppData\Roaming\HeidiSQL\
+  Result := IncludeTrailingPathDelimiter(SysUtils.GetEnvironmentVariable('APPDATA')) + APPNAME + PathDelim;
+end;
+{$ENDIF}
+
+function TAppSettings.WinUserAppDataExists: Boolean;
+{$IFDEF WINDOWS}
+begin
+  // Detect files stored by a previous version in the user profile directory
+  Result := DirectoryExists(WinUserAppDataDir);
+end;
+{$ELSE}
+begin
+  // No Windows user profile directory on this platform
+  Result := False;
+end;
+{$ENDIF}
+
+{$IFDEF WINDOWS}
+procedure TAppSettings.CopyWinUserAppDataFiles(SourceDir, TargetDir, RelativePath: String);
+var
+  Rec: TSearchRec;
+begin
+  // Recursively copy files from a previous version's user directory into this
+  // version's user directory. Existing files are left alone. SourceDir and
+  // TargetDir are expected to have a trailing path delimiter, RelativePath not.
+  if SysUtils.FindFirst(SourceDir+'*', faAnyFile, Rec) = 0 then begin
+    repeat
+      if (Rec.Name = '.') or (Rec.Name = '..') then
+        Continue;
+      if (Rec.Attr and faDirectory) <> 0 then begin
+        // Don't recurse into junctions and symbolic links, which may point back
+        // to a parent directory and cause endless recursion
+        if (FileGetAttr(SourceDir+Rec.Name) and FILE_ATTRIBUTE_REPARSE_POINT) <> 0 then
+          Continue;
+        CopyWinUserAppDataFiles(SourceDir+Rec.Name+PathDelim, TargetDir+Rec.Name+PathDelim, RelativePath+Rec.Name+PathDelim)
+      end
+      else begin
+        if FileExists(TargetDir+Rec.Name) then
+          Continue; // Don't touch file if already there
+        SysUtils.ForceDirectories(TargetDir);
+        NotifyImportStatus(f_('Importing file: %s', [RelativePath+Rec.Name]));
+        FileUtil.CopyFile(SourceDir+Rec.Name, TargetDir+Rec.Name, True);
+      end;
+    until SysUtils.FindNext(Rec) <> 0;
+    SysUtils.FindClose(Rec);
+  end;
+end;
+{$ENDIF}
+
+function TAppSettings.ImportWinUserAppDataFiles: Boolean;
+{$IFDEF WINDOWS}
+var
+  SourceDir, TabsIniFilename, Value: String;
+  TabsIni: TIniFile;
+  Sections, Keys: TStringList;
+  i, j: Integer;
+begin
+  // Import all files stored by a previous version in the user profile
+  // directory into this version's user directory. Existing files are left alone.
+  Result := False;
+  SourceDir := WinUserAppDataDir;
+  if not DirectoryExists(SourceDir) then
+    Exit;
+  if SameText(SourceDir, DirnameUserAppData) then
+    Exit; // Source and target are identical, nothing to do
+  CopyWinUserAppDataFiles(SourceDir, DirnameUserAppData, '');
+  // Fix absolute path references in the imported tabs.ini which point into
+  // the previous version's user directory, e.g. query tab backup files
+  TabsIniFilename := DirnameUserAppData + 'tabs.ini';
+  if FileExists(TabsIniFilename) then begin
+    TabsIni := TIniFile.Create(TabsIniFilename);
+    Sections := TStringList.Create;
+    Keys := TStringList.Create;
+    try
+      TabsIni.ReadSections(Sections);
+      for i:=0 to Sections.Count-1 do begin
+        TabsIni.ReadSection(Sections[i], Keys);
+        for j:=0 to Keys.Count-1 do begin
+          Value := TabsIni.ReadString(Sections[i], Keys[j], '');
+          if Pos(SourceDir, Value) > 0 then
+            TabsIni.WriteString(Sections[i], Keys[j],
+              StringReplace(Value, SourceDir, DirnameUserAppData, [rfReplaceAll]));
+        end;
+        Keys.Clear;
+      end;
+    finally
+      Keys.Free;
+      Sections.Free;
+      TabsIni.Free;
+    end;
+  end;
+  Result := True;
+end;
+{$ELSE}
+begin
+  // No Windows user profile directory on this platform
   Result := False;
 end;
 {$ENDIF}

@@ -6,7 +6,8 @@ interface
 
 uses
   Classes, SysUtils, LCLType, Forms, Controls, Graphics, Dialogs,
-  ExtCtrls, StdCtrls, ShellCtrls, ComCtrls, apphelpers, extra_controls, Math, generic_types;
+  ExtCtrls, StdCtrls, Buttons, ShellCtrls, ComCtrls, apphelpers, extra_controls, Math, generic_types
+  {$IFDEF WINDOWS}, Windows, WinDirs, ActiveX, ShlObj, LazUTF8 {$ENDIF};
 
 type
 
@@ -15,6 +16,9 @@ type
   TfrmExtFileDialog = class(TExtForm)
     btnCancel: TButton;
     btnOk: TButton;
+    tbViewStyle: TToolBar;
+    tbtnViewIcons: TToolButton;
+    tbtnViewDetails: TToolButton;
     comboLineBreaks: TComboBox;
     comboEncoding: TComboBox;
     comboFileType: TComboBox;
@@ -47,6 +51,14 @@ type
     procedure ShellListViewFileAdded(Sender: TObject; Item: TListItem);
     procedure ShellListViewSelectItem(Sender: TObject; Item: TListItem;
       Selected: Boolean);
+    procedure ShellListViewContextPopup(Sender: TObject; MousePos: TPoint;
+      var Handled: Boolean);
+    procedure ShellListViewCompare(Sender: TObject; Item1, Item2: TListItem;
+      Data: Integer; var Compare: Integer);
+    procedure ShellListViewColumnClick(Sender: TObject; Column: TListColumn);
+    procedure ShellListViewResize(Sender: TObject);
+    procedure btnViewIconsClick(Sender: TObject);
+    procedure btnViewDetailsClick(Sender: TObject);
     procedure ShellTreeViewChange(Sender: TObject; Node: TTreeNode);
     procedure ShellTreeViewChanging(Sender: TObject; Node: TTreeNode;
       var AllowChange: Boolean);
@@ -65,6 +77,13 @@ type
     FFiles: TStringList;
     FOnTypeChange: TNotifyEvent;
     FClickedPathPart: String;
+    FSortDirection: TSortDirection; // SortDirection is not published by TShellListView
+    function CompareFileNames(const Name1, Name2: String): Integer;
+    procedure UpdateViewStyleButton;
+    procedure SetupListViewColumns;
+    {$IFDEF WINDOWS}
+    function ShowShellContextMenu(FileName: String; ScreenPos: TPoint): Boolean;
+    {$ENDIF}
     procedure SetTitle(AValue: String);
     function GetFileName: String;
     procedure SetFileName(const AValue: String);
@@ -107,6 +126,9 @@ implementation
 
 uses main;
 
+{$IFDEF WINDOWS}
+function StrCmpLogicalW(psz1, psz2: PWideChar): Integer; stdcall; external 'shlwapi.dll' name 'StrCmpLogicalW';
+{$ENDIF}
 
 function TfrmExtFileDialog.Execute: Boolean;
 begin
@@ -130,7 +152,30 @@ begin
   ShellTreeView.OnGetImageIndex := ShellTreeViewGetImageIndex;
   ShellTreeView.OnGetSelectedIndex := ShellTreeViewGetSelectedIndex;
   ShellListView.SmallImages := MainForm.ImageListMain;
+  ShellListView.LargeImages := MainForm.ImageListMain;
+  {$ENDIF}
+  ShellListView.OnCompare := ShellListViewCompare;
+  ShellListView.OnColumnClick := ShellListViewColumnClick;
   ShellListView.OnFileAdded := ShellListViewFileAdded;
+  // AutoSizeColumns off: ShellCtrls' AdjustColWidths distributes the client width
+  // over its 3 built-in columns only and would push additional columns out to the
+  // right. Keep fixed widths for the secondary columns instead and let
+  // ShellListViewResize fit the name column into the remaining space.
+  ShellListView.AutoSizeColumns := False;
+  with ShellListView.Columns.Add do begin
+    Caption := _('Modified');
+    Width := 140;
+  end;
+  ShellListView.OnResize := ShellListViewResize;
+  SetupListViewColumns;
+  if AppSettings.ReadString(asFileDialogViewStyle) = 'icon' then
+    ShellListView.ViewStyle := vsIcon
+  else
+    ShellListView.ViewStyle := vsReport;
+  UpdateViewStyleButton;
+  FSortDirection := sdAscending;
+  {$IFDEF WINDOWS}
+  ShellListView.OnContextPopup := ShellListViewContextPopup;
   {$ENDIF}
   FFilterNames := TStringList.Create;
   FFilterMasks := TStringList.Create;
@@ -168,6 +213,7 @@ begin
     SetInitialDir(GetUserDir);
 
   SetFilterIndex(FFilterIndex);
+  SetupListViewColumns;
 
   comboEncoding.Items.AddStrings(FEncodings, True);
   comboEncoding.AutoSizeItemWidth;
@@ -180,6 +226,10 @@ begin
   LineBreakIndexInt := Integer(FLineBreakIndex)-1; // we skip lbsNone
   if (LineBreakIndexInt >=0) and (LineBreakIndexInt < comboLineBreaks.Items.Count) then
     comboLineBreaks.ItemIndex := LineBreakIndexInt;
+
+  // Show the sort indicator on the initially sorted column
+  if (ShellListView.SortColumn >= 0) and (ShellListView.SortColumn < ShellListView.Columns.Count) then
+    ShellListView.Columns[ShellListView.SortColumn].SortIndicator := siAscending;
 end;
 
 procedure TfrmExtFileDialog.IdleTimerTreeNodeScrolltoviewTimer(Sender: TObject);
@@ -334,16 +384,30 @@ end;
 
 procedure TfrmExtFileDialog.ShellListViewFileAdded(Sender: TObject;
   Item: TListItem);
+{$IFNDEF WINDOWS}
 var
   Ext: String;
+{$ENDIF}
 begin
-  if TShellListItem(Item).IsFolder then
-    Item.ImageIndex := ICONINDEX_FOLDER
+  if TShellListItem(Item).IsFolder then begin
+    {$IFNDEF WINDOWS}
+    Item.ImageIndex := ICONINDEX_FOLDER;
+    {$ENDIF}
+  end
   else begin
+    // Size column: our own formatting instead of ShellCtrls' hardcoded "bytes/kB/MB".
+    // ShellCtrls stores the raw byte count in Item.Data.
+    if Item.SubItems.Count > 0 then
+      Item.SubItems[0] := FormatByteNumber(Int64(PtrInt(Item.Data)));
+    // Additional "Modified" column, see Columns.Add in FormCreate.
+    // Note: TSearchRec.Time is a DOS LongInt, TimeStamp is the TDateTime
+    Item.SubItems.Add(FormatDateTime('yyyy-mm-dd hh:nn:ss', TShellListItem(Item).FileInfo.TimeStamp));
+    {$IFNDEF WINDOWS}
     Ext := ExtractFileExt(ShellListView.GetPathFromItem(Item));
     Item.ImageIndex := GetFileExtImageIndex(Ext);
     if Item.ImageIndex = -1 then
       Item.ImageIndex := 66; // page with question mark
+    {$ENDIF}
   end;
 end;
 
@@ -360,10 +424,163 @@ begin
   end;
 end;
 
+procedure TfrmExtFileDialog.ShellListViewCompare(Sender: TObject; Item1,
+  Item2: TListItem; Data: Integer; var Compare: Integer);
+begin
+  // Folders first
+  if TShellListItem(Item1).isFolder <> TShellListItem(Item2).isFolder then begin
+    if TShellListItem(Item1).isFolder then
+      Compare := -1
+    else
+      Compare := 1;
+    Exit;
+  end;
+  case ShellListView.SortColumn of
+    1: // Size: numeric compare, ShellCtrls stores the raw byte count in Item.Data
+      Compare := CompareValue(Int64(PtrInt(Item1.Data)), Int64(PtrInt(Item2.Data)));
+    2: // Type: by file extension
+      Compare := AnsiCompareText(ExtractFileExt(Item1.Caption), ExtractFileExt(Item2.Caption));
+    3: // Modified: numeric compare of the file time
+      Compare := CompareValue(TShellListItem(Item1).FileInfo.TimeStamp, TShellListItem(Item2).FileInfo.TimeStamp);
+  else // Name
+    Compare := CompareFileNames(Item1.Caption, Item2.Caption);
+  end;
+  if Compare = 0 then
+    Compare := CompareFileNames(Item1.Caption, Item2.Caption); // deterministic order
+  // TCustomListView reverses the compare result for descending order only when
+  // OnCompare is NOT set (see _CompareListViewItems), so reverse it ourselves.
+  // SortDirection is not published by TShellListView, hence our own FSortDirection.
+  if FSortDirection = sdDescending then
+    Compare := -Compare;
+end;
+
+function TfrmExtFileDialog.CompareFileNames(const Name1, Name2: String): Integer;
+{$IFDEF WINDOWS}
+var
+  W1, W2: WideString;
+{$ENDIF}
+begin
+  {$IFDEF WINDOWS}
+  // Natural sort like in Windows Explorer: "file2" sorts before "file10"
+  W1 := UTF8ToUTF16(Name1);
+  W2 := UTF8ToUTF16(Name2);
+  Result := StrCmpLogicalW(PWideChar(W1), PWideChar(W2));
+  {$ELSE}
+  Result := AnsiCompareText(Name1, Name2);
+  {$ENDIF}
+end;
+
+procedure TfrmExtFileDialog.ShellListViewColumnClick(Sender: TObject;
+  Column: TListColumn);
+const
+  DirToIndicator: array[TSortDirection] of TSortIndicator = (siAscending, siDescending);
+var
+  i: Integer;
+  NewDirection: TSortDirection;
+begin
+  // The list view sorts itself after this event (AutoSort is on), so predict the
+  // resulting direction here and place the indicator on the clicked column.
+  // Note: TCustomListView.AutoSortIndicator is protected and not published by
+  // TShellListView, so we cannot use it and set TColumn.SortIndicator manually.
+  if Column.Index <> ShellListView.SortColumn then
+    FSortDirection := sdAscending
+  else if FSortDirection = sdAscending then
+    FSortDirection := sdDescending
+  else
+    FSortDirection := sdAscending;
+  NewDirection := FSortDirection;
+  for i := 0 to ShellListView.Columns.Count-1 do
+    ShellListView.Columns[i].SortIndicator := siNone;
+  Column.SortIndicator := DirToIndicator[NewDirection];
+end;
+
+procedure TfrmExtFileDialog.SetupListViewColumns;
+begin
+  // Fixed widths for the secondary columns; the name column gets the remaining
+  // space (see ShellListViewResize). Re-applied on every show and view change,
+  // because switching the view style resets the native column widths.
+  if ShellListView.Columns.Count > 3 then begin
+    ShellListView.Columns[1].Width := 80; // Size
+    ShellListView.Columns[2].Width := 80; // Type
+    ShellListView.Columns[3].Width := 140; // Modified
+  end;
+  ShellListViewResize(ShellListView);
+end;
+
+procedure TfrmExtFileDialog.ShellListViewResize(Sender: TObject);
+var
+  i, W: Integer;
+begin
+  if ShellListView.Columns.Count > 1 then
+  begin
+    W := ShellListView.ClientWidth;
+    for i := 1 to ShellListView.Columns.Count-1 do
+      Dec(W, ShellListView.Columns[i].Width);
+    ShellListView.Columns[0].Width := Max(50, W);
+  end;
+end;
+
+procedure TfrmExtFileDialog.btnViewIconsClick(Sender: TObject);
+begin
+  ShellListView.ViewStyle := vsIcon;
+  AppSettings.WriteString(asFileDialogViewStyle, 'icon');
+  // Repopulate so item icons match the new view style (large vs. small icons).
+  // Keeps the current sort order, see ShellTreeViewChange.
+  ShellListView.UpdateView;
+  SetupListViewColumns;
+  UpdateViewStyleButton;
+end;
+
+procedure TfrmExtFileDialog.btnViewDetailsClick(Sender: TObject);
+begin
+  ShellListView.ViewStyle := vsReport;
+  AppSettings.WriteString(asFileDialogViewStyle, 'report');
+  ShellListView.UpdateView;
+  SetupListViewColumns;
+  UpdateViewStyleButton;
+end;
+
+procedure TfrmExtFileDialog.UpdateViewStyleButton;
+begin
+  // The button matching the current view style stays pressed (Down), the other
+  // one is up. Both share GroupIndex 1, so they behave like radio buttons.
+  tbtnViewIcons.Down := ShellListView.ViewStyle = vsIcon;
+  tbtnViewDetails.Down := ShellListView.ViewStyle = vsReport;
+  tbtnViewIcons.Hint := _('Switch to icon view');
+  tbtnViewDetails.Hint := _('Switch to details view');
+end;
+
+procedure TfrmExtFileDialog.ShellListViewContextPopup(Sender: TObject;
+  MousePos: TPoint; var Handled: Boolean);
+{$IFDEF WINDOWS}
+var
+  Item: TListItem;
+  FileName: String;
+{$ENDIF}
+begin
+  {$IFDEF WINDOWS}
+  Item := ShellListView.GetItemAt(MousePos.X, MousePos.Y);
+  if (Item <> nil) and (not Item.Selected) then
+    ShellListView.Selected := Item; // let the context menu act on the clicked item, like in Explorer
+  if Item <> nil then
+    FileName := ShellListView.GetPathFromItem(Item)
+  else
+    FileName := ShellTreeView.Path; // right-click on empty space: context menu of the current folder
+  if not FileName.IsEmpty then
+    Handled := ShowShellContextMenu(FileName, ShellListView.ClientToScreen(MousePos));
+  {$ENDIF}
+end;
+
 procedure TfrmExtFileDialog.ShellTreeViewChange(Sender: TObject; Node: TTreeNode
   );
 begin
   lblPath.Caption := ShellTreeView.Path;
+  // Re-apply the current sorting after the list was repopulated: PopulateWithRoot's
+  // internal Sort is skipped while the list view is in BeginUpdate (SetRoot), so a
+  // folder change would leave the items in raw FindFirst order although the header
+  // still shows the sort indicator. OnChange fires after the repopulation, so this
+  // is the right place to sort again.
+  ShellListView.Sort;
 end;
 
 procedure TfrmExtFileDialog.ShellTreeViewChanging(Sender: TObject;
@@ -451,6 +668,64 @@ begin
   end;
 end;
 
+
+{$IFDEF WINDOWS}
+function TfrmExtFileDialog.ShowShellContextMenu(FileName: String;
+  ScreenPos: TPoint): Boolean;
+var
+  DesktopFolder, Folder: IShellFolder;
+  FullPidl: PItemIDList;
+  RelPidl: LPCITEMIDLIST;
+  FolderPtr: Pointer;
+  Eaten, Attrs: ULONG;
+  ContextMenu: IContextMenu;
+  Menu: HMENU;
+  Cmd, CmdFirst: Integer;
+  InvokeInfo: TCMINVOKECOMMANDINFO;
+  Wide: WideString;
+begin
+  Result := False;
+  FileName := ExcludeTrailingPathDelimiter(ExpandFileName(FileName));
+  if not (FileExists(FileName) or DirectoryExists(FileName)) then
+    Exit;
+  if SHGetDesktopFolder(DesktopFolder) <> S_OK then
+    Exit;
+  Attrs := 0;
+  RelPidl := nil;
+  Wide := UTF8ToUTF16(FileName); // strings in this app are UTF-8
+  // Absolute PIDL of the file or folder
+  if DesktopFolder.ParseDisplayName(Handle, nil, PWideChar(Wide), Eaten, FullPidl, Attrs) <> S_OK then
+    Exit;
+  try
+    // Parent folder + relative PIDL, so the menu refers to the item itself
+    if SHBindToParent(FullPidl, IID_IShellFolder, @FolderPtr, RelPidl) <> S_OK then
+      Exit;
+    Folder := IShellFolder(FolderPtr);
+    if Folder.GetUIObjectOf(Handle, 1, RelPidl, IID_IContextMenu, nil, ContextMenu) <> S_OK then
+      Exit;
+    Menu := CreatePopupMenu;
+    try
+      CmdFirst := 1;
+      if ContextMenu.QueryContextMenu(Menu, 0, CmdFirst, $7FFF, CMF_NORMAL or CMF_EXPLORE) < 0 then
+        Exit;
+      Cmd := Integer(TrackPopupMenu(Menu, TPM_RETURNCMD or TPM_NONOTIFY or TPM_LEFTALIGN or TPM_LEFTBUTTON, ScreenPos.X, ScreenPos.Y, 0, Handle, nil));
+      if Cmd <= 0 then
+        Exit;
+      InvokeInfo := Default(TCMINVOKECOMMANDINFO);
+      InvokeInfo.cbSize := SizeOf(InvokeInfo);
+      InvokeInfo.hwnd := Handle;
+      InvokeInfo.lpVerb := PAnsiChar(PtrUInt(Cmd - CmdFirst));
+      InvokeInfo.nShow := SW_SHOWNORMAL;
+      ContextMenu.InvokeCommand(InvokeInfo);
+      Result := True;
+    finally
+      DestroyMenu(Menu);
+    end;
+  finally
+    CoTaskMemFree(FullPidl); // RelPidl points into FullPidl and must not be freed separately
+  end;
+end;
+{$ENDIF}
 
 { TExtFileOpenDialog }
 

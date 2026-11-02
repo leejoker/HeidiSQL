@@ -974,7 +974,6 @@ type
       FCurrentResults: TSQLQuery;
       FResultList: TSqlSrvResults;
       procedure SetRecNo(Value: Int64); override;
-      function IsResultAlive: Boolean; override;
     public
       constructor Create(AOwner: TComponent); override;
       destructor Destroy; override;
@@ -986,6 +985,7 @@ type
       function ColIsKeyPart(Column: Integer): Boolean; override;
       function IsNull(Column: Integer): Boolean; overload; override;
       function HasResult: Boolean; override;
+      function IsResultAlive: Boolean; override;
       function DatabaseName: String; override;
       function TableName(Column: Integer): String; overload; override;
   end;
@@ -1082,7 +1082,6 @@ type
       FCurrentResults: TSQLQuery;
       FResultList: TInterbaseRawResults;
       procedure SetRecNo(Value: Int64); override;
-      function IsResultAlive: Boolean; override;
     public
       constructor Create(AOwner: TComponent); override;
       destructor Destroy; override;
@@ -1094,6 +1093,7 @@ type
       function ColIsKeyPart(Column: Integer): Boolean; override;
       function IsNull(Column: Integer): Boolean; overload; override;
       function HasResult: Boolean; override;
+      function IsResultAlive: Boolean; override;
       function DatabaseName: String; override;
       function TableName(Column: Integer): String; overload; override;
   end;
@@ -8206,7 +8206,7 @@ begin
       DataLenClause := 'NULL';
     // See https://www.heidisql.com/forum.php?t=34635
     if Parameters.FullTableStatus and (ServerVersionInt >= 80100) then
-      IndexLenClause := 'pg_relation_size(format(''%I.%I'', n.nspname, c.relname))::bigint'
+      IndexLenClause := 'pg_indexes_size(format(''%I.%I'', n.nspname, c.relname))::bigint'
     else
       IndexLenClause := 'relpages::bigint * '+SIZE_KB.ToString;
     if ServerVersionInt >= 110000 then

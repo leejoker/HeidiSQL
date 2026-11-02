@@ -1236,6 +1236,7 @@ type
       var PaintInfo: THeaderPaintInfo; var Elements: THeaderPaintElements);
     procedure AnyGridAdvancedHeaderDraw(Sender: TVTHeader;
       var PaintInfo: THeaderPaintInfo; const Elements: THeaderPaintElements);
+    function ShortenHeaderCaption(Tree: TVirtualStringTree; Col: TVirtualTreeColumn): String;
     //procedure SynMemoQueryScanForFoldRanges(Sender: TObject;
     //  FoldRanges: TSynFoldRanges; LinesToScan: TStrings; FromLine,
     //  ToLine: Integer);
@@ -1341,6 +1342,8 @@ type
     //FHelpData: TSimpleKeyValuePairs;
     FMainWinMaximized: Boolean;
     FCurrentPixelsPerInch: Integer;
+    FRestoreTabsDone: Boolean;
+    FCommandLineFileNames: TStringList;
 
     // Host subtabs backend structures
     FHostListResults: TDBQueryList;
@@ -2271,7 +2274,7 @@ end;
 }
 procedure TMainForm.AfterFormCreate;
 var
-  LastSessions, FileNames: TStringlist;
+  LastSessions: TStringlist;
   Connection: TDBConnection;
   LoadedParams, ConnectionParams: TConnectionParameters;
   LastUpdatecheck, LastStatsCall, LastConnect: TDateTime;
@@ -2347,8 +2350,8 @@ begin
   end;
 
   ConnectionParams := nil;
-  FileNames := nil;
-  ParseCommandLine(ConnectionParams, FileNames);
+  FCommandLineFileNames := nil;
+  ParseCommandLine(ConnectionParams, FCommandLineFileNames);
 
   if ConnectionParams <> nil then begin
     // Minimal parameter for command line mode is hostname
@@ -2380,14 +2383,6 @@ begin
       end;
     end;
   end;
-
-  // Restore backup'ed query tabs
-  if AppSettings.RestoreTabsInitValue then begin
-    TimerStoreTabs.Enabled := RestoreTabs;
-  end;
-
-  // Load SQL file(s) by command line
-  OpenQueryFiles(FileNames, nil, False);
 
   MainFormAfterCreateDone := True;
 end;
@@ -2940,6 +2935,21 @@ begin
       Visible := False;
       Exit;
     end;
+  end;
+
+  // Restore backup'ed query tabs. Moved here from MainFormAfterCreate, after
+  // the initial session manager was closed, so the V12 import there gets a
+  // chance to import the previous tabs.ini before RestoreTabs creates a fresh one.
+  if AppSettings.RestoreTabsInitValue and (not FRestoreTabsDone) then begin
+    FRestoreTabsDone := True;
+    TimerStoreTabs.Enabled := RestoreTabs;
+  end;
+
+  // Load SQL file(s) by command line. Moved here from MainFormAfterCreate,
+  // so they get opened after the restored query tabs, as before.
+  if FCommandLineFileNames <> nil then begin
+    OpenQueryFiles(FCommandLineFileNames, nil, False);
+    FreeAndNil(FCommandLineFileNames);
   end;
 
   // Restore width of columns of all VirtualTrees
@@ -3535,14 +3545,20 @@ begin
         col.ImageIndex := ICONINDEX_UNIQUEKEY
       else if NewTab.Results.ColIsKeyPart(i) then
         col.ImageIndex := ICONINDEX_INDEXKEY;
-      HeaderLineBreaks := Max(HeaderLineBreaks, col.text.CountChar(#10));
     end;
     NewTab.Grid.Header.Columns.EndUpdate;
-    NewTab.Grid.Header.Height := GetTextHeight(NewTab.Grid.Font) * (HeaderLineBreaks+1) + HeaderPadding;
     NewTab.Grid.RootNodeCount := NewTab.Results.RecordCount;
     NewTab.Grid.EndUpdate;
     for i:=0 to NewTab.Grid.Header.Columns.Count-1 do
       AutoCalcColWidth(NewTab.Grid, i);
+    // Header height depends on the line breaks in the caption which is actually
+    // visible, i.e. after shortening to the calculated column width. See issue #1566
+    for i:=0 to NewTab.Grid.Header.Columns.Count-1 do begin
+      col := NewTab.Grid.Header.Columns[i];
+      if coVisible in col.Options then
+        HeaderLineBreaks := Max(HeaderLineBreaks, ShortenHeaderCaption(NewTab.Grid, col).CountChar(#10));
+    end;
+    NewTab.Grid.Header.Height := GetTextHeight(NewTab.Grid.Font) * (HeaderLineBreaks+1) + HeaderPadding;
     if Tab.ResultTabs.Count = 1 then begin
       Tab.tabsetQuery.TabIndex := 0;
       Tab.tabsetQuery.OnChange(Tab.tabsetQuery);
@@ -4551,9 +4567,11 @@ begin
   for i:=High(FTreeClickHistory) downto Low(FTreeClickHistory) do begin
     if FTreeClickHistory[i] <> nil then begin
       DBObj := DBtree.GetNodeData(FTreeClickHistory[i]);
-      if (DBObj = nil) or (DBObj.Connection = nil) or (not DBObj.Connection.Active) then // Session disconnected
+      // Node data can be nil when the node was freed without triggering OnFreeNode,
+      // which VirtualTrees does not do for uninitialized nodes. See issue #2651
+      if (not Assigned(DBObj^)) or (DBObj^.Connection = nil) or (not DBObj^.Connection.Active) then // Session disconnected
         Break;
-      if DBObj.Connection.Parameters.SessionPath = SessionPath then begin
+      if DBObj^.Connection.Parameters.SessionPath = SessionPath then begin
         Node := FTreeClickHistory[i];
         break;
       end;
@@ -4564,7 +4582,8 @@ begin
     SessionNode := DBtree.GetFirstChild(nil);
     while Assigned(SessionNode) do begin
       DBObj := DBtree.GetNodeData(SessionNode);
-      if DBObj.Connection.Parameters.SessionPath = SessionPath then begin
+      if Assigned(DBObj^) and Assigned(DBObj^.Connection)
+        and (DBObj^.Connection.Parameters.SessionPath = SessionPath) then begin
         Node := SessionNode;
       end;
       SessionNode := DBtree.GetNextSibling(SessionNode);
@@ -6211,6 +6230,8 @@ begin
   //PaintInfo.TargetCanvas.Brush.Style := bsClear;
   TS := PaintInfo.TargetCanvas.TextStyle;
   TS.Opaque := False;
+  // Enable line breaks in column captions, see issue #1566
+  TS.SingleLine := False;
 
   // Draw column name. Code taken from TVirtualTreeColumns.DrawButtonText and modified for our needs
   if hpeText in Elements then begin
@@ -6287,6 +6308,33 @@ begin
       PaintInfo.TargetCanvas.TextRect(SortArea, SortArea.Left+9, SortArea.Top+NumCharTop, SortText, TS);
     end;
   end;
+end;
+
+
+function TMainForm.ShortenHeaderCaption(Tree: TVirtualStringTree; Col: TVirtualTreeColumn): String;
+// Returns the column caption which is actually visible in the header, i.e. shortened
+// to the available column width the same way as AnyGridAdvancedHeaderDraw does at
+// paint time. Callers can base calculations on it, e.g. the header height, so the
+// invisible tail of a too long caption does not affect it. See issue #1566.
+var
+  TextSpace: Integer;
+begin
+  Result := Col.Text;
+  if coWrapCaption in Col.Options then
+    Exit;
+  Tree.Canvas.Font := Tree.Font;
+  TextSpace := Col.Width - Col.Margin*2;
+  if AppSettings.ReadBool(asShowRowId) and (Col.Index > 0) then
+    Dec(TextSpace, Tree.Canvas.TextWidth(Col.Index.ToString) + 5);
+  if Assigned(Tree.Header.Images) then begin
+    if Col.ImageIndex > -1 then
+      Dec(TextSpace, Tree.Header.Images.Width);
+    if (Tree = DataGrid) and Assigned(FDataGridSortItems.FindByColumn(Col.Text)) or
+      (Tree <> DataGrid) and (Tree.Header.SortColumn = Col.Index) then
+      Dec(TextSpace, Tree.Header.Images.Width);
+  end;
+  if Tree.Canvas.TextWidth(Result) > TextSpace then
+    Result := laz.VirtualTrees.ShortenString(Tree.Canvas.Handle, Result, TextSpace);
 end;
 
 
@@ -8154,6 +8202,7 @@ begin
   //QueryTabs.ActiveMemo.UndoList.AddGroupBreak;
   src := Source as TControl;
   Text := '';
+  // Adds database.[table.] prefix
   ShiftPressed := ssShift in GetKeyShiftState;
   Tree := QueryTabs.ActiveHelpersTree;
   // Check for allowed controls as source has already
@@ -8162,14 +8211,15 @@ begin
     // Insert table or database name. If a table is dropped and Shift is pressed, prepend the db name.
     case ActiveDbObj.NodeType of
       lntDb: Text := ActiveDbObj.QuotedDatabase(False);
-      lntTable..lntEvent, lntColumn: begin
-        Text := '';
-        if ShiftPressed then begin
-          Text := Text + ActiveDbObj.QuotedDatabase(False) + '.';
-          if ActiveDbObj.NodeType = lntColumn then
-            Text := Text + ActiveDbObj.QuotedName(False) + '.';
-        end;
-        Text := Text + ActiveDbObj.Connection.QuoteIdent(DBtree.Text[DBtree.FocusedNode, DBtree.FocusedColumn], False);
+      lntTable..lntEvent: begin
+        if ShiftPressed then
+          Text := ActiveDbObj.QuotedDatabase(False) + '.';
+        Text := Text + ActiveDbObj.QuotedName(False);
+      end;
+      lntColumn: begin
+        if ShiftPressed then
+          Text := ActiveDbObj.QuotedDatabase(False) + '.' + ActiveDbObj.QuotedName(False) + '.';
+        Text := Text + ActiveDbObj.QuotedColumn(False);
       end;
     end;
   end else if src = Tree then begin
@@ -10634,6 +10684,7 @@ begin
         Item.NodeType := lntColumn;
         Columns := ParentObj.TableColumns;
         Item.Database := ParentObj.Database;
+        Item.Schema := ParentObj.Schema;
         Item.Name := ParentObj.Name;
         Item.Column := Columns[Node.Index].Name;
       end;
@@ -11179,6 +11230,11 @@ begin
             DBNode := DBtree.GetNextSibling(DBNode);
           end;
         end;
+        // ResetNode clears vsInitialized, and VirtualTrees does not call OnFreeNode
+        // for uninitialized nodes when they get freed. That would leave dangling node
+        // pointers in FTreeClickHistory. Keep the node initialized, also when collapsed.
+        // See issue #2651
+        DBtree.ValidateNode(SessNode, False);
       end;
     end else begin
       DBNode := FindDbNode(DBtree, FocusNewObject.Connection, FocusNewObject.Database);
@@ -12150,6 +12206,9 @@ begin
   else
     ColOptions := ColOptions - [coVisible];
   DBtree.Header.Columns[1].Options := ColOptions;
+  // Resize now, not only on the next node change. Skip when called from FormCreate, to not create the handle too early.
+  if DBtree.HandleAllocated then
+    DBtreeChange(DBtree, DBtree.FocusedNode);
   AppSettings.ResetPath;
   AppSettings.WriteBool(asDisplayObjectSizeColumn, actDisplayObjectSize.Checked);
 end;
@@ -15948,15 +16007,12 @@ var
 begin
   Report := '';
   if E <> nil then begin
-    Report := Report + 'Exception class: ' + E.ClassName + LineEnding + 'Message: ' + E.Message + LineEnding + LineEnding;
+    Report := Report + 'Exception class: ' + E.ClassName + LineEnding +
+      'Message: ' + E.Message + LineEnding +
+      APPNAME + ' ' + MainForm.AppVersion + LineEnding +
+      LineEnding;
   end;
-  // Raw frame addresses first, so a broken heap or failing line info
-  // cannot truncate the callstack completely
-  Report := Report + 'Raw addresses:' + LineEnding + '$' + IntToHex(PtrUInt(ExceptAddr), 16);
-  Frames := ExceptFrames;
-  for I := 0 to ExceptFrameCount - 1 do
-    Report := Report + LineEnding + '$' + IntToHex(PtrUInt(Frames[I]), 16);
-  Report := Report + LineEnding + LineEnding + 'Callstack:' + LineEnding;
+  Report := Report + 'Callstack:' + LineEnding;
   Report := Report + BackTraceStrFunc(ExceptAddr);
   Frames := ExceptFrames;
   for I := 0 to ExceptFrameCount - 1 do
