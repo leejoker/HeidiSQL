@@ -6,7 +6,7 @@ interface
 
 uses
   Classes, SysUtils, Generics.Collections, Controls, RegExpr, Math, FileUtil,
-  StrUtils, Graphics, GraphUtil, LCLIntf, Forms, Clipbrd, Process, ActnList, Menus, Dialogs,
+  StrUtils, Graphics, GraphUtil, LCLIntf, LCLType, Forms, Clipbrd, Process, ActnList, Menus, Dialogs,
   Character, DateUtils, laz.VirtualTrees, SynEdit, SynCompletion, fphttpclient, IntfGraphics, FPImage,
   SynEditFoldedView, SynEditWrappedView, ExtCtrls,
   {$IFDEF WINDOWS} Windows, Registry, uDarkStyleParams, {$ENDIF} DelphiCompat,
@@ -365,6 +365,9 @@ type
   function HTMLSpecialChars(str: String): String;
   function EncodeURLParam(const Value: String): String;
   procedure StreamWrite(S: TStream; Text: String = '');
+  // Play the system sound for the given MB_ICON* constant (from LCLType) on Windows,
+  // like Delphi's MessageBeep. Plain beep on other platforms.
+  procedure AppBeep(uType: Cardinal);
   function _GetFileSize(Filename: String): Int64;
   function DeleteFileWithUndo(sFileName: String): Boolean;
   function MakeInt(Str: String) : Int64;
@@ -473,6 +476,10 @@ type
   procedure ApplySynEditWordWrap(Editor: TCustomSynEdit; Enable: Boolean);
 
 var
+  // Version of the executable file, detected in the main program (heidisql.lpr).
+  // Initialized here so that crash reports have a sane default even if detection fails.
+  AppVersion: String = '0.0.0.0';
+  AppVerRevision: Integer = 0;
   AppSettings: TAppSettings;
   AppLanguageMoFile: TMOFile;
   AppLanguageMoBasePath: String;
@@ -770,6 +777,16 @@ begin
   L := Length(utf8);
   if L > 0 then
     S.WriteBuffer(utf8[1], L);
+end;
+
+
+procedure AppBeep(uType: Cardinal);
+begin
+  {$IFDEF WINDOWS}
+  Windows.MessageBeep(uType);
+  {$ELSE}
+  SysUtils.Beep;
+  {$ENDIF}
 end;
 
 
@@ -3102,7 +3119,7 @@ end;
 
 function UserAgent(OwnerComponent: TComponent): String;
 begin
-  Result := APPNAME+'/'+MainForm.AppVersion+' ('+GetOS+'; '+ExtractFilename(Application.ExeName)+'; '+OwnerComponent.Name+')';
+  Result := APPNAME+'/'+AppVersion+' ('+GetOS+'; '+ExtractFilename(Application.ExeName)+'; '+OwnerComponent.Name+')';
 end;
 
 
@@ -3711,7 +3728,7 @@ begin
     else
       MainForm.LogSQL(Self.Name + ': either disabled or cannot focus', lcDebug);
   except
-    SysUtils.Beep;
+    AppBeep(MB_ICONWARNING);
   end;
 end;
 

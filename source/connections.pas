@@ -14,7 +14,7 @@ uses
   laz.VirtualTrees, Menus, Graphics, extra_controls, lazaruscompat,
   {$IFDEF Windows} ActiveX {$ELSE} laz.FakeActiveX {$ENDIF},
   dbconnection, RegExpr, Types, FileUtil, SpinEx,
-  Math, ActnList, ComboEx, EditBtn, Buttons, ColorBox, extfiledialog, dbstructures;
+  Math, ActnList, ComboEx, EditBtn, Buttons, ColorBox, extfiledialog, dbstructures, LCLType;
 
 type
 
@@ -264,7 +264,7 @@ uses Main, apphelpers, dbstructures.sqlite, grideditlinks;
 
 function Tconnform.GetWindowCaption: String;
 begin
-  Result := APPNAME + ' ' + MainForm.AppVersion + ' - ' + _('Session manager');
+  Result := APPNAME + ' ' + AppVersion + ' - ' + _('Session manager');
   if not SelectedSessionPath.IsEmpty then
     Result := Result + ': ' + SelectedSessionPath;
 end;
@@ -998,7 +998,7 @@ var
 begin
   TargetNode := Sender.GetNodeAt(Pt.X, Pt.Y);
   if not Assigned(TargetNode) then begin
-    Beep;
+    AppBeep(MB_ICONEXCLAMATION);
     Exit;
   end;
   TargetSess := Sender.GetNodeData(TargetNode);
