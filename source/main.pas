@@ -108,7 +108,6 @@ type
       FMemoFilename: String;
       FQueryRunning: Boolean;
       FLastChange: TDateTime;
-      FDirectoryWatchNotficationRunning: Boolean;
       FErrorLine: Integer;
       FFileEncoding: String;
       procedure SetMemoFilename(Value: String);
@@ -128,11 +127,7 @@ type
       pnlHelpers: TPanel;
       filterHelpers: TEditButton;
       treeHelpers: TVirtualStringTree;
-      MemoFileRenamed: Boolean;
       MemoLineBreaks: TLineBreaks;
-      //DirectoryWatch: TDirectoryWatch;
-      MemofileModifiedTimer: TTimer;
-      LastSaveTime: Cardinal;
       spltHelpers: TSplitter;
       spltQuery: TSplitter;
       tabsetQuery: TTabControl;
@@ -147,9 +142,6 @@ type
       TimerLastChange: TTimer;
       TimerStatusUpdate: TTimer;
       function GetActiveResultTab: TResultTab;
-      //procedure DirectoryWatchNotify(const Sender: TObject; const Action: TWatchAction; const FileName: string);
-      procedure DirectoryWatchErrorHandler(const Sender: TObject; const ErrorCode: Integer; const ErrorMessage: string);
-      procedure MemofileModifiedTimerNotify(Sender: TObject);
       function LoadContents(Filepath: String; ReplaceContent: Boolean; Encoding: TEncoding): Boolean;
       property BindParamsActivated: Boolean read GetBindParamsActivated write SetBindParamsActivated;
       procedure SaveContents(Filename: String; OnlySelection: Boolean);
@@ -1262,9 +1254,6 @@ type
     procedure AnyGridAdvancedHeaderDraw(Sender: TVTHeader;
       var PaintInfo: THeaderPaintInfo; const Elements: THeaderPaintElements);
     function ShortenHeaderCaption(Tree: TVirtualStringTree; Col: TVirtualTreeColumn): String;
-    //procedure SynMemoQueryScanForFoldRanges(Sender: TObject;
-    //  FoldRanges: TSynFoldRanges; LinesToScan: TStrings; FromLine,
-    //  ToLine: Integer);
     procedure actCodeFoldingExecute(Sender: TObject);
     procedure actCodeFoldingStartRegionExecute(Sender: TObject);
     procedure actCodeFoldingEndRegionExecute(Sender: TObject);
@@ -7663,25 +7652,6 @@ begin
   p := Proposal.Editor.ClientToScreen(Point(Proposal.Editor.CaretXPix, Proposal.Editor.CaretYPix + Proposal.Editor.LineHeight + 1));
   Proposal.Execute('', p.x, p.y);
 end;
-
-
-{procedure TMainForm.SynMemoQueryScanForFoldRanges(Sender: TObject;
-  FoldRanges: TSynFoldRanges; LinesToScan: TStrings; FromLine, ToLine: Integer);
-var
-  Line: Integer;
-  LineText: String;
-begin
-  // Code folding detection based on keywords in beginning of lines
-  for Line:=FromLine to ToLine do begin
-    LineText := LinesToScan[Line].TrimLeft;
-    if LineText.StartsWith('#region', True) then
-      FoldRanges.StartFoldRange(Line+1, FoldRegionType)
-    else if LineText.StartsWith('#endregion', True) then
-      FoldRanges.StopFoldRange(Line+1, FoldRegionType)
-    else
-      FoldRanges.NoFoldInfo(Line+1);
-  end;
-end;}
 
 
 procedure TMainForm.SynMemoQuerySpecialLineMarkup(Sender: TObject;
@@ -16266,20 +16236,6 @@ end;
 constructor TQueryTab.Create;
 begin
   // Creation of a new main query tab
-  {DirectoryWatch := TDirectoryWatch.Create;
-  DirectoryWatch.WatchSubTree := False;
-  DirectoryWatch.OnNotify := DirectoryWatchNotify;
-  DirectoryWatch.OnError := DirectoryWatchErrorHandler;
-  // Do not trigger useless file deletion messages, see issue #2948
-  DirectoryWatch.WatchActions := DirectoryWatch.WatchActions - [waRemoved];
-  // Do not trigger file access. See https://www.heidisql.com/forum.php?t=15500
-  DirectoryWatch.WatchOptions := DirectoryWatch.WatchOptions - [woLastAccess];}
-  // Timer which postpones calling waModified event code until buffers have been saved
-  MemofileModifiedTimer := TTimer.Create(Memo);
-  MemofileModifiedTimer.Interval := 1000;
-  MemofileModifiedTimer.Enabled := False;
-  MemofileModifiedTimer.OnTimer := MemofileModifiedTimerNotify;
-  LastSaveTime := 0;
   FLastChange := 0;
   TimerLastChange := TTimer.Create(Self);
   TimerLastChange.Enabled := True;
@@ -16298,7 +16254,6 @@ end;
 destructor TQueryTab.Destroy;
 begin
   ResultTabs.Clear;
-  //DirectoryWatch.Free;
   ListBindParams.Free;
   TimerLastChange.Free;
   TimerStatusUpdate.Free;
@@ -16313,73 +16268,6 @@ begin
   idx := tabsetQuery.TabIndex;
   if (idx > -1) and (idx < ResultTabs.Count) then
     Result := ResultTabs[idx];
-end;
-
-
-{procedure TQueryTab.DirectoryWatchNotify(const Sender: TObject; const Action: TWatchAction; const FileName: string);
-var
-  IsCurrentFile: Boolean;
-begin
-  // Notification about file changes in loaded file's directory
-
-  if FDirectoryWatchNotficationRunning then
-    Exit;
-  FDirectoryWatchNotficationRunning := True;
-
-  IsCurrentFile := DirectoryWatch.Directory + FileName = MemoFilename;
-  case Action of
-    waRemoved:
-      if IsCurrentFile
-        and (MessageDialog(_('Close file and query tab?'), f_('File was deleted from outside: %s', [MemoFilename]), mtConfirmation, [mbYes, mbCancel]) = mrYes) then begin
-        Mainform.actClearQueryEditor.Execute;
-        if Mainform.IsQueryTab(TabSheet.PageIndex, False) then
-          Mainform.CloseQueryTab(TabSheet.PageIndex);
-      end;
-
-    waModified:
-      if IsCurrentFile and (LastSaveTime < GetTickCount-MemofileModifiedTimer.Interval) then begin
-        MemofileModifiedTimer.Enabled := False;
-        MemofileModifiedTimer.Enabled := True;
-      end;
-
-    waRenamedOld:
-      if IsCurrentFile then
-        MemoFileRenamed := True;
-
-    waRenamedNew:
-      if (not IsCurrentFile) and (MemoFilename <> '') and MemoFileRenamed then begin
-        MemoFilename := DirectoryWatch.Directory + FileName;
-        MemoFileRenamed := False;
-      end;
-
-  end;
-  FDirectoryWatchNotficationRunning := False;
-end;}
-
-
-procedure TQueryTab.DirectoryWatchErrorHandler(const Sender: TObject; const ErrorCode: Integer; const ErrorMessage: string);
-begin
-  MainForm.LogSQL(Format('File watcher (%d): %s', [ErrorCode, ErrorMessage]), lcError);
-end;
-
-
-procedure TQueryTab.MemofileModifiedTimerNotify(Sender: TObject);
-var
-  OldTopLine: Integer;
-  //OldCursor: TBufferCoord;
-begin
-  (Sender as TTimer).Enabled := False;
-  if FDirectoryWatchNotficationRunning then
-    Exit;
-  FDirectoryWatchNotficationRunning := True;
-  if MessageDialog(_('Reload file?'), f_('File was modified from outside: %s', [MemoFilename]), mtConfirmation, [mbYes, mbCancel]) = mrYes then begin
-    //OldCursor := Memo.CaretXY;
-    OldTopLine := Memo.TopLine;
-    LoadContents(MemoFilename, True, nil);
-    //Memo.CaretXY := OldCursor;
-    Memo.TopLine := OldTopLine;
-  end;
-  FDirectoryWatchNotficationRunning := False;
 end;
 
 
@@ -16461,7 +16349,6 @@ begin
     SaveUnicodeFile(Filename, Text, MainForm.GetEncodingByName(FFileEncoding));
     MemoFilename := Filename;
     Memo.Modified := False;
-    LastSaveTime := GetTickCount;
     Screen.Cursor := crDefault;
   except
     on E:Exception do begin
@@ -16570,11 +16457,6 @@ begin
   FMemoFilename := Value;
   MainForm.SetTabCaption(TabSheet.PageIndex, ExtractFilename(FMemoFilename));
   MainForm.ValidateQueryControls(Self);
-  //if (FMemoFilename <> '') and FileExists(FMemoFilename) then begin
-  //  DirectoryWatch.Directory := ExtractFilePath(FMemoFilename);
-  //  DirectoryWatch.Start;
-  //end else
-  //  DirectoryWatch.Stop;
 end;
 
 
