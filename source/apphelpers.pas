@@ -198,9 +198,9 @@ type
     asShowRowId,
     asLogsqlnum, asLogsqlwidth, asSessionLogsDirectory, asLogHorizontalScrollbar, asSQLColActiveLine,
     asSQLColMatchingBraceForeground, asSQLColMatchingBraceBackground,
-    asMaxColWidth, asDatagridMaximumRows, asDatagridRowsPerStep, asGridRowLineCount, asColumnHeaderClick, asReuseEditorConfiguration,
+    asMaxColWidth, asDatagridMaximumRows, asDatagridRowsPerStep, asColumnHeaderClick, asReuseEditorConfiguration,
     asLogToFile, asMainWinMaximized, asMainWinLeft, asMainWinTop, asMainWinWidth,
-    asMainWinHeight, asMainWinOnMonitor, asCoolBandIndex, asCoolBandBreak, asCoolBandWidth, asToolbarShowCaptions, asQuerymemoheight, asDbtreewidth,
+    asMainWinHeight, asCoolBandIndex, asCoolBandBreak, asCoolBandWidth, asToolbarShowCaptions, asQuerymemoheight, asDbtreewidth,
     asDataPreviewHeight, asDataPreviewEnabled, asLogHeight, asQueryhelperswidth, asStopOnErrorsInBatchMode,
     asWrapLongLines, asCodeFolding, asDisplayBLOBsAsText, asSingleQueries, asMemoEditorWidth, asMemoEditorHeight, asMemoEditorMaximized,
     asMemoEditorWrap, asMemoEditorHighlighter, asMemoEditorAlwaysFormatCode, asDelimiter, asSQLHelpWindowLeft, asSQLHelpWindowTop, asSQLHelpWindowWidth,
@@ -1536,30 +1536,23 @@ end;
 
 procedure FixVT(VT: TVirtualStringTree; IsResultGrid: Boolean=False);
 var
-  SingleLineHeight, MultiLineCount: Integer;
+  LineHeight: Integer;
   Node: PVirtualNode;
 begin
   // This is called either in some early stage (and probably from preferences/apply button?)
-  SingleLineHeight := GetTextHeight(VT.Font) + 7;
-  // Multiline nodes?
-  if IsResultGrid then
-    MultiLineCount := AppSettings.ReadInt(asGridRowLineCount)
-  else
-    MultiLineCount := 1;
+  LineHeight := GetTextHeight(VT.Font) + VT.TextMargin;
   // Issue #2344: TBaseVirtualTree.UpdateVerticalRange crashes with ERangeError on ArchLinux
   // Fixed through form files back at 96 PPI
-  VT.DefaultNodeHeight := SingleLineHeight * MultiLineCount;
-  VT.Header.Height := SingleLineHeight;
-  if MultiLineCount > 1 then begin
-    VT.BeginUpdate;
-    Node := VT.GetFirstInitialized;
-    while Assigned(Node) do begin
-      // Nodes have vsMultiLine through InitNode event
-      VT.MultiLine[Node] := MultiLineCount > 1;
-      Node := VT.GetNextInitialized(Node);
-    end;
-    VT.EndUpdate;
+  VT.DefaultNodeHeight := LineHeight;
+  VT.Header.Height := LineHeight;
+  // Existing nodes cache their own height, so update them too.
+  VT.BeginUpdate;
+  Node := VT.GetFirstInitialized;
+  while Assigned(Node) do begin
+    VT.NodeHeight[Node] := VT.DefaultNodeHeight;
+    Node := VT.GetNextInitialized(Node);
   end;
+  VT.EndUpdate;
   VT.DefaultText := '-'; // "Node" by default
 
   {$IFDEF LINUX}
@@ -1645,8 +1638,11 @@ var
 begin
   Bmp := Graphics.TBitmap.Create;
   try
+    // Measure at the source font's PPI, otherwise TFont.Assign converts via Size
+    // and returns the pixel height at the canvas PPI instead of the font PPI.
+    Bmp.Canvas.Font.PixelsPerInch := Font.PixelsPerInch;
     Bmp.Canvas.Font.Assign(Font);
-    Result := Bmp.Canvas.TextHeight('Äy');
+    Result := Bmp.Canvas.TextHeight('Tg');
   finally
     Bmp.Free;
   end;
@@ -3844,7 +3840,6 @@ begin
   InitSetting(asMaxColWidth,                      'MaxColWidth',                           300);
   InitSetting(asDatagridMaximumRows,              'DatagridMaximumRows',                   100000);
   InitSetting(asDatagridRowsPerStep,              'DatagridRowsPerStep',                   1000);
-  InitSetting(asGridRowLineCount,                 'GridRowLineCount',                      1);
   InitSetting(asColumnHeaderClick,                'ColumnHeaderClick',                     0, True);
   InitSetting(asReuseEditorConfiguration,         'ReuseEditorConfiguration',              0, True);
   InitSetting(asLogToFile,                        'LogToFile',                             0, False);
@@ -3853,7 +3848,6 @@ begin
   InitSetting(asMainWinTop,                       'MainWinTop',                            100);
   InitSetting(asMainWinWidth,                     'MainWinWidth',                          950);
   InitSetting(asMainWinHeight,                    'MainWinHeight',                         600);
-  InitSetting(asMainWinOnMonitor,                 'MainWinOnMonitor',                      1);
   InitSetting(asCoolBandIndex,                    'CoolBand%sIndex',                       0);
   InitSetting(asCoolBandBreak,                    'CoolBand%sBreak',                       0, True);
   InitSetting(asCoolBandWidth,                    'CoolBand%sWidth',                       0);

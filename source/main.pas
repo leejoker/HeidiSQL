@@ -1269,7 +1269,7 @@ type
     procedure actSynMoveUpExecute(Sender: TObject);
     procedure actCopyTabsToSpacesExecute(Sender: TObject);
     procedure actCopyUpdate(Sender: TObject);
-    procedure FormChangeBounds(Sender: TObject);
+    procedure FormMonitorDpiChanged(Sender: TObject; OldDPI, NewDPI: Integer);
     procedure menuToggleAllClick(Sender: TObject);
     procedure menuAutoFitAllClick(Sender: TObject);
     procedure menuCopyColumnNamesClick(Sender: TObject);
@@ -1347,7 +1347,6 @@ type
     FEditorCommandStrings: TStringList;
     //FHelpData: TSimpleKeyValuePairs;
     FMainWinMaximized: Boolean;
-    FCurrentPixelsPerInch: Integer;
     FRestoreTabsDone: Boolean;
     FCommandLineFileNames: TStringList;
 
@@ -1577,6 +1576,7 @@ var
   ImageIndex: Integer;
   Conn: TDBConnection;
   TS: TTextStyle;
+  TextX, ContentTop, ContentHeight: Integer;
 begin
   // Refresh one status bar panel, probably with icon
   ImageIndex := -1;
@@ -1599,16 +1599,41 @@ begin
   end;
   PanelRect := Rect;
   //StatusBar.Canvas.FillRect(PanelRect);
+  // TWinControl.FontChanged syncs the font to the native handle only, not to
+  // Canvas.Font (that is TCustomControl.FontChanged), so the canvas font would
+  // stay at 96 DPI and TextRect would draw unscaled text. Sync it here, with
+  // PixelsPerInch set first so the Assign below copies Height 1:1 instead of
+  // converting via point Size.
+  StatusBar.Canvas.Font.BeginUpdate;
+  try
+    StatusBar.Canvas.Font.PixelsPerInch := StatusBar.Font.PixelsPerInch;
+    StatusBar.Canvas.Font := StatusBar.Font;
+  finally
+    StatusBar.Canvas.Font.EndUpdate;
+  end;
+  // Vertically center icon and text. StatusBar.Height is scaled manually on DPI
+  // changes in FormMonitorDpiChanged (the LCL does not scale it, AutoSize=False),
+  // so a fixed +2 offset would pin the content to the top of the panel.
+  ContentHeight := StatusBar.Canvas.TextHeight('Wy');
+  if ImageIndex > -1 then
+    ContentHeight := Max(ContentHeight, ImageListMain.HeightForPPI[16, StatusBar.Canvas.Font.PixelsPerInch]);
+  ContentTop := PanelRect.Top + Max(2, (PanelRect.Height - ContentHeight) div 2);
+  TextX := PanelRect.Left;
   if ImageIndex > -1 then begin
-    ImageListMain.DrawForControl(StatusBar.Canvas, PanelRect.Left, PanelRect.Top+2, ImageIndex, ImageListMain.Width, StatusBar);
-    OffsetRect(PanelRect, Scale96ToForm(ImageListMain.Width)+4, 0);
+    ImageListMain.DrawForControl(StatusBar.Canvas, PanelRect.Left, ContentTop, ImageIndex, ImageListMain.Width, StatusBar);
+    // Draw the text behind the icon, but keep PanelRect as clipping bounds.
+    // OffsetRect(PanelRect, ...) instead would move the clip rect's right
+    // edge as well and allow text to bleed into the panel right of this one.
+    Inc(TextX, Scale96ToForm(ImageListMain.Width)+4);
   end;
   // Enable clipping, so a longer text does not get written into the panel right besides this one
   // If we'd write StatusBar.Canvas.TextStyle.Clipping := True;, we only modify the temporary copy and the change is lost immediately
   TS := StatusBar.Canvas.TextStyle;  // get record copy
   TS.Clipping := True;               // modify
   StatusBar.Canvas.TextStyle := TS;  // write back
-  StatusBar.Canvas.TextRect(PanelRect, PanelRect.Left, PanelRect.Top+2, Panel.Text);
+  // Keep a minimal gap between text and the separator to the next panel
+  Dec(PanelRect.Right, Scale96ToForm(3));
+  StatusBar.Canvas.TextRect(PanelRect, TextX, ContentTop, Panel.Text);
 end;
 
 
@@ -1787,20 +1812,17 @@ begin
 end;
 
 
-procedure TMainForm.FormChangeBounds(Sender: TObject);
+procedure TMainForm.FormMonitorDpiChanged(Sender: TObject; OldDPI, NewDPI: Integer);
 var
   Factor: Extended;
-  NewDPI, OldDPI: Integer;
 begin
-  NewDPI := Monitor.PixelsPerInch;
-  OldDPI := FCurrentPixelsPerInch;
-  if NewDPI <> OldDPI then begin
-    // Moving window to different screen or user changed DPI setting for current screen
-    FCurrentPixelsPerInch := NewDPI;
-    Factor := 100 / 96 * NewDPI;
-    LogSQL(f_('Scaling controls to screen DPI: %d%%', [Round(Factor)]));
-    //LogSQL('PixelsPerInchDesigned:'+PixelsPerInchDesigned.ToString+' OldDPI:'+OldDPI.ToString+' NewDPI:'+NewDPI.ToString);
-  end;
+  // Tree font fixes are done generically in TExtForm.WMDPIChanged; here we only log.
+  Factor := 100 / 96 * NewDPI;
+  LogSQL(f_('Scaling controls to screen DPI: %d%%', [Round(Factor)]));
+  // The LCL does not scale TStatusBar.Height on a DPI change (and with
+  // AutoSize=true it would even reset it to the unscaled system height of
+  // 23px at 96 DPI), so set it manually from the design height in the lfm.
+  StatusBar.Height := MulDiv(23, NewDPI, 96);
 end;
 
 
@@ -1886,11 +1908,10 @@ begin
   AppSettings.WriteBool(asSingleQueries, actSingleQueries.Checked);
   AppSettings.WriteBool(asLogHorizontalScrollbar, actLogHorizontalScrollbar.Checked);
   AppSettings.WriteBool(asMainWinMaximized, WindowState=wsMaximized);
-  AppSettings.WriteInt(asMainWinOnMonitor, Monitor.MonitorNum);
   // Window dimensions are only valid when WindowState is normal.
   if WindowState = wsNormal then begin
-    AppSettings.WriteInt(asMainWinLeft, ScaleFormToDesign(Left));
-    AppSettings.WriteInt(asMainWinTop, ScaleFormToDesign(Top));
+    AppSettings.WriteInt(asMainWinLeft, Left);
+    AppSettings.WriteInt(asMainWinTop, Top);
     AppSettings.WriteInt(asMainWinWidth, ScaleFormToDesign(Width));
     AppSettings.WriteInt(asMainWinHeight, ScaleFormToDesign(Height));
   end;
@@ -1926,7 +1947,7 @@ end;
 
 procedure TMainForm.FormCreate(Sender: TObject);
 var
-  i, j, MonitorIndex: Integer;
+  i, j: Integer;
   QueryTab: TQueryTab;
   Action, CopyAsAction: TAction;
   ExportFormat: TGridExportFormat;
@@ -2073,11 +2094,6 @@ begin
     Width := AppSettings.ReadInt(asMainWinWidth);
     Height := AppSettings.ReadInt(asMainWinHeight);
   end;
-  // ... and monitor placement
-  MonitorIndex := AppSettings.ReadInt(asMainWinOnMonitor);
-  MonitorIndex := Max(0, MonitorIndex);
-  MonitorIndex := Min(Screen.MonitorCount-1, MonitorIndex);
-  MakeFullyVisible(Screen.Monitors[MonitorIndex]);
 
   actQueryStopOnErrors.Checked := AppSettings.ReadBool(asStopOnErrorsInBatchMode);
   actBlobAsText.Checked := AppSettings.ReadBool(asDisplayBLOBsAsText);
@@ -2246,7 +2262,7 @@ begin
 
   FLastMouseButtonUpOnGrid := mbLeft;
   FLastCaptionChange := 0;
-  FCurrentPixelsPerInch := 0;
+  OnMonitorDpiChanged := FormMonitorDpiChanged;
   FFormatSettings := DefaultFormatSettings;
   FFormatSettings.DecimalSeparator := '.';
   FFormatSettings.ThousandSeparator := ' ';;
@@ -2878,6 +2894,10 @@ begin
   w6 := CalcPanelWidth('DummyDummyDummyDummyDummy', 20);
   w0 := StatusBar.Width - w1 - w2 - w3 - w4 - w5 - w6;
   //logsql(format('IconWidth:%d 0:%d 1:%d 2:%d 3:%d 4:%d 5:%d 6:%d', [ImageListMain.Width, w0, w1, w2, w3, w4, w5, w6]));
+  // Batch these 7 updates, so EndUpdate repains the bar once instead of
+  // having every single width assignment invalidate the whole statusbar,
+  // which made the panel texts flicker heavily while resizing the window
+  StatusBar.BeginUpdate;
   StatusBar.Panels[0].Width := w0;
   StatusBar.Panels[1].Width := w1;
   StatusBar.Panels[2].Width := w2;
@@ -2885,6 +2905,7 @@ begin
   StatusBar.Panels[4].Width := w4;
   StatusBar.Panels[5].Width := w5;
   StatusBar.Panels[6].Width := w6;
+  StatusBar.EndUpdate;
 
   // Retreive the rectancle of the statuspanel (in our case the fifth panel)
   {if not IsWine then begin
@@ -2901,9 +2922,8 @@ begin
   for i:=0 to 4 do begin
     Inc(ProgressBarLeft, StatusBar.Panels.Items[i].Width);
   end;
-  ProgressBarStatus.Left := ProgressBarLeft;
-  ProgressBarStatus.Top := StatusBar.Top;
-  ProgressBarStatus.Width := StatusBar.Panels[5].Width;
+  ProgressBarStatus.SetBounds(ProgressBarLeft, StatusBar.Top,
+    StatusBar.Panels[5].Width, ProgressBarStatus.Height);
 
   //lblDataTop.Width := pnlDataTop.Width - tlbDataButtons.Width - 10;
   FixQueryTabCloseButtons;
@@ -6742,14 +6762,6 @@ procedure TMainForm.AnyGridInitNode(Sender: TBaseVirtualTree; ParentNode, Node: 
 var
   Idx: PInt64;
 begin
-  // Display multiline grid rows
-  // Mark all nodes as multiline capable. Fixes painting issues with long lines. (?)
-  // See issue #1897 and https://www.heidisql.com/forum.php?t=41502
-  // Laggy performance with large grid contents (?)
-  if AppSettings.ReadInt(asGridRowLineCount) = 1 then
-    Exclude(Node.States, vsMultiLine)
-  else
-    Include(Node.States, vsMultiLine);
   // Node may have data already, if added via InsertRow
   if not (vsOnFreeNodeCallRequired in Node.States) then begin
     Idx := Sender.GetNodeData(Node);
@@ -12266,8 +12278,6 @@ begin
     //       here if the query or connection dies.
     Rect := Tree.GetDisplayRect(Node, Column, True, True);
     ContentTextWidth := Rect.Right - Rect.Left;
-    //if vsMultiLine in Node.States then
-    //  ContentTextWidth := Max(ContentTextWidth, Tree.Canvas.TextWidth(Tree.Text[Node, Column]));
     ColTextWidth := Max(ColTextWidth, ContentTextWidth);
     inc(i);
     if i > 100 then break;
@@ -13420,6 +13430,11 @@ begin
       ActiveObjectEditor := EditorClass.Create(tabEditor);
       ActiveObjectEditor.Parent := tabEditor;
       SetupSynEditors(ActiveObjectEditor);
+      // The frame was created lazily, after the startup DPI fix in
+      // TExtForm.DoShow has already run, and no WM_DPICHANGED fires when the
+      // app started on a high-DPI monitor. Apply the tree/header font fix
+      // here, or the VT headers stay unscaled until the first monitor switch.
+      FixTreeFontsOnDPIChange(ActiveObjectEditor, Monitor.PixelsPerInch);
     end;
     ActiveObjectEditor.Init(Obj);
     buttonedEditClear(editFilterVT);

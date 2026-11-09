@@ -14,18 +14,52 @@ const
   // Posted by TExtForm.DeferFreeControl, see there. Value is WM_USER + $0D00,
   // written explicitly to avoid pulling in the Windows unit here.
   WM_HEIDISQL_DEFERREDFREE = $1100;
+  // Style and index constants from winuser.h, same reason as above.
+  WS_EX_COMPOSITED = $02000000;
+  GWL_EXSTYLE = -20;
+
+{$IFDEF WINDOWS}
+// user32 imports, same reason as above.
+function GetWindowLongPtrA(hWnd: THandle; nIndex: Integer): PtrInt; stdcall; external 'user32';
+function SetWindowLongPtrA(hWnd: THandle; nIndex: Integer; dwNewLong: PtrInt): PtrInt; stdcall; external 'user32';
+{$ENDIF}
 
 type
+  TMonitorDpiChangedEvent = procedure(Sender: TObject; OldDPI: Integer; NewDPI: Integer) of object;
+
   // Form with a sizegrip in the lower right corner, without the need for a statusbar
 
   { TExtForm }
 
   TExtForm = class(TForm)
+    private
+      FCurrentPPI: Integer;
+      FOnMonitorDpiChanged: TMonitorDpiChangedEvent;
     protected
       procedure FilterNodesByEdit(Edit: TEditButton; Tree: TLazVirtualStringTree);
       procedure WMDeferredFree(var Message: TLMessage); message WM_HEIDISQL_DEFERREDFREE;
+      procedure WMDPIChanged(var Msg: TLMessage); message LM_DPICHANGED;
+      procedure DoShow; override;
+      procedure DoMonitorDpiChanged(OldDPI, NewDPI: Integer); virtual;
+      // Applies WS_EX_COMPOSITED to every TStatusBar owned by the form, so
+      // Windows paints the bar through a composition buffer instead of
+      // erasing and repainting it directly on screen: the panel texts don't
+      // flicker on live window resizes. Re-applied on each show and DPI
+      // change, as the bit is lost when a handle was recreated.
+      procedure PreventStatusbarFlicker;
     public
       constructor Create(AOwner: TComponent); override;
+      // Applies the tree font/height fixes for the given DPI and fires
+      // OnMonitorDpiChanged if the DPI changed. Called from WMDPIChanged and
+      // once at startup from DoShow.
+      procedure ApplyDPIFix(NewDPI: Integer);
+      // Same font/header/height fix as ApplyDPIFix, but for an arbitrary
+      // component subtree. Public so lazily created TFrames (the object editor
+      // frames created in TMainForm.PlaceObjectEditor) can be fixed right
+      // away after parenting: they do not pass through their host form's
+      // DoShow, and no WM_DPICHANGED fires when the app started on a
+      // high-DPI monitor already.
+      procedure FixTreeFontsOnDPIChange(Owner: TComponent; NewDPI: Integer);
       procedure DeferFreeControl(AControl: TControl);
       class procedure InheritFont(AFont: TFont);
       class procedure SaveListSetup(List: TLazVirtualStringTree);
@@ -37,6 +71,7 @@ type
       function Space(Multiply: Integer=1): Integer;
       class procedure PageControlTabHighlight(PageControl: TPageControl);
       class procedure ShowPopup(ClickedControl: TControl; PopupMenu: TPopupMenu);
+      property OnMonitorDpiChanged: TMonitorDpiChangedEvent read FOnMonitorDpiChanged write FOnMonitorDpiChanged;
   end;
 
   TExtComboBox = class(TComboBox)
@@ -63,9 +98,118 @@ constructor TExtForm.Create(AOwner: TComponent);
 var
   OldImageList: TCustomImageList;
 begin
+  FCurrentPPI := 0;
   inherited;
 
   InheritFont(Font);
+end;
+
+procedure TExtForm.WMDPIChanged(var Msg: TLMessage);
+begin
+  // Let the LCL scale fonts and bounds first (AutoAdjustLayout inside
+  // TCustomForm.WMDPIChanged); the new DPI comes directly from the message.
+  inherited;
+  ApplyDPIFix(hi(Cardinal(Msg.wParam)));
+  // A DPI change can recreate window handles, re-apply, see PreventStatusbarFlicker
+  PreventStatusbarFlicker;
+end;
+
+procedure TExtForm.DoShow;
+begin
+  inherited;
+  // Trigger the DPI fix once at startup (and when re-shown on a monitor with a
+  // different DPI): on a high-DPI primary monitor no WM_DPICHANGED is sent at
+  // startup, so without this the tree fonts/heights would not be scaled.
+  ApplyDPIFix(Monitor.PixelsPerInch);
+  // Not to be called in a constructor or OnCreate: forcing the window handle
+  // there crashes on unready menus/tabs, see PreventStatusbarFlicker
+  PreventStatusbarFlicker;
+end;
+
+procedure TExtForm.PreventStatusbarFlicker;
+var
+  i: Integer;
+  SB: TStatusBar;
+{$IFDEF WINDOWS}
+  ExStyle: PtrInt;
+{$ENDIF}
+begin
+  for i := 0 to ComponentCount - 1 do begin
+    if Components[i] is TStatusBar then begin
+      SB := TStatusBar(Components[i]);
+      {$IFDEF WINDOWS}
+      ExStyle := GetWindowLongPtrA(SB.Handle, GWL_EXSTYLE);
+      if ExStyle and WS_EX_COMPOSITED = 0 then
+        SetWindowLongPtrA(SB.Handle, GWL_EXSTYLE, ExStyle or WS_EX_COMPOSITED);
+      {$ENDIF}
+    end;
+  end;
+end;
+
+procedure TExtForm.ApplyDPIFix(NewDPI: Integer);
+var
+  OldDPI: Integer;
+begin
+  OldDPI := FCurrentPPI;
+  if OldDPI <= 0 then
+    OldDPI := 96; // design-time DPI
+  if (NewDPI > 0) and (NewDPI <> FCurrentPPI) then begin
+    // Moving window to a different screen or user changed the DPI setting.
+    FCurrentPPI := NewDPI;
+    FixTreeFontsOnDPIChange(Self, NewDPI);
+    DoMonitorDpiChanged(OldDPI, NewDPI);
+  end;
+end;
+
+procedure TExtForm.FixTreeFontsOnDPIChange(Owner: TComponent; NewDPI: Integer);
+var
+  i: Integer;
+  VT: TLazVirtualStringTree;
+  Node: PVirtualNode;
+  LineHeight: Integer;
+begin
+  // Recurse through owned components: query tabs etc. are owned by the form,
+  // but their trees are owned by panels/tabsheets owned by them.
+  for i := 0 to Owner.ComponentCount - 1 do begin
+    if Owner.Components[i] is TLazVirtualStringTree then begin
+      VT := TLazVirtualStringTree(Owner.Components[i]);
+      // VT.Font needs no manual scaling anymore: the LCL keeps it correct via
+      // the ParentFont chain (the .lfm files no longer set ParentFont=False),
+      // and node text renders at the right PPI thanks to the VirtualTreeView
+      // buffer font PPI fix in
+      // extra/lazarus-patches/4.8/0011-virtualtreeview-buffer-font-ppi.patch,
+      // which is equivalent to upstream fix 4ca245a455 for
+      // https://gitlab.com/freepascal.org/lazarus/lazarus/-/work_items/42702
+      // The header has its own font (ParentFont default False) which the LCL
+      // does not scale either; apply the same fix.
+      VT.Header.ParentFont := False;
+      VT.Header.Font.PixelsPerInch := NewDPI;
+      VT.Header.Font.Height := VT.Font.Height;
+      // The header height is recalculated by TVTHeader.FontChanged
+      // automatically after the header font assignment above, and scaled by
+      // TVTHeader.ChangeScale (toAutoChangeScale) on DPI changes.
+      // VT does not scale node heights on a DPI change, so scale them manually.
+      LineHeight := GetTextHeight(VT.Font) + VT.TextMargin;
+      VT.DefaultNodeHeight := LineHeight;
+      VT.BeginUpdate;
+      try
+        Node := VT.GetFirstInitialized;
+        while Assigned(Node) do begin
+          VT.NodeHeight[Node] := VT.DefaultNodeHeight;
+          Node := VT.GetNextInitialized(Node);
+        end;
+      finally
+        VT.EndUpdate;
+      end;
+    end;
+    FixTreeFontsOnDPIChange(Owner.Components[i], NewDPI);
+  end;
+end;
+
+procedure TExtForm.DoMonitorDpiChanged(OldDPI, NewDPI: Integer);
+begin
+  if Assigned(FOnMonitorDpiChanged) then
+    FOnMonitorDpiChanged(Self, OldDPI, NewDPI);
 end;
 
 
@@ -423,7 +567,5 @@ begin
     Change;
   end;
 end;
-
-
 
 end.
