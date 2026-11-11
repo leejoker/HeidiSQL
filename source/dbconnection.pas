@@ -430,7 +430,7 @@ type
     frCreateEvent,
     frInvisibleColumns,
     frCompressedColumns
-    );
+    ) deprecated 'Use TQueryId and TSqlProvider instead';
 
   TDBConnection = class(TComponent)
     private
@@ -482,6 +482,7 @@ type
       FFavorites: TStringList;
       FPrefetchResults: TDBQueryList;
       FForeignKeyQueriesFailed: Boolean;
+      FConnectAttrsQueryFailed: Boolean;
       FInfSch: String;
       FIdentCharsNoQuote: TSysCharSet;
       FMaxRowsPerInsert: Int64;
@@ -621,6 +622,7 @@ type
       property Datatypes: TDBDataTypeArray read FDatatypes;
       property Favorites: TStringList read FFavorites;
       property InfSch: String read FInfSch;
+      property ConnectAttrsQueryFailed: Boolean read FConnectAttrsQueryFailed write FConnectAttrsQueryFailed;
       function GetLockedTableCount(db: String): Integer;
       function IdentifierEquals(Ident1, Ident2: String): Boolean;
       function GetTableColumns(Table: TDBObject): TTableColumnList; virtual;
@@ -631,7 +633,7 @@ type
       property SQLFunctions: TSQLFunctionList read FSQLFunctions;
       function IsNumeric(Text: String): Boolean;
       function IsHex(Text: String): Boolean;
-      function Has(Item: TFeatureOrRequirement): Boolean;
+      function Has(Item: TFeatureOrRequirement): Boolean; deprecated 'Use SqlProvider.Has(TQueryId) instead';
       property SqlProvider: TSqlProvider read FSqlProvider;
       property NamedEnums: TStringList read FNamedEnums;
       procedure GetColumnDefaultExpressions(Items: TStrings); virtual;
@@ -2180,6 +2182,7 @@ begin
   FKeepAliveTimer := TTimer.Create(Self);
   FFavorites := TStringList.Create;
   FForeignKeyQueriesFailed := False;
+  FConnectAttrsQueryFailed := False;
   // System database/schema, should be uppercase on MSSQL only, see #855
   FInfSch := 'information_schema';
   FInformationSchemaObjects := TStringList.Create;
@@ -2621,7 +2624,7 @@ begin
 
     // Tell server who we are
     if Assigned(FLib.mysql_optionsv) then
-      FLib.mysql_optionsv(FHandle, FLib.MYSQL_OPT_CONNECT_ATTR_ADD, 'program_name', APPNAME);
+      FLib.mysql_optionsv(FHandle, FLib.MYSQL_OPT_CONNECT_ATTR_ADD, 'program_name', PAnsiChar(UTF8Encode(AppClientName)));
 
     // Seems to be still required on some systems, for importing CSV files
     SetOption(FLib.MYSQL_OPT_LOCAL_INFILE, @(FLib.MYBOOL_TRUE));
@@ -2801,7 +2804,7 @@ begin
     FHandle.Password := Parameters.Password;
     FHandle.DatabaseName := 'master';
     FHandle.Params.Values['AutoCommit'] := 'true';
-    FHandle.Params.Values['ApplicationName'] := APPNAME;
+    FHandle.Params.Values['ApplicationName'] := AppClientName;
     // See http://www.heidisql.com/forum.php?t=19779
     FHandle.Params.Values['TextSize'] := '2147483647';
 
@@ -2907,7 +2910,7 @@ begin
       .AddPair('port', IntToStr(FinalPort))
       .AddPair('user', FParameters.Username)
       .AddPair('password', FParameters.Password)
-      .AddPair('application_name', APPNAME)
+      .AddPair('application_name', AppClientName)
       .AddPair('sslmode', 'disable');
     if not FParameters.AllDatabasesStr.IsEmpty then
       ConnectOptions.AddPair('dbname', FParameters.AllDatabasesStr);
@@ -10533,7 +10536,7 @@ begin
   end;
   Row.Inserted := True;
   // Find highest unused recno of inserted rows and use that for this row
-  // Important: do not raise higher than what TVirtualStringTree.RootNodeCount can hold!
+  // Important: do not raise higher than what TLazVirtualStringTree.RootNodeCount can hold!
   Result := High(Cardinal);
   while True do begin
     InUse := False;

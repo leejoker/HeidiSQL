@@ -75,7 +75,7 @@ type
   TQueryTab = class;
   TResultTab = class(TObject)
     Results: TDBQuery;
-    Grid: TVirtualStringTree;
+    Grid: TLazVirtualStringTree;
     FilterText: String;
     private
       FTabIndex: Integer;
@@ -123,10 +123,10 @@ type
       ExecutionThread: TQueryThread;
       //CloseButton: TSpeedButton;
       pnlMemo: TPanel;
-      Memo: TSynMemo;
+      Memo: TSynEdit;
       pnlHelpers: TPanel;
       filterHelpers: TEditButton;
-      treeHelpers: TVirtualStringTree;
+      treeHelpers: TLazVirtualStringTree;
       MemoLineBreaks: TLineBreaks;
       spltHelpers: TSplitter;
       spltQuery: TSplitter;
@@ -159,8 +159,8 @@ type
   TQueryTabList = class(TObjectList<TQueryTab>)
     public
       function ActiveTab: TQueryTab;
-      function ActiveMemo: TSynMemo;
-      function ActiveHelpersTree: TVirtualStringTree;
+      function ActiveMemo: TSynEdit;
+      function ActiveHelpersTree: TLazVirtualStringTree;
       function HasActiveTab: Boolean;
       function TabByNumber(Number: Integer): TQueryTab;
       function TabByControl(Control: TWinControl): TQueryTab;
@@ -384,7 +384,7 @@ type
     actRemoveFilter: TAction;
     panelTop: TPanel;
     pnlLeft: TPanel;
-    DBtree: TVirtualStringTree;
+    DBtree: TLazVirtualStringTree;
     spltDBtree: TSplitter;
     PageControlMain: TPageControl;
     tabData: TTabSheet;
@@ -397,18 +397,18 @@ type
     PageControlHost: TPageControl;
     tabVariables: TTabSheet;
     tabProcesslist: TTabSheet;
-    ListVariables: TVirtualStringTree;
-    ListProcesses: TVirtualStringTree;
+    ListVariables: TLazVirtualStringTree;
+    ListProcessList: TLazVirtualStringTree;
     popupHost: TPopupMenu;
     Kill1: TMenuItem;
-    ListTables: TVirtualStringTree;
+    ListTables: TLazVirtualStringTree;
     Refresh1: TMenuItem;
     pnlDataTop: TPanel;
     pnlRedisInfo: TPanel;
     lblRedisInfo: TLabel;
     pnlQueryMemo: TPanel;
     SynSQLSynUsed: TSynSQLSyn;
-    SynMemoQuery: TSynMemo;
+    SynMemoQuery: TSynEdit;
     spltQuery: TSplitter;
     TimerHostUptime: TTimer;
     N5a: TMenuItem;
@@ -424,8 +424,8 @@ type
     Copy3: TMenuItem;
     Paste2: TMenuItem;
     N4a: TMenuItem;
-    DataGrid: TVirtualStringTree;
-    QueryGrid: TVirtualStringTree;
+    DataGrid: TLazVirtualStringTree;
+    QueryGrid: TLazVirtualStringTree;
     Delete1: TMenuItem;
     N6a: TMenuItem;
     menuQuickFilter: TMenuItem;
@@ -433,7 +433,7 @@ type
     DropFilter1: TMenuItem;
     PrintList2: TMenuItem;
     N1a: TMenuItem;
-    SynMemoFilter: TSynMemo;
+    SynMemoFilter: TSynEdit;
     TimerRefresh: TTimer;
     Saveastextfile1: TMenuItem;
     Exportdata2: TMenuItem;
@@ -451,7 +451,7 @@ type
     popupListHeader: TLazVTHeaderPopupMenu;
     SynCompletionProposal: TSynCompletion;
     tabCommandStats: TTabSheet;
-    ListCommandStats: TVirtualStringTree;
+    ListCommandStats: TLazVirtualStringTree;
     N21: TMenuItem;
     popupQuery: TPopupMenu;
     MenuRun: TMenuItem;
@@ -485,11 +485,11 @@ type
     menuLogToFile: TMenuItem;
     menuOpenLogFolder: TMenuItem;
     tabStatus: TTabSheet;
-    ListStatus: TVirtualStringTree;
+    ListStatus: TLazVirtualStringTree;
     spltProcessList: TSplitter;
     pnlProcessViewBox: TPanel;
     pnlProcessView: TPanel;
-    SynMemoProcessView: TSynMemo;
+    SynMemoProcessView: TSynEdit;
     pnlFilterVT: TPanel;
     editFilterVT: TEditButton;
     lblFilterVT: TLabel;
@@ -511,7 +511,7 @@ type
     N8: TMenuItem;
     menuFilterApply: TMenuItem;
     menuFilterClear: TMenuItem;
-    SynMemoSQLLog: TSynMemo;
+    SynMemoSQLLog: TSynEdit;
     Insert1: TMenuItem;
     Cancelediting1: TMenuItem;
     DataPost1: TMenuItem;
@@ -610,7 +610,7 @@ type
     actDataShowAll: TAction;
     QFvalues: TMenuItem;
     tabDatabases: TTabSheet;
-    ListDatabases: TVirtualStringTree;
+    ListDatabases: TLazVirtualStringTree;
     menuFetchDBitems: TMenuItem;
     actRunRoutines: TAction;
     Runroutines1: TMenuItem;
@@ -720,7 +720,7 @@ type
     ImageListSilk: TImageList;
     ImageListSynBookMarks: TImageList;
     pnlQueryHelpers: TPanel;
-    treeQueryHelpers: TVirtualStringTree;
+    treeQueryHelpers: TLazVirtualStringTree;
     filterQueryHelpers: TEditButton;
     TimerStoreTabs: TTimer;
     Duplicaterowwithkeys1: TMenuItem;
@@ -1047,7 +1047,7 @@ type
     procedure ListTablesBeforeCellPaint(Sender: TBaseVirtualTree; TargetCanvas: TCanvas;
       Node: PVirtualNode; Column: TColumnIndex; CellPaintMode: TVTCellPaintMode; CellRect: TRect;
       var ContentRect: TRect);
-    procedure ListProcessesFocusChanged(Sender: TBaseVirtualTree; Node: PVirtualNode; Column: TColumnIndex);
+    procedure ListProcessListFocusChanged(Sender: TBaseVirtualTree; Node: PVirtualNode; Column: TColumnIndex);
     procedure editFilterVTChange(Sender: TObject);
     procedure ListVariablesDblClick(Sender: TObject);
     procedure menuEditVariableClick(Sender: TObject);
@@ -1102,7 +1102,7 @@ type
     function GetMainTabAt(X, Y: Integer): Integer;
     procedure FixQueryTabCloseButtons;
     function GetOrCreateEmptyQueryTab(DoFocus: Boolean): TQueryTab;
-    function ActiveSynMemo(AcceptReadOnlyMemo: Boolean): TSynMemo;
+    function ActiveSynMemo(AcceptReadOnlyMemo: Boolean): TSynEdit;
     function IsQueryTab(PageIndex: Integer; IncludeFixed: Boolean): Boolean;
     procedure popupMainTabsPopup(Sender: TObject);
     procedure FormCloseQuery(Sender: TObject; var CanClose: Boolean);
@@ -1253,7 +1253,7 @@ type
       var PaintInfo: THeaderPaintInfo; var Elements: THeaderPaintElements);
     procedure AnyGridAdvancedHeaderDraw(Sender: TVTHeader;
       var PaintInfo: THeaderPaintInfo; const Elements: THeaderPaintElements);
-    function ShortenHeaderCaption(Tree: TVirtualStringTree; Col: TVirtualTreeColumn): String;
+    function ShortenHeaderCaption(Tree: TLazVirtualStringTree; Col: TVirtualTreeColumn): String;
     procedure actCodeFoldingExecute(Sender: TObject);
     procedure actCodeFoldingStartRegionExecute(Sender: TObject);
     procedure actCodeFoldingEndRegionExecute(Sender: TObject);
@@ -1372,7 +1372,7 @@ type
     procedure SetActiveDBObj(Obj: TDBObject);
     procedure ToggleFilterPanel(ForceVisible: Boolean = False);
     procedure EnableDataTab(Enable: Boolean);
-    procedure AutoCalcColWidth(Tree: TVirtualStringTree; Column: TColumnIndex);
+    procedure AutoCalcColWidth(Tree: TLazVirtualStringTree; Column: TColumnIndex);
     procedure AsyncRepaintGrid(Data: PtrInt);
     procedure PlaceObjectEditor(Obj: TDBObject);
     procedure UpdateRedisInfoBar(Obj: TDBObject);
@@ -1442,25 +1442,25 @@ type
     procedure SessionConnect(Sender: TObject);
     function InitConnection(Params: TConnectionParameters; ActivateMe: Boolean; var Connection: TDBConnection): Boolean;
     procedure ConnectionsNotify(Sender: TObject; {$IF FPC_FULLVERSION<30203}constref{$ELSE}const{$ENDIF} Item: TDBConnection; Action: TCollectionNotification);
-    function ActiveGrid: TVirtualStringTree;
+    function ActiveGrid: TLazVirtualStringTree;
     function GridResult(Grid: TBaseVirtualTree): TDBQuery;
     property ActiveConnection: TDBConnection read GetActiveConnection;
     property ActiveDatabase: String read GetActiveDatabase;
     property ActiveDbObj: TDBObject read FActiveDbObj write SetActiveDBObj;
     property LogToFile: Boolean read FLogToFile write SetLogToFile;
     procedure RefreshTree(FocusNewObject: TDBObject=nil);
-    function GetRootNode(Tree: TVirtualStringTree; Connection: TDBConnection): PVirtualNode;
-    function FindDBObjectNode(Tree: TVirtualStringTree; Obj: TDBObject): PVirtualNode;
-    function FindDBNode(Tree: TVirtualStringTree; Connection: TDBConnection; db: String): PVirtualNode;
+    function GetRootNode(Tree: TLazVirtualStringTree; Connection: TDBConnection): PVirtualNode;
+    function FindDBObjectNode(Tree: TLazVirtualStringTree; Obj: TDBObject): PVirtualNode;
+    function FindDBNode(Tree: TLazVirtualStringTree; Connection: TDBConnection; db: String): PVirtualNode;
     procedure HandleDataGridAttributes(RefreshingData: Boolean);
     function GetRegKeyTable: String;
     procedure UpdateEditorTab;
     procedure SetWindowCaption;
     procedure SetupSynEditors; overload;
     procedure SetupSynEditors(BaseForm: TComponent); overload;
-    procedure SetupSynEditor(Editor: TSynMemo);
-    function AnyGridEnsureFullRow(Grid: TVirtualStringTree; Node: PVirtualNode): Boolean;
-    procedure DataGridEnsureFullRows(Grid: TVirtualStringTree; SelectedOnly: Boolean);
+    procedure SetupSynEditor(Editor: TSynEdit);
+    function AnyGridEnsureFullRow(Grid: TLazVirtualStringTree; Node: PVirtualNode): Boolean;
+    procedure DataGridEnsureFullRows(Grid: TLazVirtualStringTree; SelectedOnly: Boolean);
     property DataGridSortItems: TSortItems read FDataGridSortItems write FDataGridSortItems;
     function GetEncodingByName(Name: String): TEncoding;
     function GetEncodingName(Encoding: TEncoding): String;
@@ -1705,7 +1705,7 @@ end;
 procedure TMainForm.actGoToQueryResultsExecute(Sender: TObject);
 var
   Tab: TQueryTab;
-  Grid: TVirtualStringTree;
+  Grid: TLazVirtualStringTree;
 begin
   if QueryTabs.HasActiveTab then begin
     // Switch between query editor and result grid
@@ -1918,7 +1918,7 @@ begin
   SaveListSetup(ListDatabases);
   SaveListSetup(ListVariables);
   SaveListSetup(ListStatus);
-  SaveListSetup(ListProcesses);
+  SaveListSetup(ListProcessList);
   SaveListSetup(ListCommandStats);
   SaveListSetup(ListTables);
 
@@ -2251,7 +2251,7 @@ begin
   FixVT(ListDatabases);
   FixVT(ListVariables);
   FixVT(ListStatus);
-  FixVT(ListProcesses);
+  FixVT(ListProcessList);
   FixVT(ListCommandStats);
   FixVT(ListTables);
   FixVT(DataGrid, True);
@@ -2645,8 +2645,8 @@ var
   UseFontName: String;
 begin
   // Set hint font name to match the underlying control
-  if Assigned(Control) and (Control is TSynMemo) then
-    UseFontName := TSynMemo(Control).Font.Name
+  if Assigned(Control) and (Control is TSynEdit) then
+    UseFontName := TSynEdit(Control).Font.Name
   else
     UseFontName := FDefaultHintFontName;
   if Screen.HintFont.Name <> UseFontName then
@@ -2973,7 +2973,7 @@ begin
   RestoreListSetup(ListDatabases);
   RestoreListSetup(ListVariables);
   RestoreListSetup(ListStatus);
-  RestoreListSetup(ListProcesses);
+  RestoreListSetup(ListProcessList);
   RestoreListSetup(ListCommandStats);
   RestoreListSetup(ListTables);
 
@@ -3005,7 +3005,7 @@ end;
 procedure TMainForm.EditorCommandOnClick(Sender: TObject);
 var
   EditorCommand: TSynEditorCommand;
-  Editor: TSynMemo;
+  Editor: TSynEdit;
 begin
   Editor := ActiveSynMemo(False);
   if Assigned(Editor) then begin
@@ -3043,7 +3043,7 @@ end;
 
 procedure TMainForm.actClearEditorExecute(Sender: TObject);
 var
-  m: TSynMemo;
+  m: TSynEdit;
 begin
   if Sender = actClearQueryEditor then begin
     m := QueryTabs.ActiveMemo
@@ -3820,7 +3820,7 @@ end;
 
 procedure TMainForm.actDataPreviewUpdate(Sender: TObject);
 var
-  Grid: TVirtualStringTree;
+  Grid: TLazVirtualStringTree;
 begin
   // Enable or disable ImageView action
   Grid := ActiveGrid;
@@ -3906,7 +3906,7 @@ end;
 
 procedure TMainForm.UpdatePreviewPanel;
 var
-  Grid: TVirtualStringTree;
+  Grid: TLazVirtualStringTree;
   Results: TDBQuery;
   RowNum: PInt64;
   ImgType: String;
@@ -4013,7 +4013,7 @@ end;
 
 procedure TMainForm.actDataSaveBlobToFileExecute(Sender: TObject);
 var
-  Grid: TVirtualStringTree;
+  Grid: TLazVirtualStringTree;
   Results: TDBQuery;
   RowNum: PInt64;
   Content: AnsiString;
@@ -4710,7 +4710,7 @@ end;
 
 procedure TMainForm.actDataDeleteExecute(Sender: TObject);
 var
-  Grid: TVirtualStringTree;
+  Grid: TLazVirtualStringTree;
   Node, FocusAfterDelete: PVirtualNode;
   RowNum: PInt64;
   Results: TDBQuery;
@@ -5125,8 +5125,8 @@ end;
 procedure TMainForm.actQueryFindAgainExecute(Sender: TObject);
 var
   NeedDialog: Boolean;
-  Editor: TSynMemo;
-  Grid: TVirtualStringTree;
+  Editor: TSynEdit;
+  Grid: TLazVirtualStringTree;
   OldDataLocalNumberFormat: Boolean;
 begin
   // F3 - search or replace again, using previous settings
@@ -5170,7 +5170,7 @@ end;
 procedure TMainForm.actRefreshExecute(Sender: TObject);
 var
   tab1, tab2: TTabSheet;
-  List: TVirtualStringTree;
+  List: TLazVirtualStringTree;
   OldDbObject: TDBObject;
   DoProceed: Boolean;
   i: Integer;
@@ -5184,9 +5184,9 @@ begin
   // Do not refresh when *any* tree is dragged or resized by user in this moment.
   // This is not limited to the focused control, as we also refresh ListDatabases if only its tab is active.
   for i:=0 to ComponentCount-1 do begin
-    if not(Components[i] is TVirtualStringTree) then
+    if not(Components[i] is TLazVirtualStringTree) then
       continue;
-    if (HeaderDragStates * TVirtualStringTree(Components[i]).Header.States <> [])  then begin
+    if (HeaderDragStates * TLazVirtualStringTree(Components[i]).Header.States <> [])  then begin
       Exit;
     end;
   end;
@@ -5206,7 +5206,7 @@ begin
     else if tab2 = tabStatus then
       List := ListStatus
     else if tab2 = tabProcessList then
-      List := ListProcesses
+      List := ListProcessList
     else
       List := ListCommandStats;
     InvalidateVT(List, VTREE_NOTLOADED_PURGECACHE, True);
@@ -5228,15 +5228,15 @@ end;
 procedure TMainForm.actSQLhelpExecute(Sender: TObject);
 var
   keyword: String;
-  Tree: TVirtualStringTree;
-  SynMemo: TSynMemo;
+  Tree: TLazVirtualStringTree;
+  SynMemo: TSynEdit;
 begin
   // Call SQL Help from various places
   keyword := '';
 
   // Query-Tab
-  if ActiveControl is TSynMemo then begin
-    SynMemo := TSynMemo(ActiveControl);
+  if ActiveControl is TSynEdit then begin
+    SynMemo := TSynEdit(ActiveControl);
     keyword := SynMemo.GetWordAtRowCol(SynMemo.CaretXY);
     if keyword.IsEmpty then begin
       keyword := SynMemo.SelText;
@@ -5286,7 +5286,7 @@ end;
 
 procedure TMainForm.actSynMoveDownExecute(Sender: TObject);
 var
-  Editor: TSynMemo;
+  Editor: TSynEdit;
 begin
   // Move line of text one down
   Editor := ActiveSynMemo(False);
@@ -5305,7 +5305,7 @@ end;
 
 procedure TMainForm.actSynMoveUpExecute(Sender: TObject);
 var
-  Editor: TSynMemo;
+  Editor: TSynEdit;
 begin
   // Move line of text one up
   Editor := ActiveSynMemo(False);
@@ -5341,18 +5341,18 @@ end;
 procedure TMainForm.actSaveSynMemoToTextfileExecute(Sender: TObject);
 var
   Comp: TComponent;
-  Memo: TSynMemo;
+  Memo: TSynEdit;
   Dialog: TExtFileSaveDialog;
 begin
-  // Save to textfile, from any TSynMemo (SQL log, "CREATE code" tab in editor, ...)
+  // Save to textfile, from any TSynEdit (SQL log, "CREATE code" tab in editor, ...)
   Memo := nil;
   // Try to find memo from menu item's popup component, and if that fails, check ActiveControl.
   // See #353
   Comp := PopupComponent(Sender);
-  if Comp is TSynMemo then
-    Memo := Comp as TSynMemo
-  else if ActiveControl is TSynMemo then
-    Memo := ActiveControl as TSynMemo;
+  if Comp is TSynEdit then
+    Memo := Comp as TSynEdit
+  else if ActiveControl is TSynEdit then
+    Memo := ActiveControl as TSynEdit;
   if Assigned(Memo) then begin
     Dialog := TExtFileSaveDialog.Create(Self);
     Dialog.Options := Dialog.Options + [ofOverWritePrompt];
@@ -5530,7 +5530,7 @@ end;
 
 procedure TMainForm.actCodeFoldingStartRegionExecute(Sender: TObject);
 var
-  Memo: TSynMemo;
+  Memo: TSynEdit;
 begin
   // Insert #region
   if not actCodeFolding.Checked then
@@ -5561,7 +5561,7 @@ end;
 
 procedure TMainForm.actCodeFoldingEndRegionExecute(Sender: TObject);
 var
-  Memo: TSynMemo;
+  Memo: TSynEdit;
 begin
   // Insert #endregion
   if not actCodeFolding.Checked then
@@ -5573,7 +5573,7 @@ end;
 
 procedure TMainForm.actCodeFoldingFoldSelectionExecute(Sender: TObject);
 var
-  Memo: TSynMemo;
+  Memo: TSynEdit;
   AfterText: String;
 begin
   // Wrap selected text in region/endregion
@@ -5828,7 +5828,7 @@ end;
 procedure TMainForm.actDataInsertExecute(Sender: TObject);
 var
   DupeNode, NewNode: PVirtualNode;
-  Grid: TVirtualStringTree;
+  Grid: TLazVirtualStringTree;
   Results: TDBQuery;
   RowNum: Int64;
   DupeNum: PInt64;
@@ -5881,7 +5881,7 @@ end;
 procedure TMainForm.actDataLastExecute(Sender: TObject);
 var
   Node: PVirtualNode;
-  Grid: TVirtualStringTree;
+  Grid: TLazVirtualStringTree;
 begin
   Grid := ActiveGrid;
   // Be sure to have all rows
@@ -5896,7 +5896,7 @@ end;
 
 procedure TMainForm.actDataOpenUrlExecute(Sender: TObject);
 var
-  Grid: TVirtualStringTree;
+  Grid: TLazVirtualStringTree;
 begin
   // Open grid cell url in web browser
   Grid := ActiveGrid;
@@ -5906,11 +5906,11 @@ end;
 
 procedure TMainForm.actDataPostChangesExecute(Sender: TObject);
 var
-  Grid: TVirtualStringTree;
+  Grid: TLazVirtualStringTree;
   Results: TDBQuery;
 begin
-  if Sender is TVirtualStringTree then
-    Grid := Sender as TVirtualStringTree
+  if Sender is TLazVirtualStringTree then
+    Grid := Sender as TLazVirtualStringTree
   else
     Grid := ActiveGrid;
   Results := GridResult(Grid);
@@ -5930,7 +5930,7 @@ end;
 
 procedure TMainForm.actDataCancelChangesExecute(Sender: TObject);
 var
-  Grid: TVirtualStringTree;
+  Grid: TLazVirtualStringTree;
   Results: TDBQuery;
   RowNum: PInt64;
   Node, FocNode: PVirtualNode;
@@ -6153,7 +6153,7 @@ begin
 end;
 
 
-function TMainForm.AnyGridEnsureFullRow(Grid: TVirtualStringTree; Node: PVirtualNode): Boolean;
+function TMainForm.AnyGridEnsureFullRow(Grid: TLazVirtualStringTree; Node: PVirtualNode): Boolean;
 var
   RowNum: PInt64;
   Data: TDBQuery;
@@ -6169,7 +6169,7 @@ begin
 end;
 
 
-procedure TMainForm.DataGridEnsureFullRows(Grid: TVirtualStringTree; SelectedOnly: Boolean);
+procedure TMainForm.DataGridEnsureFullRows(Grid: TLazVirtualStringTree; SelectedOnly: Boolean);
 var
   Node: PVirtualNode;
   Results: TDBQuery;
@@ -6328,7 +6328,7 @@ begin
 end;
 
 
-function TMainForm.ShortenHeaderCaption(Tree: TVirtualStringTree; Col: TVirtualTreeColumn): String;
+function TMainForm.ShortenHeaderCaption(Tree: TLazVirtualStringTree; Col: TVirtualTreeColumn): String;
 // Returns the column caption which is actually visible in the header, i.e. shortened
 // to the available column width the same way as AnyGridAdvancedHeaderDraw does at
 // paint time. Callers can base calculations on it, e.g. the header height, so the
@@ -6357,7 +6357,7 @@ end;
 
 procedure TMainForm.DataGridBeforePaint(Sender: TBaseVirtualTree; TargetCanvas: TCanvas);
 var
-  vt: TVirtualStringTree;
+  vt: TLazVirtualStringTree;
   Select, FixedFilter: String;
   RefreshingData, IsKeyColumn, NeedFullColumns: Boolean;
   i, ColWidth, VisibleColumns, MaximumRows, FullColumnCount: Integer;
@@ -6401,7 +6401,7 @@ var
 
 begin
   // Load data into data tab grid
-  vt := Sender as TVirtualStringTree;
+  vt := Sender as TLazVirtualStringTree;
   if vt.Tag = VTREE_LOADED then
     Exit;
   DBObj := ActiveDbObj;
@@ -6845,7 +6845,7 @@ begin
   if tab = tabDatabases then list := ListDatabases
   else if tab = tabVariables then list := ListVariables
   else if tab = tabStatus then list := ListStatus
-  else if tab = tabProcesslist then list := ListProcesses
+  else if tab = tabProcesslist then list := ListProcessList
   else if tab = tabCommandStats then list := ListCommandStats
   else Exit; // Silence compiler warning
   list.TrySetFocus;
@@ -6861,12 +6861,12 @@ var
   Objects: TDBObjectList;
   NumObjects: TStringList;
   Msg: String;
-  vt: TVirtualStringTree;
+  vt: TLazVirtualStringTree;
   Conn: TDBConnection;
   ScrollOffset: TPoint;
 begin
   // DB-Properties
-  vt := Sender as TVirtualStringTree;
+  vt := Sender as TLazVirtualStringTree;
   if vt.Tag = VTREE_LOADED then
     Exit;
   LogSQL('ListTablesBeforePaint', lcDebug);
@@ -6928,7 +6928,7 @@ procedure TMainForm.ListTablesGetImageIndex(Sender: TBaseVirtualTree; Node: PVir
 var
   Obj: PDBObject;
 begin
-  if Column <> (Sender as TVirtualStringTree).Header.MainColumn then
+  if Column <> (Sender as TLazVirtualStringTree).Header.MainColumn then
     Exit;
   Obj := Sender.GetNodeData(Node);
   case Kind of
@@ -7034,7 +7034,7 @@ procedure TMainForm.ValidateControls(Sender: TObject);
 var
   inDataTab, inDataOrQueryTab, inDataOrQueryTabNotEmpty, inGrid: Boolean;
   HasConnection, GridHasChanges, EnableTimestamp: Boolean;
-  Grid: TVirtualStringTree;
+  Grid: TLazVirtualStringTree;
   inSynMemo, inSynMemoEditable: Boolean;
   Results: TDBQuery;
   RowNum: PInt64;
@@ -7179,13 +7179,13 @@ var
   Conn: TDBConnection;
 begin
   t := TimerRefresh.Enabled;
-  TimerRefresh.Enabled := false; // prevent av (ListProcesses.selected...)
+  TimerRefresh.Enabled := false; // prevent av (ListProcessList.selected...)
   Conn := ActiveConnection;
-  if MessageDialog('Kill '+IntToStr(ListProcesses.SelectedCount)+' Process(es)?', mtConfirmation, [mbok,mbcancel]) = mrok then
+  if MessageDialog('Kill '+IntToStr(ListProcessList.SelectedCount)+' Process(es)?', mtConfirmation, [mbok,mbcancel]) = mrok then
   begin
-    Node := GetNextNode(ListProcesses, nil, True);
+    Node := GetNextNode(ListProcessList, nil, True);
     while Assigned(Node) do begin
-      pid := StrToInt64Def(ListProcesses.Text[Node, ListProcesses.Header.MainColumn], 0);
+      pid := StrToInt64Def(ListProcessList.Text[Node, ListProcessList.Header.MainColumn], 0);
       // Don't kill own process
       if pid = Conn.ThreadId then
         LogSQL(f_('Ignoring own process id #%d when trying to kill it.', [pid]))
@@ -7198,9 +7198,9 @@ begin
               break;
         end;
       end;
-      Node := GetNextNode(ListProcesses, Node, True);
+      Node := GetNextNode(ListProcessList, Node, True);
     end;
-    InvalidateVT(ListProcesses, VTREE_NOTLOADED, True);
+    InvalidateVT(ListProcessList, VTREE_NOTLOADED, True);
   end;
   TimerRefresh.Enabled := t; // re-enable autorefresh timer
 end;
@@ -7566,7 +7566,7 @@ const
   WordChars: TSysCharSet = ['A'..'Z','a'..'z','0'..'9','_','$'];
   TriggerChars: TSysCharSet = [#0, ' ', #9, #10, #13, ',', ';', '(', ')'];
 var
-  Editor: TSynMemo;
+  Editor: TSynEdit;
   Token: String;
   CaretStart, CaretTokenTypeInt: Integer;
   Attri: TSynHighlighterAttributes;
@@ -7669,11 +7669,11 @@ end;
 procedure TMainForm.SynMemoQuerySpecialLineMarkup(Sender: TObject;
   Line: Integer; var Special: Boolean; Markup: TSynSelectedColor);
 var
-  Edit: TSynMemo;
+  Edit: TSynEdit;
   Tab: TQueryTab;
 begin
   // Paint error line with red background
-  Edit := Sender as TSynMemo;
+  Edit := Sender as TSynEdit;
   Tab := QueryTabs.TabByControl(Edit);
   if Tab <> QueryTabs.ActiveTab then
     Exit;
@@ -7688,11 +7688,11 @@ end;
 procedure TMainForm.SynMemoSQLLogSpecialLineMarkup(Sender: TObject;
   Line: Integer; var Special: Boolean; Markup: TSynSelectedColor);
 var
-  Edit: TSynMemo;
+  Edit: TSynEdit;
   LineText, Search: String;
 begin
   // Paint error line with red background, or warning in orange
-  Edit := Sender as TSynMemo;
+  Edit := Sender as TSynEdit;
   LineText := Copy(Edit.Lines[Line-1], 1, 100);
   Search := _(MsgSQLError);
   Search := Copy(Search, 1, Pos('%', Search)-1);
@@ -7722,14 +7722,14 @@ end;
 
 procedure TMainForm.SynMemoQueryStatusChange(Sender: TObject; Changes: TSynStatusChanges);
 var
-  Edit: TSynMemo;
+  Edit: TSynEdit;
   Tab: TQueryTab;
   ContentOrCursor: Boolean;
 begin
   if not MainFormAfterCreateDone then
     Exit;
 
-  Edit := Sender as TSynMemo;
+  Edit := Sender as TSynEdit;
   Tab := QueryTabs.TabByControl(Edit);
   if Tab <> QueryTabs.ActiveTab then
     Exit;
@@ -8160,8 +8160,8 @@ procedure TMainForm.SynMemoQueryDragOver(Sender, Source: TObject; X,
   Y: Integer; State: TDragState; var Accept: Boolean);
 var
   src : TControl;
-  Memo: TSynMemo;
-  H: TVirtualStringTree;
+  Memo: TSynEdit;
+  H: TLazVirtualStringTree;
 begin
   // dragging an object over the query-memo
   Memo := QueryTabs.ActiveMemo;
@@ -8184,7 +8184,7 @@ var
   src : TControl;
   Text, ItemText: String;
   ShiftPressed: Boolean;
-  Tree: TVirtualStringTree;
+  Tree: TLazVirtualStringTree;
   Node: PVirtualNode;
   History: TQueryHistory;
 begin
@@ -8302,7 +8302,7 @@ end;
 procedure TMainForm.popupHostPopup(Sender: TObject);
 begin
   menuFetchDBitems.Enabled := (PageControlHost.ActivePage = tabDatabases) and (ListDatabases.SelectedCount > 0);
-  Kill1.Enabled := (PageControlHost.ActivePage = tabProcessList) and (ListProcesses.SelectedCount > 0);
+  Kill1.Enabled := (PageControlHost.ActivePage = tabProcessList) and (ListProcessList.SelectedCount > 0);
   menuEditVariable.Enabled := False;
   if ActiveConnection.Has(frEditVariables) then
     menuEditVariable.Enabled := (PageControlHost.ActivePage = tabVariables) and Assigned(ListVariables.FocusedNode)
@@ -8810,7 +8810,7 @@ end;
 
 procedure TMainForm.popupDataGridPopup(Sender: TObject);
 var
-  Grid: TVirtualStringTree;
+  Grid: TLazVirtualStringTree;
   Results: TDBQuery;
   i: Integer;
   Col, Value, FocusedColumnName: String;
@@ -9162,7 +9162,7 @@ procedure TMainForm.InsertValue(Sender: TObject);
 var
   d: String;
   p: Integer;
-  Grid: TVirtualStringTree;
+  Grid: TLazVirtualStringTree;
 begin
   // Insert date/time-value into table
   d := StripHotkey((Sender as TMenuItem).Caption);
@@ -9178,7 +9178,7 @@ begin
 end;
 
 
-function TMainForm.GetRootNode(Tree: TVirtualStringTree; Connection: TDBConnection): PVirtualNode;
+function TMainForm.GetRootNode(Tree: TLazVirtualStringTree; Connection: TDBConnection): PVirtualNode;
 var
   SessionNode: PVirtualNode;
   SessionObj: PDBObject;
@@ -9254,7 +9254,7 @@ begin
 end;
 
 
-function TMainForm.FindDBObjectNode(Tree: TVirtualStringTree; Obj: TDBObject): PVirtualNode;
+function TMainForm.FindDBObjectNode(Tree: TLazVirtualStringTree; Obj: TDBObject): PVirtualNode;
 var
   DbNode, ObjectNode, GroupedNode: PVirtualNode;
   DbObj, ObjectObj, GroupedObj: PDBObject;
@@ -9349,7 +9349,7 @@ end;
 procedure TMainForm.insertFunction(Sender: TObject);
 var
   f : String;
-  sm : TSynMemo;
+  sm : TSynEdit;
   Conn: TDBConnection;
 begin
   // Detect which memo is focused
@@ -9444,7 +9444,7 @@ end;
 }
 procedure TMainForm.menuInsertAtCursorClick(Sender: TObject);
 var
-  Tree: TVirtualStringTree;
+  Tree: TLazVirtualStringTree;
   Tab: TQueryTab;
 begin
   Tree := QueryTabs.ActiveHelpersTree;
@@ -9575,7 +9575,7 @@ begin
     Exit;
   // Large query result sorting takes too long, see #293
   LongSortRowNum := AppSettings.ReadInt(asQueryGridLongSortRowNum);
-  if TVirtualStringTree(Sender.Treeview).RootNodeCount > LongSortRowNum then begin
+  if TLazVirtualStringTree(Sender.Treeview).RootNodeCount > LongSortRowNum then begin
     MsgStr := f_('Sort operation on grid containing more than %d rows can take longer. Do you want to wait for it?', [LongSortRowNum]);
     ConfirmResult := MessageDialog('Wait longer for sorting?', MsgStr, mtConfirmation, [mbYes, mbNo]);
     if ConfirmResult <> mrYes then
@@ -9600,9 +9600,9 @@ end;
 procedure TMainForm.AnyGridCompareNodes(Sender: TBaseVirtualTree; Node1,
     Node2: PVirtualNode; Column: TColumnIndex; var Result: Integer);
 var
-  VT: TVirtualStringTree;
+  VT: TLazVirtualStringTree;
 begin
-  VT := Sender as TVirtualStringTree;
+  VT := Sender as TLazVirtualStringTree;
   if Assigned(Node1) and Assigned(Node2) then
     Result := CompareAnyNode(VT.Text[Node1, Column], VT.Text[Node2, Column]);
 end;
@@ -9620,7 +9620,7 @@ var
 begin
   //logsql('GetLightness clWindow:'+GetLightness(clwindow).ToString);
   //logsql('GetLightness clWindow:'+Color(clwindow).ToString);
-  h := (Sender as TVirtualStringTree).Header;
+  h := (Sender as TLazVirtualStringTree).Header;
   for i:=0 to h.Columns.Count-1 do begin
     NewColor := GetThemeColor(clWindow);
     if h.SortColumn = i then
@@ -9691,12 +9691,12 @@ procedure TMainForm.AnyGridGetHint(Sender: TBaseVirtualTree; Node:
     PVirtualNode; Column: TColumnIndex; var LineBreakStyle:
     TVTTooltipLineBreakStyle; var HintText: String);
 var
-  Tree: TVirtualStringTree;
+  Tree: TLazVirtualStringTree;
   NewHint: String;
   Conn: TDBConnection;
   ValIsNumber: Boolean;
 begin
-  Tree := TVirtualStringTree(Sender);
+  Tree := TLazVirtualStringTree(Sender);
 
   if Tree = QueryTabs.ActiveHelpersTree then begin
     Conn := ActiveConnection;
@@ -9788,10 +9788,10 @@ procedure TMainForm.AnyGridIncrementalSearch(Sender: TBaseVirtualTree; Node: PVi
   const SearchText: String; var Result: Integer);
 var
   CellText: String;
-  VT: TVirtualStringTree;
+  VT: TLazVirtualStringTree;
 begin
   // Override VT's default incremental search behaviour. Make it case insensitive.
-  VT := Sender as TVirtualStringTree;
+  VT := Sender as TLazVirtualStringTree;
   if VT.FocusedColumn = NoColumn then
     Exit;
   CellText := VT.Text[Node, VT.FocusedColumn];
@@ -9873,7 +9873,7 @@ end;
   A row in the process list was selected. Fill SynMemoProcessView with
   the SQL of that row.
 }
-procedure TMainForm.ListProcessesFocusChanged(Sender: TBaseVirtualTree;
+procedure TMainForm.ListProcessListFocusChanged(Sender: TBaseVirtualTree;
   Node: PVirtualNode; Column: TColumnIndex);
 var
   NodeFocused, EnableControls: Boolean;
@@ -9882,12 +9882,12 @@ begin
   NodeFocused := Assigned(Node);
   SQL := '';
   if NodeFocused then begin
-    SQL := ListProcesses.Text[Node, 7];
+    SQL := ListProcessList.Text[Node, 10];
   end;
   EnableControls := not SQL.IsEmpty;
   if EnableControls then begin
     SynMemoProcessView.Highlighter := SynSQLSynUsed;
-    SynMemoProcessView.Text := ListProcesses.Text[Node, 7];
+    SynMemoProcessView.Text := SQL;
     SynMemoProcessView.Color := clWindow;
   end else begin
     SynMemoProcessView.Highlighter := nil;
@@ -9934,7 +9934,7 @@ end;
 procedure TMainForm.ApplyVTFilter(FromTimer: Boolean);
 var
   Node: PVirtualNode;
-  VT: TVirtualStringTree;
+  VT: TLazVirtualStringTree;
   TreeIsInsideUpdate: Boolean;
   i: Integer;
   match: Boolean;
@@ -9960,7 +9960,7 @@ begin
     VT := ListStatus;
     FFilterTextStatus := editFilterVT.Text;
   end else if tab = tabProcesslist then begin
-    VT := ListProcesses;
+    VT := ListProcessList;
     FFilterTextProcessList := editFilterVT.Text;
   end else if tab = tabCommandStats then begin
     VT := ListCommandStats;
@@ -10044,13 +10044,13 @@ procedure TMainForm.ApplyFontToGrids;
 var
   QueryTab: TQueryTab;
   ResultTab: TResultTab;
-  Grid: TVirtualStringTree;
-  AllGrids: TObjectList<TVirtualStringTree>;
+  Grid: TLazVirtualStringTree;
+  AllGrids: TObjectList<TLazVirtualStringTree>;
 begin
   // Apply (changed?) font setting to all data and query grids
   // Do not change other things on the grid, or call FixVT here
   LogSQL('Apply grid settings...', lcDebug);
-  AllGrids := TObjectList<TVirtualStringTree>.Create(False);
+  AllGrids := TObjectList<TLazVirtualStringTree>.Create(False);
   AllGrids.Add(DataGrid); // Data tab grid
   AllGrids.Add(QueryGrid); // Mother query grid
   for QueryTab in QueryTabs do begin // Query tab child grids
@@ -10100,9 +10100,9 @@ var
   i, tmp: Integer;
   VarName, SessionVal, GlobalVal: String;
   dcat: TDBDatatypeCategoryIndex;
-  vt: TVirtualStringTree;
+  vt: TLazVirtualStringTree;
 begin
-  vt := Sender as TVirtualStringTree;
+  vt := Sender as TLazVirtualStringTree;
   Idx := Sender.GetNodeData(Node);
   VarName := FVariableNames[Idx^];
   tmp := -1;
@@ -10136,9 +10136,9 @@ var
   Idx: PInt64;
   IsIdle: Boolean;
 begin
-  if (Column <> (Sender as TVirtualStringTree).Header.MainColumn) then
+  if (Column <> (Sender as TLazVirtualStringTree).Header.MainColumn) then
     exit;
-  if Sender = ListProcesses then begin
+  if Sender = ListProcessList then begin
     Idx := Sender.GetNodeData(Node);
     Results := GridResult(Sender);
     // Result sets get freed while disconnecting, a paint event may still come through then
@@ -10270,6 +10270,19 @@ begin
     except
       CellText := '';
     end;
+
+  end else if (Sender = ListProcessList) and (Results.ColumnCount <= 8) and (Column >= 7) then begin
+    // SHOW FULL PROCESSLIST on old servers: no program, memory and progress columns, Info in 7 instead of 10
+    if Column = 10 then
+      CellText := StrEllipsis(Results.Col(7, True), SIZE_KB*50)
+    else
+      CellText := '';
+
+  end else if (Sender = ListProcessList) and (Column = 8) then begin
+    // Memory in bytes
+    CellText := Results.Col(Column, True);
+    if not CellText.IsEmpty then
+      CellText := FormatByteNumber(CellText);
 
   end else begin
     // Values directly from a query result
@@ -10860,7 +10873,7 @@ begin
     InvalidateVT(ListDatabases, VTREE_NOTLOADED, False);
     InvalidateVT(ListVariables, VTREE_NOTLOADED, False);
     InvalidateVT(ListStatus, VTREE_NOTLOADED, False);
-    InvalidateVT(ListProcesses, VTREE_NOTLOADED, False);
+    InvalidateVT(ListProcessList, VTREE_NOTLOADED, False);
     InvalidateVT(ListCommandstats, VTREE_NOTLOADED, False);
     InvalidateVT(ListTables, VTREE_NOTLOADED, False);
     ValidateQueryControls(Self);
@@ -11006,7 +11019,7 @@ end;
 procedure TMainForm.DBtreeDblClick(Sender: TObject);
 var
   DBObj: PDBObject;
-  m: TSynMemo;
+  m: TSynEdit;
 begin
   // Paste DB or table name into query window on treeview double click.
   if AppSettings.ReadBool(asDoubleClickInsertsNodeText) and QueryTabs.HasActiveTab and Assigned(DBtree.FocusedNode) then begin
@@ -11295,7 +11308,7 @@ end;
 {**
   Find a database node in the tree by passing its name
 }
-function TMainForm.FindDBNode(Tree: TVirtualStringTree; Connection: TDBConnection; db: String): PVirtualNode;
+function TMainForm.FindDBNode(Tree: TLazVirtualStringTree; Connection: TDBConnection; db: String): PVirtualNode;
 var
   DBObj: PDBObject;
   n, DBNode: PVirtualNode;
@@ -11325,7 +11338,7 @@ end;
 
 procedure TMainForm.menuToggleAllClick(Sender: TObject);
 var
-  Grid: TVirtualStringTree;
+  Grid: TLazVirtualStringTree;
   Col: TColumnIndex;
   VisibleColCount: Integer;
   DoHide, AllowHideAll: Boolean;
@@ -11333,7 +11346,7 @@ begin
   // Toggle visibility of all columns in list
   // Always leave one column visible, synced with poAllowHideAll from popupListHeader.Options
   // Logsql(PopupComponent(Sender).Name+': '+PopupComponent(Sender).ClassName);
-  Grid := PopupComponent(Sender) as TVirtualStringTree;
+  Grid := PopupComponent(Sender) as TLazVirtualStringTree;
 
   VisibleColCount := 0;
   Col := Grid.Header.Columns.GetFirstColumn;
@@ -11358,22 +11371,22 @@ end;
 
 procedure TMainForm.menuAutoFitAllClick(Sender: TObject);
 var
-  Grid: TVirtualStringTree;
+  Grid: TLazVirtualStringTree;
 begin
-  Grid := PopupComponent(Sender) as TVirtualStringTree;
+  Grid := PopupComponent(Sender) as TLazVirtualStringTree;
   Grid.Header.AutoFitColumnsWithHeaderMin;
 end;
 
 procedure TMainForm.menuCopyColumnNamesClick(Sender: TObject);
 var
-  Grid: TVirtualStringTree;
+  Grid: TLazVirtualStringTree;
   Col: TColumnIndex;
   List: TStringList;
 begin
   if Sender is TMenuItem then
-    Grid := PopupComponent(Sender) as TVirtualStringTree
-  else if Screen.ActiveControl is TVirtualStringTree then
-    Grid := Screen.ActiveControl as TVirtualStringTree
+    Grid := PopupComponent(Sender) as TLazVirtualStringTree
+  else if Screen.ActiveControl is TLazVirtualStringTree then
+    Grid := Screen.ActiveControl as TLazVirtualStringTree
   else
     Exit;
 
@@ -11467,7 +11480,7 @@ const
   MinDisplayLineCount = 2;
   MaxDisplayLineCount = 8;
 begin
-  actClearFilterEditor.Enabled := (Sender as TSynMemo).GetTextLen > 0;
+  actClearFilterEditor.Enabled := (Sender as TSynEdit).GetTextLen > 0;
 
   LineCount := SynMemoFilter.LinesInWindow;
   LineCount := Min(LineCount, MaxDisplayLineCount);
@@ -11761,7 +11774,7 @@ end;
 procedure TMainForm.actDataSetNullExecute(Sender: TObject);
 var
   RowNum: PInt64;
-  Grid: TVirtualStringTree;
+  Grid: TLazVirtualStringTree;
   Results: TDBQuery;
 begin
   // Set cell to NULL value
@@ -11783,11 +11796,11 @@ end;
 procedure TMainForm.AnyGridMouseWheel(Sender: TObject; Shift: TShiftState; WheelDelta: Integer;
   MousePos: TPoint; var Handled: Boolean);
 var
-  VT: TVirtualStringTree;
+  VT: TLazVirtualStringTree;
   Node: PVirtualNode;
   NewFontSize: Integer;
 begin
-  VT := Sender as TVirtualStringTree;
+  VT := Sender as TLazVirtualStringTree;
   if ssAlt in Shift then begin
     // Advance to next or previous grid node on Shift+MouseWheel
     if Assigned(VT.FocusedNode) then begin
@@ -11919,9 +11932,9 @@ end;
 
 procedure TMainForm.AnyGridKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
 var
-  g: TVirtualStringTree;
+  g: TLazVirtualStringTree;
 begin
-  g := TVirtualStringTree(Sender);
+  g := TLazVirtualStringTree(Sender);
   case Key of
     VK_HOME: begin
       g.FocusedColumn := g.Header.Columns.GetFirstVisibleColumn(True);
@@ -11957,7 +11970,7 @@ begin
   if FLastMouseButtonUpOnGrid = mbRight then
     Exit;
   try
-    if not AnyGridEnsureFullRow(Sender as TVirtualStringTree, Node) then
+    if not AnyGridEnsureFullRow(Sender as TLazVirtualStringTree, Node) then
       ErrorDialog(_('Could not load full row data.'))
     else begin
       Allowed := True;
@@ -12002,7 +12015,7 @@ procedure TMainForm.AnyGridCreateEditor(Sender: TBaseVirtualTree; Node:
 const
   ForeignItemsLimit: Integer = 10000;
 var
-  VT: TVirtualStringTree;
+  VT: TLazVirtualStringTree;
   HexEditor: THexEditorLink;
   DateTimeEditor: TDateTimeEditorLink;
   EnumEditor: TEnumEditorLink;
@@ -12022,7 +12035,7 @@ var
   SQLFunc: TSQLFunction;
   ResultCol: Integer;
 begin
-  VT := Sender as TVirtualStringTree;
+  VT := Sender as TLazVirtualStringTree;
   EditLink := nil;
   Results := GridResult(VT);
   RowNum := VT.GetNodeData(Node);
@@ -12239,7 +12252,7 @@ begin
 end;
 
 
-procedure TMainForm.AutoCalcColWidth(Tree: TVirtualStringTree; Column: TColumnIndex);
+procedure TMainForm.AutoCalcColWidth(Tree: TLazVirtualStringTree; Column: TColumnIndex);
 var
   Node: PVirtualNode;
   i, ColTextWidth, ContentTextWidth: Integer;
@@ -12302,7 +12315,7 @@ var
   RowNumber: PInt64;
   FocusedIsNull, CurrentIsNull: Boolean;
   FieldText, FocusedFieldText: String;
-  VT: TVirtualStringTree;
+  VT: TLazVirtualStringTree;
   ResultCol: Integer;
   SelectedNode: PVirtualNode;
 begin
@@ -12326,7 +12339,7 @@ begin
     Exit;
   end;
 
-  VT := Sender as TVirtualStringTree;
+  VT := Sender as TLazVirtualStringTree;
   RowNumber := Sender.GetNodeData(Node);
   r.RecNo := RowNumber^;
 
@@ -12522,13 +12535,13 @@ end;
 procedure TMainForm.AnyGridMouseUp(Sender: TObject; Button: TMouseButton;
   Shift: TShiftState; X, Y: Integer);
 var
-  Grid: TVirtualStringTree;
+  Grid: TLazVirtualStringTree;
   Hit: THitInfo;
   Results: TDBQuery;
 begin
   FLastMouseButtonUpOnGrid := Button;
   // Detect mouse hit in grid whitespace and apply changes.
-  Grid := Sender as TVirtualStringTree;
+  Grid := Sender as TLazVirtualStringTree;
   if not Assigned(Grid.FocusedNode) then
     Exit;
   // Exit early for non-result-grids like ListTables
@@ -12547,12 +12560,12 @@ end;
 
 procedure TMainForm.ListDatabasesBeforePaint(Sender: TBaseVirtualTree; TargetCanvas: TCanvas);
 var
-  vt: TVirtualStringTree;
+  vt: TLazVirtualStringTree;
   i: Integer;
   Conn: TDBConnection;
 begin
   // Invalidate list of databases, before (re)painting
-  vt := Sender as TVirtualStringTree;
+  vt := Sender as TLazVirtualStringTree;
   if vt.Tag = VTREE_LOADED then
     Exit;
   Conn := ActiveConnection;
@@ -12593,7 +12606,7 @@ var
   Conn: TDBConnection;
 begin
   // Return icon index for databases. Ghosted if db objects not yet in cache.
-  if Column <> (Sender as TVirtualStringTree).Header.MainColumn then
+  if Column <> (Sender as TLazVirtualStringTree).Header.MainColumn then
     Exit;
   Conn := ActiveConnection;
   db := ListDatabases.Text[Node, 0];
@@ -12683,23 +12696,19 @@ end;
 
 procedure TMainForm.HostListBeforePaint(Sender: TBaseVirtualTree; TargetCanvas: TCanvas);
 var
-  vt: TVirtualStringTree;
+  vt: TLazVirtualStringTree;
   OldOffset: TPoint;
   Conn: TDBConnection;
   Tab: TTabSheet;
   Results, Variables: TDBQuery;
   i: Integer;
   SelectedCaptions: TStringList;
-  IS_objects: TDBObjectList;
-  Obj: TDBObject;
-  ProcessColumns: TTableColumnList;
-  Columns, FocusedCaption, CleanTabCaption: String;
-  Col: TVirtualTreeColumn;
+  FocusedCaption, CleanTabCaption, ProgramColumn: String;
   LeaveEnabled: Boolean;
   ActiveNetType: String;
 begin
   // Display server variables
-  vt := Sender as TVirtualStringTree;
+  vt := Sender as TLazVirtualStringTree;
   if vt.Tag = VTREE_LOADED then
     Exit;
   Tab := vt.Parent as TTabSheet;
@@ -12715,7 +12724,7 @@ begin
       LeaveEnabled := Conn.Parameters.NetTypeGroup in [ngMySQL, ngMSSQL, ngPgSQL]
     else if vt = ListStatus then
       LeaveEnabled := Conn.Parameters.NetTypeGroup in [ngMySQL]
-    else if vt = ListProcesses then
+    else if vt = ListProcessList then
       LeaveEnabled := Conn.Parameters.NetTypeGroup in [ngMySQL, ngMSSQL, ngPgSQL]
     else if vt = ListCommandStats then
       LeaveEnabled := Conn.Parameters.NetTypeGroup in [ngMySQL];
@@ -12774,77 +12783,25 @@ begin
     end else if vt = ListStatus then begin
       Results := Conn.GetResults(Conn.SqlProvider.GetSql(qGlobalStatus));
       FStatusServerUptime := Conn.ServerUptime;
-    end else if vt = ListProcesses then begin
-      case Conn.Parameters.NetTypeGroup of
-        ngMySQL: begin
-          if Conn.InformationSchemaObjects.IndexOf('PROCESSLIST') > -1 then begin
-            // Minimize network traffic on newer servers by fetching only first KB of SQL query in "Info" column
-            Columns := Conn.QuoteIdent('ID')+', '+
-              Conn.QuoteIdent('USER')+', '+
-              Conn.QuoteIdent('HOST')+', '+
-              Conn.QuoteIdent('DB')+', '+
-              Conn.QuoteIdent('COMMAND')+', '+
-              Conn.QuoteIdent('TIME')+', '+
-              Conn.QuoteIdent('STATE')+', '+
-              'LEFT('+Conn.QuoteIdent('INFO')+', '+IntToStr(SIZE_KB*50)+') AS '+Conn.QuoteIdent('Info');
-            // Get additional column names into SELECT query and ListProcesses tree
-            IS_objects := Conn.GetDBObjects(Conn.InfSch);
-            for Obj in IS_objects do begin
-              if Obj.Name = 'PROCESSLIST' then begin
-                ProcessColumns := Obj.TableColumns;
-                for i:=8 to ProcessColumns.Count-1 do begin
-                  Columns := Columns + ', '+Conn.QuoteIdent(ProcessColumns[i].Name);
-                  if ListProcesses.Header.Columns.Count <= i then
-                    Col := ListProcesses.Header.Columns.Add
-                  else
-                    Col := ListProcesses.Header.Columns[i];
-                  Col.Options := Col.Options + [coVisible];
-                  Col.Text := ProcessColumns[i].Name;
-                end;
-                // Hide unused tree columns
-                for i:=ListProcesses.Header.Columns.Count-1 downto ProcessColumns.Count do
-                  ListProcesses.Header.Columns[i].Options := ListProcesses.Header.Columns[i].Options - [coVisible];
-                ProcessColumns.Free;
-                break;
-              end;
-            end;
-            Results := Conn.GetResults('SELECT '+Columns+' FROM '+
-              Conn.QuoteIdent(Conn.InfSch)+'.'+Conn.QuoteIdent('PROCESSLIST'));
-          end else begin
-            // Older servers fetch the whole query length, but at least we cut them off below, so a high memory usage is just a peak
-            Results := Conn.GetResults('SHOW FULL PROCESSLIST');
-          end;
-        end;
-        ngMSSQL: begin
-          Results := Conn.GetResults('SELECT '+
-            Conn.QuoteIdent('p')+'.'+Conn.QuoteIdent('spid')+
-            ', RTRIM('+Conn.QuoteIdent('p')+'.'+Conn.QuoteIdent('loginame')+') AS '+Conn.QuoteIdent('loginname')+
-            ', RTRIM('+Conn.QuoteIdent('p')+'.'+Conn.QuoteIdent('hostname')+') AS '+Conn.QuoteIdent('hostname')+
-            ', '+Conn.QuoteIdent('d')+'.'+Conn.QuoteIdent('name')+
-            ', '+Conn.QuoteIdent('p')+'.'+Conn.QuoteIdent('cmd')+
-            ', '+Conn.QuoteIdent('p')+'.'+Conn.QuoteIdent('waittime')+
-            ', RTRIM('+Conn.QuoteIdent('p')+'.'+Conn.QuoteIdent('status')+'), '+
-            'NULL AS '+Conn.QuoteIdent('Info')+' '+
-            'FROM '+Conn.QuoteIdent('sys')+'.'+Conn.QuoteIdent('sysprocesses')+' AS '+Conn.QuoteIdent('p')+
-            ', '+Conn.SqlProvider.GetSql(qDatabaseTable)+' AS '+Conn.QuoteIdent('d')+
-            ' WHERE '+Conn.QuoteIdent('p')+'.'+Conn.QuoteIdent('dbid')+'='+Conn.QuoteIdent('d')+'.'+Conn.SqlProvider.GetSql(qDatabaseTableId)
-            );
-        end;
-        ngPgSQL: begin
-          Results := Conn.GetResults('SELECT '+
-            Conn.QuoteIdent('pid')+
-            ', '+Conn.QuoteIdent('usename')+
-            ', '+Conn.QuoteIdent('client_addr')+
-            ', '+Conn.QuoteIdent('datname')+
-            ', application_name '+
-            ', EXTRACT(EPOCH FROM CURRENT_TIMESTAMP - '+Conn.QuoteIdent('query_start')+')::INTEGER'+
-            ', '+Conn.QuoteIdent('state')+
-            ', '+Conn.QuoteIdent('query')+
-            ' FROM '+Conn.QuoteIdent('pg_stat_activity')
-            );
-        end;
-        else begin
-          raise Exception.CreateFmt(_(MsgUnhandledNetType), [Integer(Conn.Parameters.NetType)]);
+    end else if vt = ListProcessList then begin
+      if not Conn.SqlProvider.Has(qProcessList) then
+        raise Exception.CreateFmt(_(MsgUnhandledNetType), [Integer(Conn.Parameters.NetType)]);
+      // Client program name, sent as connection attribute by HeidiSQL, MySQL Workbench and others. See issue #2019
+      ProgramColumn := 'NULL';
+      if Conn.SqlProvider.Has(qProcessListProgram)
+        and (not Conn.ConnectAttrsQueryFailed)
+        and SameText(Conn.GetSessionVariable('performance_schema'), 'ON') then
+        ProgramColumn := Conn.SqlProvider.GetSql(qProcessListProgram);
+      try
+        Results := Conn.GetResults(Conn.SqlProvider.GetSql(qProcessList, [ProgramColumn]));
+      except
+        on E:EDbError do begin
+          // Most likely missing SELECT privilege on performance_schema. Do not try again on this connection.
+          if ProgramColumn = 'NULL' then
+            raise;
+          Conn.ConnectAttrsQueryFailed := True;
+          Conn.Log(lcError, 'Detection of client program names in process list disabled due to error in query');
+          Results := Conn.GetResults(Conn.SqlProvider.GetSql(qProcessList, ['NULL']));
         end;
       end;
       FProcessListMaxTime := 1;
@@ -12887,13 +12844,13 @@ procedure TMainForm.HostListBeforeCellPaint(Sender: TBaseVirtualTree; TargetCanv
   Node: PVirtualNode; Column: TColumnIndex; CellPaintMode: TVTCellPaintMode; CellRect: TRect;
   var ContentRect: TRect);
 var
-  vt: TVirtualStringTree;
+  vt: TLazVirtualStringTree;
   Val, Max: Extended;
   LoopNode: PVirtualNode;
   SessionVal, GlobalVal: String;
 begin
   PaintAlternatingRowBackground(TargetCanvas, Node, CellRect);
-  vt := Sender as TVirtualStringTree;
+  vt := Sender as TLazVirtualStringTree;
 
   if (Column in [1,2,4..9]) and (vt = ListDatabases) then begin
     // Find out maximum value in column
@@ -12921,7 +12878,7 @@ begin
 
   // Nothing special on Status tab
 
-  if (Column = 5) and (vt = ListProcesses) then begin
+  if (Column = 5) and (vt = ListProcessList) then begin
     PaintColorBar(MakeFloat(vt.Text[Node, Column]), FProcessListMaxTime, TargetCanvas, CellRect);
   end;
 
@@ -12991,7 +12948,7 @@ procedure TMainForm.actCopyGridNodesExecute(Sender: TObject);
 var
   SenderControl: TComponent;
   SenderName: String;
-  Grid: TVirtualStringTree;
+  Grid: TLazVirtualStringTree;
   Header, Body, Line, Data: String;
   Separator, Terminator: String;
   Node: PVirtualNode;
@@ -13005,7 +12962,7 @@ begin
   if SenderControl=nil then
     SenderControl := Screen.ActiveControl;
 
-  if not (SenderControl is TVirtualStringTree) then begin
+  if not (SenderControl is TLazVirtualStringTree) then begin
     if SenderControl=nil then
       SenderName := 'nil'
     else
@@ -13015,7 +12972,7 @@ begin
   end;
 
   Screen.Cursor := crHourGlass;
-  Grid := TVirtualStringTree(SenderControl);
+  Grid := TLazVirtualStringTree(SenderControl);
   // Grid.CopyToClipboard; // Does nothing (?)
 
   Separator := #9;
@@ -13080,8 +13037,8 @@ var
   SenderName, TextCopy: String;
   Edit: TCustomEdit;
   Combo: TCustomComboBox;
-  Grid: TVirtualStringTree;
-  SynMemo: TSynMemo;
+  Grid: TLazVirtualStringTree;
+  SynMemo: TSynEdit;
   DoCut, DoCopyRows: Boolean;
   IsResultGrid, HasNulls: Boolean;
   ClpFormat: Word;
@@ -13118,8 +13075,8 @@ begin
         Clipboard.TryAsText := Combo.SelText;
         if DoCut then Combo.SelText := '';
       end;
-    end else if CurrentControl is TVirtualStringTree then begin
-      Grid := CurrentControl as TVirtualStringTree;
+    end else if CurrentControl is TLazVirtualStringTree then begin
+      Grid := CurrentControl as TLazVirtualStringTree;
       if Assigned(Grid.FocusedNode) then begin
         IsResultGrid := Grid = ActiveGrid;
         FGridCopying := True;
@@ -13154,8 +13111,8 @@ begin
         end;
         FGridCopying := False;
       end;
-    end else if CurrentControl is TSynMemo then begin
-      SynMemo := CurrentControl as TSynMemo;
+    end else if CurrentControl is TSynEdit then begin
+      SynMemo := CurrentControl as TSynEdit;
       if SynMemo.SelAvail then begin
         if DoCut then
           SynMemo.CutToClipboard
@@ -13177,16 +13134,16 @@ end;
 procedure TMainForm.actCopyFormattedExecute(Sender: TObject);
 var
   Exporter: TSynExporterHTML;
-  SynMemo: TSynMemo;
+  SynMemo: TSynEdit;
 begin
   // Copy formatted SQL text to clipboard
-  if not (Screen.ActiveControl is TSynMemo) then begin
+  if not (Screen.ActiveControl is TSynEdit) then begin
     AppBeep(MB_ICONWARNING);
     LogSQL('Active control is not a SynMemo');
     Exit;
   end;
 
-  SynMemo := TSynMemo(Screen.ActiveControl);
+  SynMemo := TSynEdit(Screen.ActiveControl);
   if SynMemo.Highlighter = nil then begin
     AppBeep(MB_ICONWARNING);
     LogSQL('No highlighter assigned to active SynMemo');
@@ -13212,8 +13169,8 @@ var
   Control: TWinControl;
   Edit: TCustomEdit;
   Combo: TComboBox;
-  Grid: TVirtualStringTree;
-  SynMemo: TSynMemo;
+  Grid: TLazVirtualStringTree;
+  SynMemo: TSynEdit;
   Success: Boolean;
 begin
   // Paste text into the focused control
@@ -13233,16 +13190,16 @@ begin
       Combo.SelText := Clipboard.TryAsText;
       Success := True;
     end;
-  end else if Control is TVirtualStringTree then begin
-    Grid := Control as TVirtualStringTree;
+  end else if Control is TLazVirtualStringTree then begin
+    Grid := Control as TLazVirtualStringTree;
     if Assigned(Grid.FocusedNode) and (Grid = ActiveGrid) then begin
       FGridPasting := True;
       Grid.Text[Grid.FocusedNode, Grid.FocusedColumn] := Clipboard.TryAsText;
       Success := True;
       FGridPasting := False;
     end;
-  end else if Control is TSynMemo then begin
-    SynMemo := TSynMemo(Control);
+  end else if Control is TSynEdit then begin
+    SynMemo := TSynEdit(Control);
     if not SynMemo.ReadOnly then begin
       try
         SynMemo.PasteFromClipboard;
@@ -13270,7 +13227,7 @@ end;
 procedure TMainForm.actSelectAllExecute(Sender: TObject);
 var
   Control: TWinControl;
-  Grid: TVirtualStringTree;
+  Grid: TLazVirtualStringTree;
   ListBox: TListBox;
   Success: Boolean;
 begin
@@ -13280,14 +13237,14 @@ begin
   if Control is TCustomEdit then begin
     TCustomEdit(Control).SelectAll;
     Success := True;
-  end else if Control is TVirtualStringTree then begin
-    Grid := TVirtualStringTree(Control);
+  end else if Control is TLazVirtualStringTree then begin
+    Grid := TLazVirtualStringTree(Control);
     if toMultiSelect in Grid.TreeOptions.SelectionOptions then begin
       Grid.SelectAll(False);
       Success := True;
     end;
-  end else if Control is TSynMemo then begin
-    TSynMemo(Control).SelectAll;
+  end else if Control is TSynEdit then begin
+    TSynEdit(Control).SelectAll;
     Success := True;
   end else if Control is TListBox then begin
     ListBox := TListBox(Control);
@@ -13304,7 +13261,7 @@ end;
 procedure TMainForm.actSelectInverseExecute(Sender: TObject);
 var
   Control: TWinControl;
-  Grid: TVirtualStringTree;
+  Grid: TLazVirtualStringTree;
   ListBox: TListBox;
   Success: Boolean;
   i: Integer;
@@ -13312,8 +13269,8 @@ begin
   // Invert selection in grids or listboxes
   Success := False;
   Control := Screen.ActiveControl;
-  if Control is TVirtualStringTree then begin
-    Grid := TVirtualStringTree(Control);
+  if Control is TLazVirtualStringTree then begin
+    Grid := TLazVirtualStringTree(Control);
     if toMultiSelect in Grid.TreeOptions.SelectionOptions then begin
       Grid.InvertSelection(False);
       Success := True;
@@ -13496,10 +13453,10 @@ end;
 procedure TMainForm.ListTablesDblClick(Sender: TObject);
 var
   Obj: PDBObject;
-  vt: TVirtualStringTree;
+  vt: TLazVirtualStringTree;
 begin
   // DoubleClick: Display editor
-  vt := Sender as TVirtualStringTree;
+  vt := Sender as TLazVirtualStringTree;
   if Assigned(vt.FocusedNode) then begin
     Obj := vt.GetNodeData(vt.FocusedNode);
     ActiveDBObj := Obj^;
@@ -13543,7 +13500,7 @@ begin
     QueryTab.pnlMemo.Height := AppSettings.GetDefaultInt(asQuerymemoheight);
   QueryTab.pnlMemo.Constraints := pnlQueryMemo.Constraints;
 
-  QueryTab.Memo := TSynMemo.Create(QueryTab.pnlMemo);
+  QueryTab.Memo := TSynEdit.Create(QueryTab.pnlMemo);
   QueryTab.Memo.Name := SynMemoQuery.Name + i.ToString;
   QueryTab.Memo.Text := '';
   QueryTab.Memo.Parent := QueryTab.pnlMemo;
@@ -13850,7 +13807,7 @@ end;
 procedure TMainForm.CloseQueryTab(PageIndex: Integer);
 var
   NewPageIndex: Integer;
-  Grid: TVirtualStringTree;
+  Grid: TLazVirtualStringTree;
 begin
   // Special case: the very first tab gets cleared but not closed
   if PageIndex = tabQuery.PageIndex then begin
@@ -14258,14 +14215,14 @@ begin
 end;
 
 
-function TMainForm.ActiveSynMemo(AcceptReadOnlyMemo: Boolean): TSynMemo;
+function TMainForm.ActiveSynMemo(AcceptReadOnlyMemo: Boolean): TSynEdit;
 var
   Control: TWinControl;
 begin
   Result := nil;
   Control := Screen.ActiveControl;
   if Control is TCustomSynEdit then begin
-    Result := Control as TSynMemo;
+    Result := Control as TSynEdit;
     // We have a few readonly-SynMemos which we'll ignore here
     if (not AcceptReadOnlyMemo) and Result.ReadOnly then
       Result := nil;
@@ -14279,7 +14236,7 @@ begin
 end;
 
 
-function TMainForm.ActiveGrid: TVirtualStringTree;
+function TMainForm.ActiveGrid: TLazVirtualStringTree;
 begin
   // Return current data or query grid, if main form is active
   Result := nil;
@@ -14545,12 +14502,12 @@ procedure TMainform.SetupSynEditors;
 var
   i, j: Integer;
   Editors: TComponentList;
-  BaseEditor: TSynMemo;
+  BaseEditor: TSynEdit;
   KeyStroke: TSynEditKeyStroke;
   Attri: TSynHighlighterAttributes;
   Shortcut1, Shortcut2: TShortcut;
 begin
-  // Setup all known TSynMemo's
+  // Setup all known TSynEdit's
   // This version includes global settings for keyboard shortcut, highlighting and completion proposal
   Editors := TComponentList.Create(False);
   BaseEditor := SynMemoQuery;
@@ -14607,7 +14564,7 @@ begin
   end;
   // Apply events and options to all known editors
   for i:=0 to Editors.Count-1 do begin
-    SetupSynEditor(Editors[i] as TSynMemo);
+    SetupSynEditor(Editors[i] as TSynEdit);
   end;
   Editors.Free;
   // Highlighting
@@ -14631,7 +14588,7 @@ var
   Editors: TComponentList;
   i: Integer;
 begin
-  // Restore font, highlighter and shortcuts for all TSynMemo's in given base form
+  // Restore font, highlighter and shortcuts for all TSynEdit's in given base form
   Editors := TComponentList.Create(False);
   FindComponentInstances(BaseForm, TSynEdit, Editors);
   for i:=0 to Editors.Count-1 do begin
@@ -14641,15 +14598,15 @@ begin
 end;
 
 
-procedure TMainForm.SetupSynEditor(Editor: TSynMemo);
+procedure TMainForm.SetupSynEditor(Editor: TSynEdit);
 var
-  BaseEditor: TSynMemo;
+  BaseEditor: TSynEdit;
   LineNumberPart: TSynGutterLineNumber;
   CodeFoldingPart: TSynGutterCodeFolding;
   FontName: String;
   MarkupWordSelection: TMarkupWordSelection;
 begin
-  LogSQL('Setting up TSynMemo "'+Editor.Name+'"', lcDebug);
+  LogSQL('Setting up TSynEdit "'+Editor.Name+'"', lcDebug);
   BaseEditor := SynMemoQuery;
   Editor.Color := GetThemeColor(clWindow);
   //Editor.ScrollHintColor := GetThemeColor(clInfoBk);
@@ -14780,7 +14737,7 @@ var
   ColumnNames, DefaultValues: TStringList;
   KeyColumns: TTableColumnList;
   Column: TTableColumn;
-  Tree: TVirtualStringTree;
+  Tree: TLazVirtualStringTree;
   Node: PVirtualNode;
 begin
   // Generate SELECT, INSERT, UPDATE or DELETE query using selected columns
@@ -14927,10 +14884,10 @@ end;
 
 procedure TMainForm.DBtreeChange(Sender: TBaseVirtualTree; Node: PVirtualNode);
 var
-  VT: TVirtualStringTree;
+  VT: TLazVirtualStringTree;
 begin
   // Resize "Size" column in dbtree to hold widest possible byte numbers without cutting text
-  VT := Sender as TVirtualStringTree;
+  VT := Sender as TLazVirtualStringTree;
   if (VT.Header.Columns.Count >= 2) and (coVisible in VT.Header.Columns[1].Options) then
     VT.Header.Columns[1].Width := VT.Canvas.TextWidth(FormatByteNumber(SIZE_MB*100)) + VT.TextMargin*2 + 8;
 end;
@@ -14970,7 +14927,7 @@ begin
   Conn := ActiveConnection;
   actNewQueryTabExecute(Sender);
   Tab := QueryTabs[QueryTabs.Count-1];
-  UsedDatabase := listProcesses.Text[listProcesses.FocusedNode, 3];
+  UsedDatabase := ListProcessList.Text[ListProcessList.FocusedNode, 3];
   if not UsedDatabase.IsEmpty then begin
     Tab.Memo.Lines.Add(Conn.SqlProvider.GetSql(qUSEQuery, [Conn.QuoteIdent(UsedDatabase)]) + ';');
   end;
@@ -14983,7 +14940,7 @@ end;
 procedure TMainForm.UpdateLineCharPanel;
 var
   x, y: Int64;
-  Grid: TVirtualStringTree;
+  Grid: TLazVirtualStringTree;
   AppendMsg: String;
 begin
   // Fill panel with "Line:Char"
@@ -15269,10 +15226,10 @@ end;
 
 procedure TMainForm.treeQueryHelpersResize(Sender: TObject);
 var
-  Tree: TVirtualStringTree;
+  Tree: TLazVirtualStringTree;
 begin
   // Resizing query helpers box: Keep second column at a minimum width.
-  Tree := Sender as TVirtualStringTree;
+  Tree := Sender as TLazVirtualStringTree;
   if Tree.Header.Columns.Count >= 2 then begin
     // See https://github.com/HeidiSQL/HeidiSQL/issues/466
     // Column count may be 0 in an early stage of creating a new query tab
@@ -15283,7 +15240,7 @@ end;
 
 procedure TMainForm.treeQueryHelpersDblClick(Sender: TObject);
 var
-  m: TSynMemo;
+  m: TSynEdit;
 begin
   m := QueryTabs.ActiveMemo;
   m.DragDrop(Sender, m.CaretX, m.CaretY);
@@ -15304,10 +15261,10 @@ end;
 procedure TMainForm.treeQueryHelpersFocusChanging(Sender: TBaseVirtualTree; OldNode,
   NewNode: PVirtualNode; OldColumn, NewColumn: TColumnIndex; var Allowed: Boolean);
 var
-  Tree: TVirtualStringTree;
+  Tree: TLazVirtualStringTree;
 begin
   // Disable multi selection when snippet node is focused
-  Tree := Sender as TVirtualStringTree;
+  Tree := Sender as TLazVirtualStringTree;
   if not Assigned(NewNode) then
     Exit;
   if (Tree.GetNodeLevel(NewNode) = 0) or
@@ -15512,10 +15469,10 @@ end;
 procedure TMainForm.treeQueryHelpersNewText(Sender: TBaseVirtualTree;
   Node: PVirtualNode; Column: TColumnIndex; NewText: string);
 var
-  Tree: TVirtualStringTree;
+  Tree: TLazVirtualStringTree;
   QueryTab: TQueryTab;
 begin
-  Tree:= Sender as TVirtualStringTree;
+  Tree:= Sender as TLazVirtualStringTree;
   QueryTab := QueryTabs.ActiveTab;
 
   // Save new param value
@@ -15528,9 +15485,9 @@ end;
 procedure TMainForm.treeQueryHelpersNodeClick(Sender: TBaseVirtualTree;
   const HitInfo: THitInfo);
 var
-  Tree: TVirtualStringTree;
+  Tree: TLazVirtualStringTree;
 begin
-  Tree := Sender as TVirtualStringTree;
+  Tree := Sender as TLazVirtualStringTree;
   // If the column is clicked a parameter value, it goes directly into the edit mode
   if (HitInfo.HitNode.Parent.Index = TQueryTab.HelperNodeBinding) and (HitInfo.HitColumn = 1) then
     Tree.EditNode(Sender.FocusedNode,Sender.FocusedColumn);
@@ -15639,9 +15596,9 @@ procedure TMainForm.treeQueryHelpersChecking(Sender: TBaseVirtualTree;
   Node: PVirtualNode; var NewState: TCheckState; var Allowed: Boolean);
 var
   Tab: TQueryTab;
-  Tree: TVirtualStringTree;
+  Tree: TLazVirtualStringTree;
 begin
-  Tree := Sender as TVirtualStringTree;
+  Tree := Sender as TLazVirtualStringTree;
   Tab := QueryTabs.TabByControl(Sender);
 
   case Sender.GetNodeLevel(Node) of
@@ -15679,9 +15636,9 @@ end;
 procedure TMainForm.treeQueryHelpersContextPopup(Sender: TObject; MousePos: TPoint;
   var Handled: Boolean);
 var
-  Tree: TVirtualStringTree;
+  Tree: TLazVirtualStringTree;
 begin
-  Tree := Sender as TVirtualStringTree;
+  Tree := Sender as TLazVirtualStringTree;
   menuQueryHelpersGenerateSelect.Enabled := False;
   menuQueryHelpersGenerateInsert.Enabled := False;
   menuQueryHelpersGenerateUpdate.Enabled := False;
@@ -15743,9 +15700,9 @@ procedure TMainForm.treeQueryHelpersCreateEditor(Sender: TBaseVirtualTree;
   Node: PVirtualNode; Column: TColumnIndex; out EditLink: IVTEditLink);
 var
  InplaceEditor: TInplaceEditorLink;
- VT: TVirtualStringTree;
+ VT: TLazVirtualStringTree;
 begin
-  VT := Sender as TVirtualStringTree;
+  VT := Sender as TLazVirtualStringTree;
   InplaceEditor := TInplaceEditorLink.Create(VT, True, nil);
   InplaceEditor.ButtonVisible := true;
   EditLink := InplaceEditor;
@@ -15942,7 +15899,7 @@ begin
     HintInfo.ReshowTimeout := 1000;
   end
 
-  else if HintInfo.HintControl is TSynMemo then begin
+  else if HintInfo.HintControl is TSynEdit then begin
     // Token hint displaying through SynEdit's OnShowHint event
     NewHideTimeout := Min(Length(HintStr) * 100, 60*1000);
     if NewHideTimeout > HintInfo.HideTimeout then
@@ -15993,7 +15950,7 @@ end;
 
 procedure TMainForm.actToggleCommentExecute(Sender: TObject);
 var
-  Editor: TSynMemo;
+  Editor: TSynEdit;
   rx: TRegExpr;
   Sel: TStringList;
   i: Integer;
@@ -16602,7 +16559,7 @@ begin
 end;
 
 
-function TQueryTabList.ActiveMemo: TSynMemo;
+function TQueryTabList.ActiveMemo: TSynEdit;
 var
   Tab: TQueryTab;
 begin
@@ -16614,7 +16571,7 @@ begin
 end;
 
 
-function TQueryTabList.ActiveHelpersTree: TVirtualStringTree;
+function TQueryTabList.ActiveHelpersTree: TLazVirtualStringTree;
 var
   Tab: TQueryTab;
 begin
@@ -16669,7 +16626,7 @@ end;
 constructor TResultTab.Create(AOwner: TQueryTab);
 var
   QueryTab: TQueryTab;
-  OrgGrid: TVirtualStringTree;
+  OrgGrid: TLazVirtualStringTree;
 begin
   inherited Create;
   QueryTab := AOwner;
