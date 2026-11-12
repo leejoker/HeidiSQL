@@ -15,7 +15,8 @@ uses
   LazStringUtils, dbconnection, dbstructures, dbstructures.mysql, generic_types,
   apphelpers, extra_controls, createdatabase, SynEditMarkup, SynEditMarkupBracket,
   searchreplace, ImgList, IniFiles, LazFileUtils, LazUTF8, tabletools,
-  lazaruscompat, extfiledialog, process, SynEditMiscClasses, Contnrs, SynExportHTML
+  lazaruscompat, extfiledialog, process, SynEditMiscClasses, Contnrs, SynExportHTML,
+  progress_dialog
   {$IFDEF WINDOWS}, ComObj{$ENDIF};
 
 
@@ -1390,7 +1391,7 @@ type
     procedure OpenQueryFiles(Filenames: TStrings; Encoding: TEncoding; ForceRun: Boolean);
     function RunQueryFiles(Filenames: TStrings; Encoding: TEncoding; ForceRun: Boolean): Boolean;
     function RunQueryFile(Filename: String; Encoding: TEncoding; Conn: TDBConnection;
-      FilesizeSum: Int64; var CurrentPosition: Int64): Boolean;
+      ProgressDialog: TfrmProgress; FilesizeSum: Int64; var CurrentPosition: Int64): Boolean;
     procedure SetLogToFile(Value: Boolean);
     procedure StoreLastSessions;
     function HandleUnixTimestampColumn(Sender: TBaseVirtualTree; Column: TColumnIndex): Boolean;
@@ -1494,14 +1495,6 @@ var
 
 const
   CheckedStates = [csCheckedNormal, csCheckedPressed, csMixedNormal, csMixedPressed];
-  ErrorLineForeground: TColor = $00000000;
-  ErrorLineBackground: TColor = $00D2B7FF;
-  WarningLineForeground: TColor = $00000000;
-  WarningLineBackground: TColor = $00B7CDFF;
-  NoteLineForeground: TColor = $00000000;
-  NoteLineBackground: TColor = $00D3F7FF;
-  InfoLineForeground: TColor = $00000000;
-  InfoLineBackground: TColor = $00C6FFEC;
 
 {$I const.inc}
 
@@ -2094,6 +2087,8 @@ begin
     Width := AppSettings.ReadInt(asMainWinWidth);
     Height := AppSettings.ReadInt(asMainWinHeight);
   end;
+  // Saved position may lie on a monitor which is no longer attached
+  MoveIntoVisibleArea;
 
   actQueryStopOnErrors.Checked := AppSettings.ReadBool(asStopOnErrorsInBatchMode);
   actBlobAsText.Checked := AppSettings.ReadBool(asDisplayBLOBsAsText);
@@ -4365,6 +4360,7 @@ var
   Btn: TTaskDialogButtonItem;
   DialogResult: TModalResult;
   Conn: TDBConnection;
+  ProgressDialog: TfrmProgress;
   TimeElapsed: Double;
   RunSuccess: Boolean;
 const
@@ -4429,14 +4425,20 @@ begin
         StartTime := GetTickCount64;
         Conn := ActiveConnection;
         RunSuccess := False;
-        for i:=0 to Filenames.Count-1 do begin
-          RunSuccess := RunQueryFile(Filenames[i], Encoding, Conn, FilesizeSum, CurrentPosition);
-          // Add filename to history menu
-          if Pos(AppSettings.DirnameSnippets, Filenames[i]) = 0 then
-            MainForm.AddOrRemoveFromQueryLoadHistory(Filenames[i], True, True);
-          Inc(FilesProcessed);
-          if not RunSuccess then
-            Break;
+        ProgressDialog := TfrmProgress.Create(Self);
+        try
+          ProgressDialog.Start;
+          for i:=0 to Filenames.Count-1 do begin
+            RunSuccess := RunQueryFile(Filenames[i], Encoding, Conn, ProgressDialog, FilesizeSum, CurrentPosition);
+            // Add filename to history menu
+            if Pos(AppSettings.DirnameSnippets, Filenames[i]) = 0 then
+              MainForm.AddOrRemoveFromQueryLoadHistory(Filenames[i], True, True);
+            Inc(FilesProcessed);
+            if not RunSuccess then
+              Break;
+          end;
+        finally
+          ProgressDialog.Free;
         end;
         TimeElapsed := GetTickCount64 - StartTime;
         LogSQL(f_('%s file(s) processed, in %s', [FormatNumber(FilesProcessed), FormatTimeNumber(TimeElapsed/1000, True)]));
@@ -4458,10 +4460,10 @@ end;
 
 
 function TMainForm.RunQueryFile(FileName: String; Encoding: TEncoding; Conn: TDBConnection;
-  FilesizeSum: Int64; var CurrentPosition: Int64): Boolean;
+  ProgressDialog: TfrmProgress; FilesizeSum: Int64; var CurrentPosition: Int64): Boolean;
 var
   Stream: TFileStream;
-  Lines, LinesRemain: String;
+  Lines, LinesRemain, ErrorNotice: String;
   Filesize, QueryCount, ErrorCount, RowsAffected: Int64;
   Queries: TSQLBatch;
   i: Integer;
@@ -4470,21 +4472,27 @@ var
   var
     MessageText: String;
   begin
+    ProgressDialog.SetLine(1, _('Clean up ...'), True);
     Queries.Free;
     try
       Stream.Free;
     except; // Eat error when stream wasn't yet created properly
     end;
     // BringToFront; // Not sure why I added this initially, but it steals focus from other applications
-    MessageText := 'File "%s" executed, with %s queries and %s affected rows';
+    if ProgressDialog.HasUserCancelled then
+      MessageText := 'File "%s" partially executed, with %s queries and %s affected rows'
+    else
+      MessageText := 'File "%s" executed, with %s queries and %s affected rows';
     LogSQL(f_(MessageText, [ExtractFileName(FileName), FormatNumber(QueryCount), FormatNumber(RowsAffected)]));
   end;
 
 begin
-  // Import single SQL file
+  // Import single SQL file and display progress dialog
+  ProgressDialog.SetTitle(f_('Importing file %s', [ExtractFileName(FileName)]));
 
   Result := True;
   Lines := '';
+  ErrorNotice := '';
   QueryCount := 0;
   ErrorCount := 0;
   RowsAffected := 0;
@@ -4497,18 +4505,24 @@ begin
 
     OpenTextfile(FileName, Stream, Encoding);
     while Stream.Position < Stream.Size do begin
+      if ProgressDialog.HasUserCancelled then
+        Break;
 
       // Read lines from SQL file until buffer reaches a limit of some MB
       // This strategy performs vastly better than looping through each line
+      ProgressDialog.SetLine(1, _('Reading next chunk from file...'), True);
       Lines := ReadTextfileChunk(Stream, Encoding, 20*SIZE_MB);
 
       // Split buffer into single queries
+      ProgressDialog.SetLine(1, _('Splitting queries...'), True);
       Queries.SQL := LinesRemain + Lines;
       Lines := '';
       LinesRemain := '';
 
       // Execute detected queries
       for i:=0 to Queries.Count-1 do begin
+        if ProgressDialog.HasUserCancelled then
+          Break;
         // Last line has to be processed in next loop if end of file is not reached
         if (i = Queries.Count-1) and (Stream.Position < Stream.Size) then begin
           LinesRemain := Queries[i].SQL;
@@ -4516,6 +4530,12 @@ begin
         end;
         Inc(QueryCount);
         Inc(CurrentPosition, Encoding.GetByteCount(Queries[i].SQL));
+        if ErrorCount > 0 then
+          ErrorNotice := '(' + FormatNumber(ErrorCount) + ' ' + _('Errors') + ')';
+        ProgressDialog.SetLine(1, f_('Processing query #%s. %s', [FormatNumber(QueryCount), ErrorNotice]));
+        ProgressDialog.SetLine(2, f_('Position in file: %s / %s. Affected rows: %s.',
+          [FormatByteNumber(CurrentPosition), FormatByteNumber(Filesize), FormatNumber(RowsAffected)]));
+        ProgressDialog.SetProgress(CurrentPosition, FilesizeSum);
 
         // Execute single query
         // Break or don't break loop, depending on the state of "Stop on errors" button
@@ -4527,12 +4547,19 @@ begin
           on E:Exception do begin
             if actQueryStopOnErrors.Checked then
               raise
-            else
+            else begin
               Inc(ErrorCount);
+              if ProgressDialog.State = pbsNormal then
+                ProgressDialog.SetState(pbsError);
+            end;
           end;
         end;
 
       end;
+    end;
+    if ProgressDialog.HasUserCancelled then begin
+      LogSQL(_('Cancelled by user'));
+      Result := False;
     end;
     StopProgress;
     if ErrorCount > 0 then begin
@@ -7679,8 +7706,8 @@ begin
     Exit;
   if Line = Tab.ErrorLine then begin
     Special := True;
-    Markup.Foreground := ErrorLineForeground;
-    Markup.Background := ErrorLineBackground;
+    Markup.Foreground := AppColorSchemes.First.ErrorLineForeground;
+    Markup.Background := AppColorSchemes.First.ErrorLineBackground;
   end;
 end;
 
@@ -7690,32 +7717,34 @@ procedure TMainForm.SynMemoSQLLogSpecialLineMarkup(Sender: TObject;
 var
   Edit: TSynEdit;
   LineText, Search: String;
+  Scheme: TAppColorScheme;
 begin
   // Paint error line with red background, or warning in orange
   Edit := Sender as TSynEdit;
+  Scheme := AppColorSchemes.First;
   LineText := Copy(Edit.Lines[Line-1], 1, 100);
   Search := _(MsgSQLError);
   Search := Copy(Search, 1, Pos('%', Search)-1);
   //Logsql(LineText+' ::: '+Search);
   if LineText.Contains(Search) then begin
     Special := True;
-    Markup.Foreground := ErrorLineForeground;
-    Markup.Background := ErrorLineBackground;
+    Markup.Foreground := Scheme.ErrorLineForeground;
+    Markup.Background := Scheme.ErrorLineBackground;
   end
   else if LineText.Contains(_(SLogPrefixWarning)+':') then begin
     Special := True;
-    Markup.Foreground := WarningLineForeground;
-    Markup.Background := WarningLineBackground;
+    Markup.Foreground := Scheme.WarningLineForeground;
+    Markup.Background := Scheme.WarningLineBackground;
   end
   else if LineText.Contains(_(SLogPrefixNote)+':') then begin
     Special := True;
-    Markup.Foreground := NoteLineForeground;
-    Markup.Background := NoteLineBackground;
+    Markup.Foreground := Scheme.NoteLineForeground;
+    Markup.Background := Scheme.NoteLineBackground;
   end
   else if LineText.Contains(_(SLogPrefixInfo)+':') then begin
     Special := True;
-    Markup.Foreground := InfoLineForeground;
-    Markup.Background := InfoLineBackground;
+    Markup.Foreground := Scheme.InfoLineForeground;
+    Markup.Background := Scheme.InfoLineBackground;
   end;
 end;
 
