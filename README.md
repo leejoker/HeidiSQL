@@ -85,11 +85,44 @@ Ansgar
 `make build-installer`：通过 Wine 调用 Inno Setup 7 的 `ISCC.exe` 构建 Windows 安装包，
 需先执行 `make build-win64` 生成 `out/win64/heidisql.exe`。
 
+### 6. Lazarus 5 工具链适配（fixes_5）
+
+本仓库构建工具链通过 `fpcupdeluxe`（`upbuild.sh`）跟踪 Lazarus `fixes_5` 分支（当前
+5.0.2）。Lazarus 5 将 SynEdit 高亮属性重构为新的类型层次：
+`TSynCustomHighlighter.Attribute[]` 返回基类 `TLazEditTextAttribute`，而
+`TSynHighlighterAttributes` 变为 `TLazEditHighlighterAttributes` 的废弃别名。本 fork
+已将源码适配到新 API（commit `dc4980c7`）：
+
+- `source/lazaruscompat.pas`：定义 `THeidiSynHighlighterAttributes = TLazEditTextAttribute`
+  别名，`TSynHighlighterAttributesHelper` 指向该别名，并重新导出被同名垫片遮蔽的
+  `IntegerStyle`。
+- `preferences` / `main` / `generic_types` / `customize_highlighter` 中的高亮属性变量
+  均改用该别名声明。
+
+注意：
+
+- 本分支源码需 **Lazarus 5（fixes_5）** 编译；上游 CI 仍基于 Lazarus 4.8（旧类型层次），
+  本分支在其下无法编译，待上游迁移到 Lazarus 5 后自然对齐。
+- 工具链升级后务必全量重建（`make clean` 或删除 `bin/lib/` 后 `lazbuild -B`），
+  否则旧 `.ppu` 可能因增量编译侥幸通过而掩盖 API 变化。
+- FPC 的 `uses` 子句内 `$IF` 无法引用单元常量（如 `laz_fullversion`），故未采用
+  按版本条件引用 `LazEditTextAttributes` 的写法，而是直接依赖 Lazarus 5。
+
 ---
 
 ### Building
 Install Lazarus 4.8 and FreePascal. Then load the `.lpi` file in the root directory in the Lazarus IDE.
 Alternatively, use `/usr/bin/lazbuild heidisql.lpi` on the command line.
+
+> **本 fork 注意**：`lazarus` 分支源码已适配 Lazarus 5（fixes_5，见上文第 6 节），
+> 本地构建请安装 Lazarus 5 而非 4.8。构建命令：
+>
+> ```bash
+> export PATH=/data/fpc_tools/fpc/bin/x86_64-linux:/data/fpc_tools/lazarus:$PATH
+> /data/fpc_tools/lazarus/lazbuild \
+>   --primary-config-path=/data/fpc_tools/config_lazarus \
+>   -B --bm=Release --ws=qt6 heidisql.lpi
+> ```
 
 ### Patching Lazarus 4.8
 Local fixes for Lazarus 4.8 live in `extra/lazarus-patches/4.8/`. The CI applies all of them to the
