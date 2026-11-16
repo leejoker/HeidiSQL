@@ -286,7 +286,7 @@ type
       FCategories: TStringList;
       FNames: TStringList;
     public
-      constructor Create(AOwner: TDBConnection; SQLFunctionsFileOrder: String);
+      constructor Create(AOwner: TDBConnection; SQLFunctionsFile: String);
       property Categories: TStringList read FCategories;
       property Names: TStringList read FNames;
   end;
@@ -1185,7 +1185,7 @@ begin
   else
     TargetHost := TargetHost + FConnection.Parameters.Hostname;
 
-  SshCmd := FConnection.Parameters.SSHExe;
+  SshCmd := GetOutputFilename(FConnection.Parameters.SSHExe, nil, False);
   EnvSshpass := '';
   if FConnection.Parameters.SshIsPlink then begin
     SshCmd := SshCmd + ' -ssh ' + TargetHost;
@@ -1194,7 +1194,7 @@ begin
     if FConnection.Parameters.SSHPort > 0 then
       SshCmd := SshCmd + ' -P ' + IntToStr(FConnection.Parameters.SSHPort);
     if FConnection.Parameters.SSHPrivateKey <> '' then
-      SshCmd := SshCmd + ' -i "' + FConnection.Parameters.SSHPrivateKey + '"';
+      SshCmd := SshCmd + ' -i "' + GetOutputFilename(FConnection.Parameters.SSHPrivateKey, nil) + '"';
     SshCmd := SshCmd + ' -N -L ' + IntToStr(FConnection.Parameters.SSHLocalPort) + ':' + FConnection.Parameters.Hostname + ':' + IntToStr(FConnection.Parameters.Port);
   end else begin
     if FConnection.Parameters.SSHPassword <> '' then
@@ -1202,7 +1202,7 @@ begin
     if FConnection.Parameters.SSHPort > 0 then
       SshCmd := SshCmd + ' -p ' + IntToStr(FConnection.Parameters.SSHPort);
     if FConnection.Parameters.SSHPrivateKey <> '' then
-      SshCmd := SshCmd + ' -i "' + FConnection.Parameters.SSHPrivateKey + '"';
+      SshCmd := SshCmd + ' -i "' + GetOutputFilename(FConnection.Parameters.SSHPrivateKey, nil) + '"';
     // OpenSSH options must be placed before the destination host.
     SshCmd := SshCmd + ' -o StrictHostKeyChecking=no -o IgnoreUnknown=WarnWeakCrypto -o WarnWeakCrypto=no-pq-kex -o ExitOnForwardFailure=yes -o ServerAliveInterval=60 -o ServerAliveCountMax=3 -o LogLevel=error';
     SshCmd := SshCmd + ' -N -L ' + IntToStr(FConnection.Parameters.SSHLocalPort) + ':' + FConnection.Parameters.Hostname + ':' + IntToStr(FConnection.Parameters.Port) + ' ' + TargetHost;
@@ -1841,7 +1841,7 @@ end;
 
 function TConnectionParameters.SshIsPlink: Boolean;
 begin
-  Result := ExecRegExprI('([pk]link|putty)', FSSHExe);
+  Result := ExecRegExprI('([pk]link|putty)', GetOutputFilename(FSSHExe, nil, False));
 end;
 
 function TConnectionParameters.GetImageIndex: Integer;
@@ -1967,11 +1967,11 @@ begin
   if WantSSL then
     Args.Add('--ssl');
   if not SSLPrivateKey.IsEmpty then
-    Args.Add('--ssl-key="'+SSLPrivateKey+'"');
+    Args.Add('--ssl-key="'+GetOutputFilename(SSLPrivateKey, nil)+'"');
   if not SSLCertificate.IsEmpty then
-    Args.Add('--ssl-cert="'+SSLCertificate+'"');
+    Args.Add('--ssl-cert="'+GetOutputFilename(SSLCertificate, nil)+'"');
   if not SSLCACertificate.IsEmpty then
-    Args.Add('--ssl-ca="'+SSLCACertificate+'"');
+    Args.Add('--ssl-ca="'+GetOutputFilename(SSLCACertificate, nil)+'"');
 
   case NetType of
     ntMySQL_NamedPipe: begin
@@ -2536,11 +2536,11 @@ begin
         SetOption(FLib.MARIADB_OPT_TLS_VERSION, PAnsiChar(TlsVersions));
       SetOption(FLib.MYSQL_OPT_TLS_VERSION, PAnsiChar(TlsVersions));
       if FParameters.SSLPrivateKey <> '' then
-        SetOption(FLib.MYSQL_OPT_SSL_KEY, PAnsiChar(AnsiString(FParameters.SSLPrivateKey)));
+        SetOption(FLib.MYSQL_OPT_SSL_KEY, PAnsiChar(AnsiString(GetOutputFilename(FParameters.SSLPrivateKey, nil))));
       if FParameters.SSLCertificate <> '' then
-        SetOption(FLib.MYSQL_OPT_SSL_CERT, PAnsiChar(AnsiString(FParameters.SSLCertificate)));
+        SetOption(FLib.MYSQL_OPT_SSL_CERT, PAnsiChar(AnsiString(GetOutputFilename(FParameters.SSLCertificate, nil))));
       if FParameters.SSLCACertificate <> '' then
-        SetOption(FLib.MYSQL_OPT_SSL_CA, PAnsiChar(AnsiString(FParameters.SSLCACertificate)));
+        SetOption(FLib.MYSQL_OPT_SSL_CA, PAnsiChar(AnsiString(GetOutputFilename(FParameters.SSLCACertificate, nil))));
       if FParameters.SSLCipher <> '' then
         SetOption(FLib.MYSQL_OPT_SSL_CIPHER, PAnsiChar(AnsiString(FParameters.SSLCipher)));
       if not FLib.IsLibMariadb then begin
@@ -2922,11 +2922,11 @@ begin
         2: ConnectOptions.Values['sslmode'] := 'verify-full';
       end;
       if FParameters.SSLPrivateKey <> '' then
-        ConnectOptions.AddPair('sslkey', FParameters.SSLPrivateKey);
+        ConnectOptions.AddPair('sslkey', GetOutputFilename(FParameters.SSLPrivateKey, nil));
       if FParameters.SSLCertificate <> '' then
-        ConnectOptions.AddPair('sslcert', FParameters.SSLCertificate);
+        ConnectOptions.AddPair('sslcert', GetOutputFilename(FParameters.SSLCertificate, nil));
       if FParameters.SSLCACertificate <> '' then
-        ConnectOptions.AddPair('sslrootcert', FParameters.SSLCACertificate);
+        ConnectOptions.AddPair('sslrootcert', GetOutputFilename(FParameters.SSLCACertificate, nil));
       //if FParameters.SSLCipher <> '' then ??
     end;
     ConnectionString := '';
@@ -3013,6 +3013,8 @@ var
 begin
   // Support multiple filenames, and use first one as main database
   FileNames := Explode(DELIM, Parameters.Hostname);
+  for i:=0 to FileNames.Count-1 do
+    FileNames[i] := GetOutputFilename(FileNames[i], nil);
   // Do not use IfThen() here, as it evaluates FileNames[0] eagerly, which crashes on an empty list
   if FileNames.Count >= 1 then
     MainFile := FileNames[0]
@@ -3206,7 +3208,12 @@ begin
         // Empty hostname makes the client use the local connection protocol
       end;
     end;
-    FHandle.DatabaseName := Parameters.AllDatabasesStr;
+    // Variables are resolved on the client, which is only valid for a local server.
+    // Relative values stay untouched, they may be aliases from databases.conf.
+    if Parameters.NetType in [ntInterbase_Local, ntFirebird_Local] then
+      FHandle.DatabaseName := GetOutputFilename(Parameters.AllDatabasesStr, nil, False)
+    else
+      FHandle.DatabaseName := Parameters.AllDatabasesStr;
     FHandle.CharSet := 'UTF8';
 
     try
@@ -3441,8 +3448,7 @@ var
   TypeOid: String;
   AllEnums: TDBQuery;
   AllEnumsList: TStringList;
-  SQLFunctionsFileOrder: String;
-  MajorMinorVer, MajorVer: String;
+  SQLFunctionsFile: String;
   StartupScript: String;
   StartupBatch: TSQLBatch;
   SqlQuery: TSQLSentence;
@@ -3501,26 +3507,26 @@ begin
     FKeepAliveTimer.OnTimer := KeepAliveTimerEvent;
   end;
 
-  MajorMinorVer := RegExprGetMatch('^(\d+\.\d+)', ServerVersionStr, 1);
-  MajorVer := RegExprGetMatch('^(\d+)\.', ServerVersionStr, 1);
-
+  // One function list per server type, version specific functions are filtered by their since/until keys
   if FParameters.IsMariaDB then
-    SQLFunctionsFileOrder := 'mariadb'+MajorMinorVer+',mariadb'+MajorVer+',mariadb,mysql'
+    SQLFunctionsFile := 'mariadb'
   else if FParameters.IsAnyMySQL then
-    SQLFunctionsFileOrder := 'mysql'+MajorMinorVer+',mysql'+MajorVer+',mysql'
+    SQLFunctionsFile := 'mysql'
   else if FParameters.IsRedshift then
-    SQLFunctionsFileOrder := 'redshift'+MajorMinorVer+',redshift'+MajorVer+',redshift,postgresql'
+    SQLFunctionsFile := 'redshift'
   else if FParameters.IsAnyPostgreSQL then
-    SQLFunctionsFileOrder := 'postgresql'+MajorMinorVer+',postgresql'+MajorVer+',postgresql'
+    SQLFunctionsFile := 'postgresql'
   else if FParameters.IsAnyMSSQL then
-    SQLFunctionsFileOrder := 'mssql'+MajorMinorVer+',mssql'+MajorVer+',mssql'
+    SQLFunctionsFile := 'mssql'
   else if FParameters.IsAnySQLite then
-    SQLFunctionsFileOrder := 'sqlite'+MajorMinorVer+',sqlite'+MajorVer+',sqlite'
+    SQLFunctionsFile := 'sqlite'
+  else if FParameters.IsFirebird then
+    SQLFunctionsFile := 'firebird'
   else if FParameters.IsAnyInterbase then
-    SQLFunctionsFileOrder := 'interbase'+MajorMinorVer+',interbase'+MajorVer+',interbase'
+    SQLFunctionsFile := 'interbase'
   else
-    SQLFunctionsFileOrder := '';
-  FSQLFunctions := TSQLFunctionList.Create(Self, SQLFunctionsFileOrder);
+    SQLFunctionsFile := '';
+  FSQLFunctions := TSQLFunctionList.Create(Self, SQLFunctionsFile);
 
   // Set timezone offset to UTC
   if FSqlProvider.Has(qSetTimezone) and Parameters.LocalTimeZone then begin
@@ -3538,7 +3544,7 @@ begin
   // Process startup script
   StartupScript := Trim(FParameters.StartupScriptFilename);
   if StartupScript <> '' then begin
-    StartupScript := ExpandFileName(StartupScript);
+    StartupScript := GetOutputFilename(StartupScript, nil);
     if not FileExists(StartupScript) then
       Log(lcError, f_('Startup script file not found: %s', [StartupScript]))
     else begin
@@ -5742,7 +5748,11 @@ begin
       try
         ForceDirectories(ExtractFileDir(FilePath));
         AssignFile(LogFile, FilePath); // TStreamWriter.Create(FilePath, True, UTF8NoBOMEncoding);
-        Append(LogFile);
+        // Append fails on a non-existent file in FPC
+        if FileExists(FilePath) then
+          Append(LogFile)
+        else
+          Rewrite(LogFile);
         WriteLn(LogFile, Msg + ';');
         Close(LogFile);
       except
@@ -7543,6 +7553,8 @@ end;
 
 function TDBConnection.Has(Item: TFeatureOrRequirement): Boolean;
 begin
+  if Item = frEditVariables then
+    Exit(Assigned(FSqlProvider) and (FSqlProvider.Has(qSetSessionVariable) or FSqlProvider.Has(qSetGlobalVariable)));
   case FParameters.NetTypeGroup of
     ngMySQL:
       case Item of
@@ -7552,7 +7564,6 @@ begin
         frIntegerDisplayWidth: Result := (FParameters.IsMySQL(True) and (ServerVersionInt < 80017)) or
           (not FParameters.IsMySQL(True));
         frColumnDefaultParentheses: Result := FParameters.IsMySQL(True) and (ServerVersionInt >= 80013);
-        frEditVariables: Result := ServerVersionInt >= 40003;
         frCreateView: Result := ServerVersionInt >= 50001;
         frCreateProcedure: Result := ServerVersionInt >= 50003;
         frCreateFunction: Result := ServerVersionInt >= 50003;
@@ -12402,14 +12413,30 @@ end;
 
 { TSQLFunctionList }
 
-constructor TSQLFunctionList.Create(AOwner: TDBConnection; SQLFunctionsFileOrder: String);
+constructor TSQLFunctionList.Create(AOwner: TDBConnection; SQLFunctionsFile: String);
 var
-  TryFiles: TStringList;
-  TryFile: String;
   Ini: TMemIniFile;
   Sections: TStringList;
   IniFilePath, Section: String;
   SQLFunc: TSQLFunction;
+  ServerVersion, SinceVersion, UntilVersion: Int64;
+
+  function VersionToNumber(Version: String): Int64;
+  var
+    rx: TRegExpr;
+  begin
+    // "16", "3.44" or "18.1.2" => comparable number
+    Result := 0;
+    rx := TRegExpr.Create;
+    rx.Expression := '^(\d+)(\.(\d+))?(\.(\d+))?';
+    if rx.Exec(Version) then begin
+      Result := StrToInt64Def(rx.Match[1], 0) * 1000000 +
+        StrToInt64Def(rx.Match[3], 0) * 1000 +
+        StrToInt64Def(rx.Match[5], 0);
+    end;
+    rx.Free;
+  end;
+
 begin
   inherited Create(True);
   FOwner := AOwner;
@@ -12421,32 +12448,44 @@ begin
   FNames.Duplicates := dupIgnore;
   FNames.Sorted := True;
 
-  TryFiles := Explode(',', SQLFunctionsFileOrder);
-  for TryFile in TryFiles do begin
-    IniFilePath := GetResourcesDir + 'functions-'+TryFile+'.ini';
-    FOwner.Log(lcDebug, 'Trying '+IniFilePath);
-    if FileExists(IniFilePath) then begin
-      FOwner.Log(lcInfo, 'Reading function definitions from '+IniFilePath);
-      Ini := TMemIniFile.Create(IniFilePath);
-      Sections := TStringList.Create;
-      Ini.ReadSections(Sections);
-      for Section in Sections do begin
-        SQLFunc := TSQLFunction.Create;
-        SQLFunc.Name := Ini.ReadString(Section, 'Name', Section);
-        SQLFunc.Declaration := '(' + Ini.ReadString(Section, 'Declaration', '') + ')';
-        SQLFunc.Category := Ini.ReadString(Section, 'Category', '');
-        SQLFunc.Description := Ini.ReadString(Section, 'Description', '');
-        SQLFunc.Description := StringReplace(SQLFunc.Description, '\n', sLineBreak, [rfReplaceAll]);
-        Add(SQLFunc);
-        FCategories.Add(SQLFunc.Category);
-        FNames.Add(SQLFunc.Name);
-      end;
-      Ini.Free;
-      Sections.Free;
-      Break;
-    end;
+  // Functions with a "since" version newer than the server are skipped, as well as functions removed in the
+  // server version or earlier ("until" = first version without it). Interbase reports no version (0),
+  // then nothing is skipped. Same for Azure SQL, which reports an old version but has the newest functions.
+  if (AOwner.ServerVersionInt > 0) and (not AOwner.Parameters.IsAzure) then
+    ServerVersion := VersionToNumber(AOwner.ServerVersionStr)
+  else
+    ServerVersion := 0;
+
+  if SQLFunctionsFile.IsEmpty then
+    Exit;
+  IniFilePath := GetResourcesDir + 'functions-'+SQLFunctionsFile+'.ini';
+  if not FileExists(IniFilePath) then begin
+    FOwner.Log(lcDebug, 'Function definitions not found: '+IniFilePath);
+    Exit;
   end;
-  TryFiles.Free;
+  FOwner.Log(lcInfo, 'Reading function definitions from '+IniFilePath);
+  Ini := TMemIniFile.Create(IniFilePath);
+  Sections := TStringList.Create;
+  Ini.ReadSections(Sections);
+  for Section in Sections do begin
+    SinceVersion := VersionToNumber(Ini.ReadString(Section, 'Since', ''));
+    UntilVersion := VersionToNumber(Ini.ReadString(Section, 'Until', ''));
+    if (ServerVersion > 0) and (SinceVersion > ServerVersion) then
+      Continue;
+    if (ServerVersion > 0) and (UntilVersion > 0) and (UntilVersion <= ServerVersion) then
+      Continue;
+    SQLFunc := TSQLFunction.Create;
+    SQLFunc.Name := Ini.ReadString(Section, 'Name', Section);
+    SQLFunc.Declaration := '(' + Ini.ReadString(Section, 'Declaration', '') + ')';
+    SQLFunc.Category := Ini.ReadString(Section, 'Category', '');
+    SQLFunc.Description := Ini.ReadString(Section, 'Description', '');
+    SQLFunc.Description := StringReplace(SQLFunc.Description, '\n', sLineBreak, [rfReplaceAll]);
+    Add(SQLFunc);
+    FCategories.Add(SQLFunc.Category);
+    FNames.Add(SQLFunc.Name);
+  end;
+  Ini.Free;
+  Sections.Free;
 end;
 
 

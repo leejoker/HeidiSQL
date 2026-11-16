@@ -223,6 +223,7 @@ type
   private
     { Private declarations }
     FLoaded: Boolean;
+    FPathVariablesHint: String;
     FSessionModified, FOnlyPasswordModified: Boolean;
     FServerVersion: String;
     FSettingsImportWaitTime: Cardinal;
@@ -272,7 +273,7 @@ end;
 
 procedure Tconnform.FormCreate(Sender: TObject);
 var
-  NetTypeStr, FilenameHint, ExePath, ExeFile: String;
+  NetTypeStr, FilenameHint, PlaceholderLine, ExePath, ExeFile: String;
   nt: TNetType;
   ntg: TNetTypeGroup;
   Params: TConnectionParameters;
@@ -321,13 +322,23 @@ begin
   Params.Free;
 
   // Create filename placeholders hint
+  // Plain file paths support %APPDIR% and environment variables, the log file also the prefix-only placeholders
   Placeholders := GetOutputFilenamePlaceholders;
-  FilenameHint := _('Allows the following replacement patterns:');
+  FPathVariablesHint := _('Allows the following replacement patterns:');
+  FilenameHint := FPathVariablesHint;
   for i:=0 to Placeholders.Count-1 do begin
-    FilenameHint := FilenameHint + CRLF + '%' + Placeholders.Names[i] + ': ' + Placeholders.ValueFromIndex[i];
+    PlaceholderLine := sLineBreak + Placeholders.Names[i] + ': ' + Placeholders.ValueFromIndex[i];
+    FilenameHint := FilenameHint + PlaceholderLine;
+    if Placeholders.Names[i].EndsWith('%') then
+      FPathVariablesHint := FPathVariablesHint + PlaceholderLine;
   end;
   Placeholders.Free;
   editLogFilePath.Hint := FilenameHint;
+  editStartupScript.Hint := FPathVariablesHint;
+  editSSHPrivateKey.Hint := FPathVariablesHint;
+  editSSLPrivateKey.Hint := FPathVariablesHint;
+  editSSLCertificate.Hint := FPathVariablesHint;
+  editSSLCACertificate.Hint := FPathVariablesHint;
 
   // Populate dropdown with supported SSH executables
   {$IFDEF WINDOWS}
@@ -1738,6 +1749,10 @@ begin
         end
       end;
       editHost.Button.Enabled := Params.IsAnySQLite;
+      if Params.IsAnySQLite then
+        editHost.Hint := FPathVariablesHint
+      else
+        editHost.Hint := '';
       chkLoginPrompt.Enabled := Params.NetTypeGroup in [ngMySQL, ngMSSQL, ngPgSQL, ngRedis];
       chkWindowsAuth.Enabled := Params.IsAnyMSSQL or Params.IsAnyMySQL;
       lblUsername.Enabled := (Params.NetTypeGroup in [ngMySQL, ngMSSQL, ngPgSQL, ngInterbase, ngRedis])
@@ -1866,6 +1881,7 @@ var
   i: Integer;
   Control: TControl;
   FileNames: TStringList;
+  OldDirRaw, OldDirExpanded, FileDir: String;
 begin
   // Select startup SQL file, SSL file or whatever button clicked
   Edit := Sender as TEditButton;
@@ -1888,18 +1904,31 @@ begin
   for i:=0 to Edit.Parent.ControlCount - 1 do begin
     Control := Edit.Parent.Controls[i];
     if (Control is TLabel) and ((Control as TLabel).FocusControl = Edit) then begin
-      Selector.Title := 'Select ' + (Control as TLabel).Caption;
+      Selector.Title := f_('Select %s', [(Control as TLabel).Caption]);
       break;
     end;
   end;
-  // Set initial directory to the one from the edit's file
-  Selector.InitialDir := ExtractFilePath(Edit.Text);
+  // Set initial directory to the one from the edit's (first) file, with variables resolved
+  FileNames := Explode(DELIM, Edit.Text);
+  if FileNames.Count > 0 then begin
+    OldDirRaw := ExtractFilePath(FileNames[0]);
+    OldDirExpanded := ExtractFilePath(GetOutputFilename(FileNames[0], nil));
+  end else begin
+    OldDirRaw := '';
+    OldDirExpanded := '';
+  end;
+  FileNames.Free;
+  Selector.InitialDir := OldDirExpanded;
   if Selector.Execute then begin
     FileNames := TStringList.Create;
     FileNames.Assign(Selector.Files);
     for i:=0 to FileNames.Count-1 do begin
-      // Remove path if it's the application directory
-      if ExtractFilePath(FileNames[i]) = GetAppDir then
+      FileDir := ExtractFilePath(FileNames[i]);
+      if (not OldDirRaw.IsEmpty) and (OldDirRaw <> OldDirExpanded) and SameFileName(FileDir, OldDirExpanded) then
+        // Keep variables like %USERPROFILE% from the previous value, if the folder did not change
+        FileNames[i] := OldDirRaw + ExtractFileName(FileNames[i])
+      else if SameFileName(FileDir, GetAppDir) then
+        // Remove path if it's the application directory
         FileNames[i] := ExtractFileName(FileNames[i]);
     end;
     Edit.Text := Implode(DELIM, FileNames);

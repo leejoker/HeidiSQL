@@ -7,7 +7,7 @@ interface
 uses
   Classes, SysUtils, Forms, Controls, Graphics, Dialogs, Menus, ActnList,
   ComCtrls, ExtCtrls, LCLProc, DateUtils, SynEdit, SynEditHighlighter,
-  SynHighlighterSQL, SynGutterBase, SynCompletion, SynEditKeyCmds, SynEditTypes,
+  SynHighlighterSQL, SynGutterBase, SynCompletion, SynEditKeyCmds, SynEditTypes, LCLVersion,
   SynGutter, SynGutterLineNumber, SynGutterCodeFolding, StrUtils, laz.VirtualTrees,
   laz.VTHeaderPopup, RegExpr, Buttons, StdCtrls, fphttpclient, Math, LCLIntf,
   Generics.Collections, Generics.Defaults, opensslsockets, StdActns, Clipbrd,
@@ -839,9 +839,6 @@ type
     Movelineup1: TMenuItem;
     menuCloseTabOnDblClick: TMenuItem;
     Undo1: TMenuItem;
-    actSequalSuggest: TAction;
-    SequalSuggest1: TMenuItem;
-    SequalSuggest2: TMenuItem;
     popupDataTop: TPopupMenu;
     menuQueryExactRowCount: TMenuItem;
     menuCloseTabOnMiddleClick: TMenuItem;
@@ -1280,7 +1277,6 @@ type
       var Special: Boolean; Markup: TSynSelectedColor);
     procedure SynMemoSQLLogSpecialLineMarkup(Sender: TObject; Line: Integer;
       var Special: Boolean; Markup: TSynSelectedColor);
-    procedure actSequalSuggestExecute(Sender: TObject);
     procedure menuQueryExactRowCountClick(Sender: TObject);
     procedure menuCloseTabOnMiddleClickClick(Sender: TObject);
     procedure TimerCloseTabByButtonTimer(Sender: TObject);
@@ -2152,11 +2148,11 @@ begin
 
   // Make exit action OS friendly
   {$IFDEF UNIX}
-    actExitApplication.Caption := '&Quit';
+    actExitApplication.Caption := _('&Quit');
     actExitApplication.ShortCut := KeyToShortCut(VK_Q, [ssCtrl]);
   {$ENDIF}
   {$IFDEF WINDOWS}
-    actExitApplication.Caption := 'E&xit';
+    actExitApplication.Caption := _('E&xit');
     actExitApplication.ShortCut := KeyToShortCut(VK_F4, [ssAlt]);
   {$ENDIF}
   {$IFDEF DARWIN}
@@ -2180,6 +2176,10 @@ begin
     Action := TAction(ActionList1.Actions[i]);
     Action.ShortCut := AppSettings.ReadInt(asActionShortcut1, Action.Name, Action.ShortCut);
   end;
+
+  // Set dynamic caption before taking the snapshot, as it is displayed in the shortcut preferences
+  actQueryTable.Caption := f_('Select top %s rows', [FormatNumber(AppSettings.ReadInt(asDatagridRowsPerStep))]);
+  actQueryTable.Hint := f_('Selects the first %s rows in a new query tab', [FormatNumber(AppSettings.ReadInt(asDatagridRowsPerStep))]);
 
   // Keep a list of untranslated captions and hints of actions
   FActionList1DefaultCaptions := TStringList.Create;
@@ -3018,7 +3018,7 @@ begin
     ngMySQL: Dialog := TUserManagerForm.Create(Self);
     ngPgSQL: Dialog := TRoleManagerPgForm.Create(Self);
     ngMSSQL: Dialog := TRoleManagerMssqlForm.Create(Self);
-    else ErrorDialog(ActiveConnection.Parameters.NetTypeName(False) + ' not supported for managing users');
+    else ErrorDialog(f_('%s not supported for managing users', [ActiveConnection.Parameters.NetTypeName(False)]));
   end;
   if Dialog = nil then
     Exit;
@@ -3319,7 +3319,7 @@ begin
   if Dialog.Execute then try
     if LowerCase(ExtractFileExt(Dialog.FileName)) = 'reg' then
       //ShellExec('regedit.exe', '', '"'+Dialog.FileName+'"')
-      ErrorDialog('Registry dumps not supported. Please use a txt file exported by '+APPNAME)
+      ErrorDialog(f_('Registry dumps not supported. Please use a txt file exported by %s', [APPNAME]))
     else begin
       AppSettings.ImportSettings(Dialog.FileName);
       // Refresh in session manager per timer interval
@@ -7208,7 +7208,7 @@ begin
   t := TimerRefresh.Enabled;
   TimerRefresh.Enabled := false; // prevent av (ListProcessList.selected...)
   Conn := ActiveConnection;
-  if MessageDialog('Kill '+IntToStr(ListProcessList.SelectedCount)+' Process(es)?', mtConfirmation, [mbok,mbcancel]) = mrok then
+  if MessageDialog(f_('Kill %s Process(es)?', [FormatNumber(ListProcessList.SelectedCount)]), mtConfirmation, [mbok,mbcancel]) = mrok then
   begin
     Node := GetNextNode(ListProcessList, nil, True);
     while Assigned(Node) do begin
@@ -7817,6 +7817,9 @@ var
   Obj: TDBObject;
   i, ColumnNameChars: Integer;
   Column: TTableColumn;
+  LineText, Signatures, FuncDescription: String;
+  NextCharPos: Integer;
+  IsFunctionCall: Boolean;
 begin
   // Activate hint for SQL function in query editors
   Edit := Sender as TSynEdit;
@@ -7826,84 +7829,102 @@ begin
 
   LogSQL('TokenType:'+TokenType.ToString+' Token:"'+Token+'"', lcDebug);
   Conn := ActiveConnection;
-  if Assigned(Conn) then begin
-    case SynHighlighterSQL.TtkTokenKind(TokenType) of
+  if not Assigned(Conn) then
+    Exit;
 
-      SynHighlighterSQL.tkFunction: begin
-        for SQLFunc in ActiveConnection.SQLFunctions do begin
-          if SQLFunc.Name.ToUpper = Token.ToUpper then begin
-            HintInfo.HintStr := SQLFunc.Name + SQLFunc.Declaration + sLineBreak + sLineBreak + SQLFunc.Description;
-            Break;
-          end;
-        end;
+  // SQL functions: the highlighter's built-in function names are outdated and differ from our function lists
+  // per server type and version. So look up any word followed by an opening parenthesis, plus words the
+  // highlighter knows as function.
+  IsFunctionCall := SynHighlighterSQL.TtkTokenKind(TokenType) = SynHighlighterSQL.tkFunction;
+  if (not IsFunctionCall) and (RowColPos.Y >= 1) and (RowColPos.Y <= Edit.Lines.Count) then begin
+    LineText := Edit.Lines[RowColPos.Y - 1];
+    NextCharPos := TokenStart + Length(Token);
+    while (NextCharPos <= Length(LineText)) and (LineText[NextCharPos] in [' ', #9]) do
+      Inc(NextCharPos);
+    IsFunctionCall := (NextCharPos <= Length(LineText)) and (LineText[NextCharPos] = '(');
+  end;
+  if IsFunctionCall and (Conn.SQLFunctions.Names.IndexOf(Token) > -1) then begin
+    // Show all signatures of overloaded functions, plus the first description
+    Signatures := '';
+    FuncDescription := '';
+    for SQLFunc in Conn.SQLFunctions do begin
+      if CompareText(SQLFunc.Name, Token) = 0 then begin
+        Signatures := Signatures + SQLFunc.Name + SQLFunc.Declaration + sLineBreak;
+        if FuncDescription.IsEmpty then
+          FuncDescription := SQLFunc.Description;
       end;
-
-      SynHighlighterSQL.tkTableName: begin
-        // Show some details from table listing cache
-        if (not Conn.IsLockedByThread) and Conn.DbObjectsCached(Conn.Database) then begin
-          AllObjects := Conn.GetDBObjects(Conn.Database);
-          for Obj in AllObjects do begin
-            if (Obj.NodeType = lntTable) and (Obj.Name.ToLower = Token.ToLower) then begin
-              HintInfo.HintStr := _(Obj.ObjType) + ' ' + Obj.Name + ':' + sLineBreak +
-                _('Rows') + ': ' + FormatNumber(Obj.Rows) + sLineBreak +
-                _('Size') + ': ' + FormatByteNumber(Obj.DataLen + Obj.IndexLen) + SLineBreak;
-              ColumnNameChars := 0;
-              for Column in Obj.TableColumns do begin
-                ColumnNameChars := Max(ColumnNameChars, Length(Column.Name));
-              end;
-              for Column in Obj.TableColumns do begin
-                HintInfo.HintStr := HintInfo.HintStr + Format('%s%'+ColumnNameChars.ToString+'s: %s', [SLineBreak, Column.Name, Column.FullDataType]);
-              end;
-
-              Break;
-            end;
-          end;
-        end;
-      end;
-
-      {SynHighlighterSQL.tkProcName: begin
-        // tkProcName not available in Laz SynEdit
-        // Show routine parameters, comment and body
-        if (not Conn.IsLockedByThread) and Conn.DbObjectsCached(Conn.Database) then begin
-          AllObjects := Conn.GetDBObjects(Conn.Database);
-          for Obj in AllObjects do begin
-            if (Obj.NodeType in [lntFunction, lntProcedure]) and (Obj.Name.ToLower = Token.ToLower) then begin
-              Parameters := TRoutineParamList.Create;
-              Conn.ParseRoutineStructure(Obj, Parameters);
-              HintInfo.HintStr := _(Obj.ObjType) + ' ' + Obj.Name;
-              Params := TStringList.Create;
-              for Param in Parameters do begin
-                Params.Add(Param.Name + ' ['+Param.Datatype+']');
-              end;
-              HintInfo.HintStr := HintInfo.HintStr + '(' + Implode(', ', Params) + ')' + sLineBreak + sLineBreak;
-              Params.Free;
-              if not Obj.Returns.IsEmpty then
-                HintInfo.HintStr := HintInfo.HintStr + 'Returns: ' + Obj.Returns + sLineBreak + sLineBreak;
-              if not Obj.Comment.IsEmpty then
-                HintInfo.HintStr := HintInfo.HintStr + Obj.Comment + sLineBreak + sLineBreak;
-              if not Obj.Body.IsEmpty then
-                HintInfo.HintStr := HintInfo.HintStr + StrEllipsis(Obj.Body, SIZE_KB);
-              HintInfo.HintStr := Trim(HintInfo.HintStr);
-              Break;
-            end;
-          end;
-        end;
-      end;}
-
-      SynHighlighterSQL.tkDatatype: begin
-        for i:=Low(Conn.Datatypes) to High(Conn.Datatypes) do begin
-          if Conn.Datatypes[i].Name.ToLower = Token.ToLower then begin
-            HintInfo.HintStr := WrapText(Conn.Datatypes[i].Description, 100);
-            Break;
-          end;
-        end;
-      end;
-
-      SynHighlighterSQL.tkString: begin
-        HintInfo.HintStr := _('String:') + ' ' + FormatByteNumber(Length(Token));
-      end;
-
     end;
+    HintInfo.HintStr := Trim(Signatures + sLineBreak + FuncDescription);
+    Exit;
+  end;
+
+  case SynHighlighterSQL.TtkTokenKind(TokenType) of
+
+    SynHighlighterSQL.tkTableName: begin
+      // Show some details from table listing cache
+      if (not Conn.IsLockedByThread) and Conn.DbObjectsCached(Conn.Database) then begin
+        AllObjects := Conn.GetDBObjects(Conn.Database);
+        for Obj in AllObjects do begin
+          if (Obj.NodeType = lntTable) and (Obj.Name.ToLower = Token.ToLower) then begin
+            HintInfo.HintStr := _(Obj.ObjType) + ' ' + Obj.Name + ':' + sLineBreak +
+              _('Rows') + ': ' + FormatNumber(Obj.Rows) + sLineBreak +
+              _('Size') + ': ' + FormatByteNumber(Obj.DataLen + Obj.IndexLen) + SLineBreak;
+            ColumnNameChars := 0;
+            for Column in Obj.TableColumns do begin
+              ColumnNameChars := Max(ColumnNameChars, Length(Column.Name));
+            end;
+            for Column in Obj.TableColumns do begin
+              HintInfo.HintStr := HintInfo.HintStr + Format('%s%'+ColumnNameChars.ToString+'s: %s', [SLineBreak, Column.Name, Column.FullDataType]);
+            end;
+
+            Break;
+          end;
+        end;
+      end;
+    end;
+
+    {SynHighlighterSQL.tkProcName: begin
+      // tkProcName not available in Laz SynEdit
+      // Show routine parameters, comment and body
+      if (not Conn.IsLockedByThread) and Conn.DbObjectsCached(Conn.Database) then begin
+        AllObjects := Conn.GetDBObjects(Conn.Database);
+        for Obj in AllObjects do begin
+          if (Obj.NodeType in [lntFunction, lntProcedure]) and (Obj.Name.ToLower = Token.ToLower) then begin
+            Parameters := TRoutineParamList.Create;
+            Conn.ParseRoutineStructure(Obj, Parameters);
+            HintInfo.HintStr := _(Obj.ObjType) + ' ' + Obj.Name;
+            Params := TStringList.Create;
+            for Param in Parameters do begin
+              Params.Add(Param.Name + ' ['+Param.Datatype+']');
+            end;
+            HintInfo.HintStr := HintInfo.HintStr + '(' + Implode(', ', Params) + ')' + sLineBreak + sLineBreak;
+            Params.Free;
+            if not Obj.Returns.IsEmpty then
+              HintInfo.HintStr := HintInfo.HintStr + 'Returns: ' + Obj.Returns + sLineBreak + sLineBreak;
+            if not Obj.Comment.IsEmpty then
+              HintInfo.HintStr := HintInfo.HintStr + Obj.Comment + sLineBreak + sLineBreak;
+            if not Obj.Body.IsEmpty then
+              HintInfo.HintStr := HintInfo.HintStr + StrEllipsis(Obj.Body, SIZE_KB);
+            HintInfo.HintStr := Trim(HintInfo.HintStr);
+            Break;
+          end;
+        end;
+      end;
+    end;}
+
+    SynHighlighterSQL.tkDatatype: begin
+      for i:=Low(Conn.Datatypes) to High(Conn.Datatypes) do begin
+        if Conn.Datatypes[i].Name.ToLower = Token.ToLower then begin
+          HintInfo.HintStr := WrapText(Conn.Datatypes[i].Description, 100);
+          Break;
+        end;
+      end;
+    end;
+
+    SynHighlighterSQL.tkString: begin
+      HintInfo.HintStr := _('String:') + ' ' + FormatByteNumber(Length(Token));
+    end;
+
   end;
 
 end;
@@ -9407,7 +9428,7 @@ begin
 
   OldName := QueryTabs.ActiveHelpersTree.Text[QueryTabs.ActiveHelpersTree.FocusedNode, 0];
   NewName := OldName;
-  if InputQuery(_('Rename'), 'Rename snippet "'+OldName+'"', NewName) then
+  if InputQuery(_('Rename'), f_('Rename snippet "%s"', [OldName]), NewName) then
   begin
     Screen.Cursor := crHourGlass;
     if NewName.IsEmpty then begin
@@ -10125,31 +10146,17 @@ procedure TMainForm.ListVariablesPaintText(Sender: TBaseVirtualTree;
   const TargetCanvas: TCanvas; Node: PVirtualNode; Column: TColumnIndex;
   TextType: TVSTTextType);
 var
-  Idx: PInt64;
-  i, tmp: Integer;
-  VarName, SessionVal, GlobalVal: String;
+  SessionVal, GlobalVal: String;
   dcat: TDBDatatypeCategoryIndex;
   vt: TLazVirtualStringTree;
 begin
   vt := Sender as TLazVirtualStringTree;
-  Idx := Sender.GetNodeData(Node);
-  VarName := FVariableNames[Idx^];
-  tmp := -1;
-  for i:=Low(MySQLVariables) to High(MySQLVariables) do begin
-    if MySQLVariables[i].Name = VarName then begin
-      tmp := i;
-      break;
-    end;
-  end;
-  if (tmp=-1) or (not MySQLVariables[tmp].IsDynamic) then begin
-    // Gray out whole row if the variable is either unknown or not editable
-    TargetCanvas.Font.Color := GetThemeColor(clGrayText)
-  end else if Column in [1, 2] then begin
+  if Column in [1, 2] then begin
     SessionVal := vt.Text[Node, 1];
     GlobalVal := vt.Text[Node, 2];
     if IsInt(SessionVal) or IsInt(GlobalVal) then
       dcat := dtcInteger
-    else if (tmp > -1) and ((MySQLVariables[tmp].EnumValues <> '') or (Pos(UpperCase(SessionVal), 'ON,OFF,0,1,YES,NO')>0)) then
+    else if MatchText(SessionVal, ['ON', 'OFF', 'YES', 'NO', 'TRUE', 'FALSE']) then
       dcat := dtcOther
     else
       dcat := dtcText;
@@ -10326,23 +10333,29 @@ end;
 procedure TMainForm.menuEditVariableClick(Sender: TObject);
 var
   Dialog: TfrmEditVariable;
-  VarValue: String;
+  VarName, VarValue: String;
 begin
+  if (not ActiveConnection.Has(frEditVariables)) or (not Assigned(ListVariables.FocusedNode)) then
+    Exit;
   Dialog := TfrmEditVariable.Create(Self);
   try
-    try
-      Dialog.VarName := ListVariables.Text[ListVariables.FocusedNode, 0];
-      VarValue := ListVariables.Text[ListVariables.FocusedNode, 1];
+    VarName := ListVariables.Text[ListVariables.FocusedNode, 0];
+    Dialog.VarName := VarName;
+    if FSessionVars.IndexOfName(VarName) > -1 then begin
+      VarValue := FSessionVars.Values[VarName];
       if VarValue = TEXT_NULL then
         VarValue := '';
-      Dialog.VarValue := VarValue;
-      // Refresh list node
-      if Dialog.ShowModal = mrOK then
-        InvalidateVT(ListVariables, VTREE_NOTLOADED, False);
-    except
-      on E:EVariableError do
-        ErrorDialog(E.Message);
+      Dialog.SetSessionValue(VarValue);
     end;
+    if FGlobalVars.IndexOfName(VarName) > -1 then begin
+      VarValue := FGlobalVars.Values[VarName];
+      if VarValue = TEXT_NULL then
+        VarValue := '';
+      Dialog.SetGlobalValue(VarValue);
+    end;
+    // Refresh list node
+    if Dialog.ShowModal = mrOK then
+      InvalidateVT(ListVariables, VTREE_NOTLOADED, False);
   finally
     Dialog.Free;
   end;
@@ -10734,6 +10747,10 @@ var
   TableLevelObj: TDBObject;
   MainTabToActivate: TTabSheet;
   EnteringSession: Boolean;
+  {$IF LCL_FULLVERSION >= 5000000}
+  HighlighterDialect: TSQLDialect;
+  FuncName: String;
+  {$ENDIF}
 begin
   // Set wanted main tab and call SetMainTab later, when all lists have been invalidated
   MainTabToActivate := nil;
@@ -10865,11 +10882,25 @@ begin
         else
           raise Exception.CreateFmt(_(MsgUnhandledNetType), [Integer(FActiveDbObj.Connection.Parameters.NetType)]);
       end;
-      // Extend predefined MySQLFunctions from SynHighlighterSQL with our own functions list
-      //SynSQLSynUsed.FunctionNames.BeginUpdate;
-      //SynSQLSynUsed.FunctionNames.Clear;
-      //SynSQLSynUsed.FunctionNames.AddStrings(FActiveDbObj.Connection.SQLFunctions.Names);
-      //SynSQLSynUsed.FunctionNames.EndUpdate;
+      {$IF LCL_FULLVERSION >= 5000000}
+      // Extend the highlighter's built-in function names with our own function list. Names already known as
+      // keyword, like IF, keep their kind. Outdated built-in function names cannot be removed in bulk, so
+      // highlighting and our list are not fully in sync.
+      SynSQLSynUsed.BeginUpdate;
+      try
+        HighlighterDialect := SynSQLSynUsed.SQLDialect;
+        // Reset keywords of the previous session, also when both use the same dialect, e.g. MySQL and MariaDB
+        if HighlighterDialect = sqlOracle then
+          SynSQLSynUsed.SQLDialect := sqlStandard
+        else
+          SynSQLSynUsed.SQLDialect := sqlOracle;
+        SynSQLSynUsed.SQLDialect := HighlighterDialect;
+        for FuncName in FActiveDbObj.Connection.SQLFunctions.Names do
+          SynSQLSynUsed.AddKeyword(FuncName, SynHighlighterSQL.tkFunction);
+      finally
+        SynSQLSynUsed.EndUpdate;
+      end;
+      {$ENDIF}
     end;
 
     if (FActiveDbObj <> nil)
@@ -13243,15 +13274,6 @@ begin
     AppBeep(MB_ICONASTERISK);
 end;
 
-
-procedure TMainForm.actSequalSuggestExecute(Sender: TObject);
-//var
-//  SequalSuggestForm: TSequalSuggestForm;
-begin
-  // Show Sequal Suggest dialog
-  //SequalSuggestForm := TSequalSuggestForm.Create(Self);
-  //SequalSuggestForm.ShowModal;
-end;
 
 procedure TMainForm.actSelectAllExecute(Sender: TObject);
 var

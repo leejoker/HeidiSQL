@@ -257,7 +257,6 @@ type
     asFileDialogSortColumn, asFileDialogSortDescending, asFileDialogRecentFolders,
     asThemePreviewWidth, asThemePreviewHeight, asThemePreviewTop, asThemePreviewLeft,
     asCreateDbCollation, asRealTrailingZeros,
-    asSequalSuggestWindowWidth, asSequalSuggestWindowHeight, asSequalSuggestPrompt, asSequalSuggestRecentPrompts,
     asReformatter, asReformatterNoDialog, asAlwaysGenerateFilter, asDisplayReverseForeignKeys,
     asGenerateDataNumRows, asGenerateDataNullAmount, asWebOnceAction, asDisplayLogPanel, asDisplayTreeFilters,
     asUnused);
@@ -458,7 +457,8 @@ type
   procedure InitMoFile(LangCode: String);
   function _(const Pattern: string): string;
   function f_(const Pattern: string; const Args: array of const): string;
-  function GetOutputFilename(FilenameWithPlaceholders: String; DBObj: TDBObject): String;
+  // Resolve placeholders, %APPDIR% and environment variables in a user-entered path
+  function GetOutputFilename(FilenameWithPlaceholders: String; DBObj: TDBObject; ResolveRelative: Boolean=True): String;
   function GetOutputFilenamePlaceholders: TStringList;
   function GetExecutableBits: Byte;
   procedure Help(Sender: TObject; Anchor: String);
@@ -1347,6 +1347,7 @@ function GetAppDir: String;
 begin
   Result := ExtractFilePath(Application.ExeName);
 end;
+
 
 function GetLibDir: String;
 begin
@@ -2681,7 +2682,8 @@ end;
 function _(const Pattern: string): string;
 begin
   Result := '';
-  if Assigned(AppLanguageMoFile) then
+  // Empty msgid would return the .mo header
+  if Assigned(AppLanguageMoFile) and (not Pattern.IsEmpty) then
     Result := AppLanguageMoFile.Translate(Pattern);
   if Result.IsEmpty then
     Result := Pattern;
@@ -2705,53 +2707,152 @@ begin
 end;
 
 
-function GetOutputFilename(FilenameWithPlaceholders: String; DBObj: TDBObject): String;
+const
+  // Allowed characters in environment variable names, including ProgramFiles(x86)
+  EnvVarNameChars = ['A'..'Z', 'a'..'z', '0'..'9', '_', '(', ')'];
+
+
+function GetOutputFilename(FilenameWithPlaceholders: String; DBObj: TDBObject; ResolveRelative: Boolean=True): String;
 var
-  Arguments: TExtStringList;
+  PrefixOnlyArgs: TExtStringList;
   Year, Month, Day, Hour, Min, Sec, MSec: Word;
-  i: Integer;
+  i, j, k, Best: Integer;
+  Path, Name, Value: String;
+  Closer: Char;
+  Found: Boolean;
 begin
   // Rich format output filename, replace certain markers. See issue #2622
-  Arguments := TExtStringList.Create;
+  // Placeholders like %db or %y%m%d have only a prefix %, without a closing one.
+  // %APPDIR% and environment variables require the closing %, or ${NAME} on Unix. They are only
+  // resolved if they exist, so literal % characters and prefix-only placeholders stay untouched.
+  PrefixOnlyArgs := TExtStringList.Create;
 
   if Assigned(DBObj) then begin
-    Arguments.Values['session'] := ValidFilename(DBObj.Connection.Parameters.SessionName);
-    Arguments.Values['host'] := ValidFilename(DBObj.Connection.Parameters.Hostname);
-    Arguments.Values['u'] := ValidFilename(DBObj.Connection.Parameters.Username);
-    Arguments.Values['db'] := ValidFilename(DBObj.Database);
+    PrefixOnlyArgs.Values['session'] := ValidFilename(DBObj.Connection.Parameters.SessionName);
+    PrefixOnlyArgs.Values['host'] := ValidFilename(DBObj.Connection.Parameters.Hostname);
+    PrefixOnlyArgs.Values['u'] := ValidFilename(DBObj.Connection.Parameters.Username);
+    PrefixOnlyArgs.Values['db'] := ValidFilename(DBObj.Database);
   end;
-  Arguments.Values['date'] := ValidFilename(DateTimeToStr(Now));
+  PrefixOnlyArgs.Values['date'] := ValidFilename(DateTimeToStr(Now));
   DecodeDateTime(Now, Year, Month, Day, Hour, Min, Sec, MSec);
-  Arguments.Values['d'] := Format('%.2d', [Day]);
-  Arguments.Values['m'] := Format('%.2d', [Month]);
-  Arguments.Values['y'] := Format('%.4d', [Year]);
-  Arguments.Values['h'] := Format('%.2d', [Hour]);
-  Arguments.Values['i'] := Format('%.2d', [Min]);
-  Arguments.Values['s'] := Format('%.2d', [Sec]);
+  PrefixOnlyArgs.Values['d'] := Format('%.2d', [Day]);
+  PrefixOnlyArgs.Values['m'] := Format('%.2d', [Month]);
+  PrefixOnlyArgs.Values['y'] := Format('%.4d', [Year]);
+  PrefixOnlyArgs.Values['h'] := Format('%.2d', [Hour]);
+  PrefixOnlyArgs.Values['i'] := Format('%.2d', [Min]);
+  PrefixOnlyArgs.Values['s'] := Format('%.2d', [Sec]);
 
-  Result := FilenameWithPlaceholders;
-  for i:=0 to Arguments.Count-1 do begin
-    Result := StringReplace(Result, '%'+Arguments.Names[i], Arguments.ValueFromIndex[i], [rfReplaceAll]);
+  // Single pass, so values inserted from variables or placeholders are not processed again
+  Path := FilenameWithPlaceholders;
+  Result := '';
+  i := 1;
+  while i <= Length(Path) do begin
+    Found := False;
+    if (Path[i] = '%') {$IFDEF UNIX}or ((Path[i] = '$') and (i < Length(Path)) and (Path[i+1] = '{')){$ENDIF} then begin
+      // Environment variable or %APPDIR%
+      if Path[i] = '%' then begin
+        Closer := '%';
+        j := i + 1;
+      end else begin
+        Closer := '}';
+        j := i + 2;
+      end;
+      Name := '';
+      while (j <= Length(Path)) and CharInSet(Path[j], EnvVarNameChars) do begin
+        Name := Name + Path[j];
+        Inc(j);
+      end;
+      if (not Name.IsEmpty) and (j <= Length(Path)) and (Path[j] = Closer) then begin
+        if SameText(Name, 'APPDIR') then
+          Value := ExcludeTrailingPathDelimiter(GetAppDir)
+        else
+          Value := GetEnvironmentVariableUTF8(Name);
+        if not Value.IsEmpty then begin
+          Result := Result + Value;
+          i := j + 1;
+          Found := True;
+        end;
+      end;
+      // Prefix-only placeholder, longest name wins, e.g. %date before %d
+      if (not Found) and (Path[i] = '%') then begin
+        Best := -1;
+        for k:=0 to PrefixOnlyArgs.Count-1 do begin
+          if (Copy(Path, i+1, Length(PrefixOnlyArgs.Names[k])) = PrefixOnlyArgs.Names[k])
+            and ((Best = -1) or (Length(PrefixOnlyArgs.Names[k]) > Length(PrefixOnlyArgs.Names[Best]))) then
+            Best := k;
+        end;
+        if Best > -1 then begin
+          Result := Result + PrefixOnlyArgs.ValueFromIndex[Best];
+          i := i + 1 + Length(PrefixOnlyArgs.Names[Best]);
+          Found := True;
+        end;
+      end;
+    end;
+    if not Found then begin
+      Result := Result + Path[i];
+      Inc(i);
+    end;
   end;
-  Arguments.Free;
+  PrefixOnlyArgs.Free;
+
+  {$IFDEF UNIX}
+  if (Result = '~') or Result.StartsWith('~/') then
+    Result := ExcludeTrailingPathDelimiter(GetUserDir) + Copy(Result, 2, Length(Result));
+  {$ENDIF}
+  // Relative paths are relative to the application directory, not to the current directory
+  if ResolveRelative and (not Result.IsEmpty) and (not FilenameIsAbsolute(Result)) then
+    Result := ExpandFileName(GetAppDir + Result);
 end;
 
 
 function GetOutputFilenamePlaceholders: TStringList;
+var
+  EnvVars: TStringList;
+  i, p: Integer;
+  Entry, Name, Value: String;
+  ValidName: Boolean;
+  c: Char;
 begin
-  // Return a list with valid placeholder=>description pairs
+  // Return a list with valid placeholder=>description pairs. Names include the full syntax,
+  // e.g. "%db" for prefix-only placeholders and "%USERPROFILE%" for environment variables.
   Result := TStringList.Create;
-  Result.Values['session'] := _('Session name');
-  Result.Values['host'] := _('Hostname');
-  Result.Values['u'] := _('Username');
-  Result.Values['db'] := _('Database');
-  Result.Values['date'] := _('Date and time');
-  Result.Values['d'] := _('Day of month');
-  Result.Values['m'] := _('Month');
-  Result.Values['y'] := _('Year');
-  Result.Values['h'] := _('Hour');
-  Result.Values['i'] := _('Minute');
-  Result.Values['s'] := _('Second');
+  Result.Values['%session'] := _('Session name');
+  Result.Values['%host'] := _('Hostname');
+  Result.Values['%u'] := _('Username');
+  Result.Values['%db'] := _('Database');
+  Result.Values['%date'] := _('Date and time');
+  Result.Values['%d'] := _('Day of month');
+  Result.Values['%m'] := _('Month');
+  Result.Values['%y'] := _('Year');
+  Result.Values['%h'] := _('Hour');
+  Result.Values['%i'] := _('Minute');
+  Result.Values['%s'] := _('Second');
+  Result.Values['%APPDIR%'] := ExcludeTrailingPathDelimiter(GetAppDir);
+
+  // Environment variables containing a path to an existing directory, sorted by name.
+  // Lists like PATH are excluded, as their value is not a valid directory.
+  EnvVars := TStringList.Create;
+  EnvVars.CaseSensitive := False;
+  EnvVars.Sorted := True;
+  EnvVars.Duplicates := dupIgnore;
+  for i:=1 to GetEnvironmentVariableCountUTF8 do begin
+    Entry := GetEnvironmentStringUTF8(i);
+    p := Pos('=', Entry);
+    if p < 2 then
+      Continue; // Also skips hidden Windows entries like "=C:=C:\dir"
+    Name := Copy(Entry, 1, p-1);
+    Value := Copy(Entry, p+1, Length(Entry));
+    ValidName := True;
+    for c in Name do
+      ValidName := ValidName and CharInSet(c, EnvVarNameChars);
+    if ValidName
+      and (not Value.IsEmpty)
+      and FilenameIsAbsolute(Value)
+      and DirectoryExists(Value) then
+      EnvVars.Values['%'+Name+'%'] := ExcludeTrailingPathDelimiter(Value);
+  end;
+  Result.AddStrings(EnvVars);
+  EnvVars.Free;
 end;
 
 
@@ -4045,10 +4146,6 @@ begin
   InitSetting(asDisplayBars,                      'DisplayBars',                           0, true);
   InitSetting(asMySQLBinaries,                    'MySQL_Binaries',                        0, False, '');
   InitSetting(asTerminal,                         'Terminal',                              0, False, '');
-  InitSetting(asSequalSuggestWindowWidth,         'SequalSuggestWindowWidth',              500);
-  InitSetting(asSequalSuggestWindowHeight,        'SequalSuggestWindowHeight',             400);
-  InitSetting(asSequalSuggestPrompt,              'SequalSuggestPrompt',                   0, False, '');
-  InitSetting(asSequalSuggestRecentPrompts,       'SequalSuggestRecentPrompts',            0, False, '');
   InitSetting(asReformatter,                      'Reformatter',                           0);
   InitSetting(asReformatterNoDialog,              'ReformatterNoDialog',                   0);
   InitSetting(asAlwaysGenerateFilter,             'AlwaysGenerateFilter',                  0, False);
@@ -4788,7 +4885,7 @@ begin
   // Load registry settings from file
 
   if not FileExists(Filename) then begin
-    raise Exception.CreateFmt('File does not exist: %s', [Filename]);
+    raise Exception.Create(f_('File does not exist: %s', [Filename]));
   end;
 
   Content := ReadTextfile(FileName, UTF8NoBOMEncoding);
@@ -4826,7 +4923,7 @@ begin
       3: // Integer (Delphi definition)
         FRegistry.WriteInteger(Name, MakeInt(Value));
       else
-        ErrorDialog(Name+' has an unsupported data type.');
+        ErrorDialog(f_('%s has an unsupported data type.', [Name]));
     end;
     Segments.Free;
   end;
@@ -4870,7 +4967,7 @@ var
         jtNumber, jtBoolean:
           Value := IntToStr(FRegistry.ReadInteger(Names[i]));
         else
-          ErrorDialog(Names[i]+' has an unsupported data type.');
+          ErrorDialog(f_('%s has an unsupported data type.', [Names[i]]));
       end;
       Content := Content + Value + CRLF;
     end;
