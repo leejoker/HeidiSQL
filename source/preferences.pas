@@ -814,7 +814,7 @@ end;
 procedure TfrmPreferences.SQLFontChange(Sender: TObject);
 var
   AttriIdx: Integer;
-  Attri: TSynHighlighterAttributes;
+  Attri: THeidiSynHighlighterAttributes;
   Foreground, Background: TColor;
   FontStyle: Integer;
 begin
@@ -1024,7 +1024,7 @@ end;
 procedure TfrmPreferences.comboSQLColElementChange(Sender: TObject);
 var
   AttriIdx: Integer;
-  Attri: TSynHighlighterAttributes;
+  Attri: THeidiSynHighlighterAttributes;
   Foreground, Background: TColor;
 begin
   AttriIdx := comboSQLColElement.ItemIndex;
@@ -1069,7 +1069,7 @@ end;
 procedure TfrmPreferences.SynMemoSQLSampleClick(Sender: TObject);
 var
   Token: String;
-  Attri: TSynHighlighterAttributes;
+  Attri: THeidiSynHighlighterAttributes;
   AttriIdx: Integer;
   sm: TSynEdit;
 begin

@@ -109,7 +109,7 @@ var
 
 implementation
 
-uses apphelpers;
+uses apphelpers, lazaruscompat;
 
 function GetFileExtImageIndex(Ext: String): Integer;
 var
@@ -170,7 +170,7 @@ end;
 procedure TAppColorScheme.LoadFromSettings;
 var
   i: Integer;
-  Attri: TSynHighlighterAttributes;
+  Attri: THeidiSynHighlighterAttributes;
   dtc: TDBDatatypeCategoryIndex;
 begin
   Name := _('Current custom settings');
@@ -217,7 +217,7 @@ end;
 procedure TAppColorScheme.Apply;
 var
   i: Integer;
-  Attri: TSynHighlighterAttributes;
+  Attri: THeidiSynHighlighterAttributes;
 begin
   // Highlighter colors
   for i:=0 to SynSqlSyn.AttrCount - 1 do begin

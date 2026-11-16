@@ -7596,7 +7596,7 @@ var
   Editor: TSynEdit;
   Token: String;
   CaretStart, CaretTokenTypeInt: Integer;
-  Attri: TSynHighlighterAttributes;
+  Attri: THeidiSynHighlighterAttributes;
   LineIdx, ColIdx, StartCol, EndCol: Integer;
   TableIndex: Integer;
   LineText, Word, Replacement: string;
@@ -7808,7 +7808,7 @@ procedure TMainForm.SynMemoQueryShowHint(Sender: TObject; HintInfo: PHintInfo);
 var
   Edit: TSynEdit;
   Token: String;
-  Attri: TSynHighlighterAttributes;
+  Attri: THeidiSynHighlighterAttributes;
   TokenType, TokenStart: Integer;
   RowColPos: TPoint;
   SQLFunc: TSQLFunction;
@@ -14555,7 +14555,7 @@ var
   Editors: TComponentList;
   BaseEditor: TSynEdit;
   KeyStroke: TSynEditKeyStroke;
-  Attri: TSynHighlighterAttributes;
+  Attri: THeidiSynHighlighterAttributes;
   Shortcut1, Shortcut2: TShortcut;
 begin
   // Setup all known TSynEdit's

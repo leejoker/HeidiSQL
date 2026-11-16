@@ -7,7 +7,7 @@ interface
 uses
   SysUtils, Variants, Classes, Graphics, EditBtn,
   Controls, Forms, Dialogs, StdCtrls, ExtCtrls,
-  StrUtils, SynEditHighlighter, apphelpers, extra_controls;
+  StrUtils, SynEditHighlighter, apphelpers, extra_controls, lazaruscompat;
 
 type
   TfrmCustomizeHighlighter = class(TExtForm)
@@ -34,7 +34,7 @@ type
   private
     { Private-Deklarationen }
     FHighlighter: TSynCustomHighlighter;
-    FAttr: TSynHighlighterAttributes;
+    FAttr: THeidiSynHighlighterAttributes;
     FOnChange: TNotifyEvent;
     procedure SetFriendlyLanguageName(FriendlyLanguageName: String);
     function GetFriendlyLanguageName: String;

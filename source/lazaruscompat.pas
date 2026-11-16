@@ -12,7 +12,7 @@ interface
 
 uses
   Classes, SysUtils, SynEdit, SynEditKeyCmds, SynEditHighlighter, laz.VirtualTrees,
-  Graphics, SynCompletion, Types
+  Graphics, SynCompletion, Types, LazEditTextAttributes
   {$IFDEF HEIDI_LINUX_QT}
   , Forms, LMessages, LResources
   {$ENDIF};
@@ -58,6 +58,12 @@ type
 
   TProgressBarState = (pbsNormal, pbsError, pbsPaused);
 
+  // Lazarus 5 (fixes_5) retyped TSynCustomHighlighter.Attribute[] to the base
+  // TLazEditTextAttribute, while TSynHighlighterAttributes became an alias of
+  // TLazEditHighlighterAttributes (a descendant of it). Alias the type our code
+  // uses for attribute variables and var-parameters accordingly.
+  THeidiSynHighlighterAttributes = TLazEditTextAttribute;
+
   // Add methods which exist in Delphi but not in Lazarus
   TSynEditHelper = class helper for TSynEdit
     public
@@ -66,9 +72,15 @@ type
       function ConvertCodeStringToCommand(AString: string): TSynEditorCommand;
       function IndexToEditorCommand(const AIndex: Integer): Integer;
   end;
-  TSynHighlighterAttributesHelper = class helper for TSynHighlighterAttributes
+  TSynHighlighterAttributesHelper = class helper for THeidiSynHighlighterAttributes
+    private
+      // Re-exposed from SynEdit's own helper of the same name, which this helper
+      // shadows in units using lazaruscompat after SynEditHighlighter.
+      function GetStyleFromInt: Integer;
+      procedure SetStyleFromInt(const Value: Integer);
     public
-      procedure AssignColorAndStyle(Source: TSynHighlighterAttributes);
+      procedure AssignColorAndStyle(Source: THeidiSynHighlighterAttributes);
+      property IntegerStyle: Integer read GetStyleFromInt write SetStyleFromInt;
   end;
   TSynCompletionHelper = class helper for TSynCompletion
     public
@@ -520,7 +532,7 @@ begin
 end;
 
 
-procedure TSynHighlighterAttributesHelper.AssignColorAndStyle(Source: TSynHighlighterAttributes);
+procedure TSynHighlighterAttributesHelper.AssignColorAndStyle(Source: THeidiSynHighlighterAttributes);
 var
   bChanged: Boolean;
 begin
@@ -542,6 +554,22 @@ begin
   end;
   if bChanged then
     Changed;
+end;
+
+function TSynHighlighterAttributesHelper.GetStyleFromInt: Integer;
+begin
+  if fsBold in Style then Result := 1 else Result := 0;
+  if fsItalic in Style then Result := Result + 2;
+  if fsUnderline in Style then Result := Result + 4;
+  if fsStrikeout in Style then Result := Result + 8;
+end;
+
+procedure TSynHighlighterAttributesHelper.SetStyleFromInt(const Value: Integer);
+begin
+  if Value and $1 = 0 then Style := [] else Style := [fsBold];
+  if Value and $2 <> 0 then Style := Style + [fsItalic];
+  if Value and $4 <> 0 then Style := Style + [fsUnderline];
+  if Value and $8 <> 0 then Style := Style + [fsStrikeout];
 end;
 
 function TSynCompletionHelper.IndexFromVisibleIndex(AIndex: Integer): Integer;
