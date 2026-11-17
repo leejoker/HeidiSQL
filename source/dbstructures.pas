@@ -33,7 +33,8 @@ type
     ntRedis_SSHtunnel,
     ntRedis_TLS,
     ntRedis_Sentinel,
-    ntRedis_Cluster
+    ntRedis_Cluster,
+    ntMySQL_ClickHouse
     );
   TNetTypeGroup = (ngMySQL, ngMSSQL, ngPgSQL, ngSQLite, ngInterbase, ngRedis);
   TNetTypeLibs = TDictionary<Integer, TStringList>; // Key = Ord(TNetType), see issue #2640

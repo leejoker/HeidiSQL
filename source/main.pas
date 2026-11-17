@@ -5081,7 +5081,7 @@ begin
         ngMySQL, ngPgSQL:
           ParamValues := '(' + Implode(', ', Params) + ')';
         ngMSSQL:
-          ParamValues := ' ' + Implode(' ', Params);
+          ParamValues := ' ' + Implode(', ', Params);
         ngRedis:
           raise Exception.Create(SUnsupported);
         else
@@ -8114,9 +8114,6 @@ begin
   end;
 
   if Filter <> '' then begin
-    if ExecRegExpr('\s+LIKE\s+''', Filter) then
-      Filter := Filter + Conn.LikeClauseTail;
-
     //SynMemoFilter.UndoList.AddGroupBreak;
     SynMemoFilter.SelectAll;
     if ShiftKeyPressed
@@ -11522,7 +11519,7 @@ begin
       end;
       Line := Line + Conditions[i];
     end;
-    Clause := Clause + Line + Conn.LikeClauseTail;
+    Clause := Clause + Line;
 
   end;
   //SynMemoFilter.UndoList.AddGroupBreak;

@@ -187,7 +187,7 @@ type
       Created, Updated, LastChecked: TDateTime;
       Rows, Size, Version, AvgRowLen, MaxDataLen, IndexLen, DataLen, DataFree, AutoInc, CheckSum: Int64;
       // Routine options:
-      Body, Definer, Returns, DataAccess, Security, ArgTypes: String;
+      Body, Definer, Returns, DataAccess, Security, ArgTypes, Preamble, RoutineOptions: String;
       Deterministic, RowsAreExact, IsMaterialized: Boolean;
 
       NodeType, GroupType: TListNodeType;
@@ -337,6 +337,7 @@ type
       function IsInfiniDB: Boolean;
       function IsInfobright: Boolean;
       function IsProxySQLAdmin: Boolean;
+      function IsClickHouse: Boolean;
       function IsMySQLonRDS: Boolean;
       function IsAzure: Boolean;
       function IsMemSQL: Boolean;
@@ -540,7 +541,6 @@ type
       function CleanIdent(Identifier: String): String;
       function QuotedDbAndTableName(DB, Obj: String): String;
       function FindObject(DB, Obj: String): TDBObject;
-      function escChars(const Text: String; EscChar, Char1, Char2, Char3, Char4: Char): String;
       function UnescapeString(Text: String): String;
       function ExtractLiteral(var SQL: String; Prefix: String): String;
       function GetResults(SQL: String): TDBQuery;
@@ -576,7 +576,6 @@ type
       function GetDatatypeByName(var DataType: String; DeleteFromSource: Boolean; Identifier: String=''): TDBDatatype;
       function GetDatatypeByNativeType(NativeType: Integer; Identifier: String=''): TDBDatatype;
       function ApplyLimitClause(QueryType, QueryBody: String; Limit, Offset: Int64): String;
-      function LikeClauseTail: String;
       property Parameters: TConnectionParameters read FParameters write FParameters;
       property OwnsParameters: Boolean read FOwnsParameters write FOwnsParameters;
       property ThreadId: Int64 read GetThreadId;
@@ -1620,6 +1619,7 @@ function TConnectionParameters.NetTypeName(LongFormat: Boolean): String;
 const
   PrefixMysql = 'MariaDB or MySQL';
   PrefixProxysql = 'ProxySQL Admin';
+  PrefixClickhouse = 'ClickHouse';
   PrefixMssql = 'Microsoft SQL Server';
   PrefixPostgres = 'PostgreSQL';
   PrefixRedshift = 'Redshift PG';
@@ -1636,6 +1636,7 @@ begin
       ntMySQL_NamedPipe:        Result := PrefixMysql+' (named pipe)';
       ntMySQL_SSHtunnel:        Result := PrefixMysql+' (SSH tunnel)';
       ntMySQL_ProxySQLAdmin:    Result := PrefixProxysql+' (Experimental)';
+      ntMySQL_ClickHouse:       Result := PrefixClickhouse+' (MySQL protocol, experimental)';
       ntMySQL_RDS:              Result := 'MySQL on RDS';
       ntMSSQL_NamedPipe:        Result := PrefixMssql+' (named pipe, unsuppported)';
       ntMSSQL_TCPIP:            Result := PrefixMssql+' (TCP/IP)';
@@ -1667,6 +1668,7 @@ begin
         else if IsInfobright then      Result := 'Infobright'
         else if IsMemSQL then          Result := 'MemSQL'
         else if IsProxySQLAdmin then   Result := 'ProxySQL Admin'
+        else if IsClickHouse then      Result := PrefixClickhouse
         else if IsMySQL(True) then     Result := 'MySQL'
         else                           Result := PrefixMysql;
       end;
@@ -1686,7 +1688,7 @@ end;
 function TConnectionParameters.GetNetTypeGroup: TNetTypeGroup;
 begin
   case FNetType of
-    ntMySQL_TCPIP, ntMySQL_NamedPipe, ntMySQL_SSHtunnel, ntMySQL_ProxySQLAdmin, ntMySQL_RDS:
+    ntMySQL_TCPIP, ntMySQL_NamedPipe, ntMySQL_SSHtunnel, ntMySQL_ProxySQLAdmin, ntMySQL_RDS, ntMySQL_ClickHouse:
       Result := ngMySQL;
     ntMSSQL_NamedPipe, ntMSSQL_TCPIP, ntMSSQL_SPX, ntMSSQL_VINES, ntMSSQL_RPC:
       Result := ngMSSQL;
@@ -1768,6 +1770,7 @@ begin
       and (not IsInfiniDB)
       and (not IsInfobright)
       and (not IsProxySQLAdmin)
+      and (not IsClickHouse)
       and (not IsMemSQL);
   end;
 end;
@@ -1800,6 +1803,12 @@ end;
 function TConnectionParameters.IsProxySQLAdmin: Boolean;
 begin
   Result := NetType = ntMySQL_ProxySQLAdmin;
+end;
+
+
+function TConnectionParameters.IsClickHouse: Boolean;
+begin
+  Result := NetType = ntMySQL_ClickHouse;
 end;
 
 
@@ -1885,6 +1894,8 @@ begin
     ngMySQL: begin
       if IsProxySQLAdmin then
         Result := 6032
+      else if IsClickHouse then
+        Result := 9004
       else
         Result := 3306;
     end;
@@ -1900,7 +1911,7 @@ end;
 function TConnectionParameters.DefaultUsername: String;
 begin
   case NetTypeGroup of
-    ngMySQL: Result := 'root';
+    ngMySQL: Result := IfThen(IsClickHouse, 'default', 'root');
     ngMSSQL: Result := 'sa';
     ngPgSQL: Result := 'postgres';
     ngInterbase: Result := 'sysdba';
@@ -2571,7 +2582,7 @@ begin
     end;
 
     case FParameters.NetType of
-      ntMySQL_TCPIP, ntMySQL_ProxySQLAdmin: begin
+      ntMySQL_TCPIP, ntMySQL_ProxySQLAdmin, ntMySQL_ClickHouse: begin
       end;
 
       ntMySQL_NamedPipe: begin
@@ -4151,6 +4162,11 @@ function TMySQLConnection.GetCreateCode(Obj: TDBObject): String;
 var
   ColIdx: Integer;
 begin
+  if Parameters.IsClickHouse then begin
+    // ClickHouse returns a single "statement" column, and handles views with SHOW CREATE TABLE as well
+    Result := GetVar('SHOW CREATE TABLE '+QuoteIdent(Obj.Database)+'.'+QuoteIdent(Obj.Name), 0);
+    Exit;
+  end;
   if Obj.NodeType = lntView then begin
     // Use our own baked CREATE VIEW code
     Result := GetCreateViewCode(Obj.Database, Obj.Name);
@@ -4818,6 +4834,10 @@ var
 begin
   // Get CREATE VIEW code, which can throw privilege errors and errors due to
   // references to renamed or deleted columns
+  if Parameters.IsClickHouse then begin
+    Result := GetVar('SHOW CREATE TABLE '+QuoteIdent(Database)+'.'+QuoteIdent(Name), 0);
+    Exit;
+  end;
   try
     Result := GetVar('SHOW CREATE VIEW '+QuoteIdent(Database)+'.'+QuoteIdent(Name), 1);
   except
@@ -5139,14 +5159,14 @@ end;
 {**
   Return current thread id
   Supports 64bit process numbers on long running servers: https://dev.mysql.com/doc/refman/8.0/en/mysql-thread-id.html
-  ... while ProxySQL does not support CONNECTION_ID()
+  ... while ProxySQL does not support CONNECTION_ID(), and ClickHouse returns 0 for it
 }
 function TMySQLConnection.GetThreadId: Int64;
 begin
   if FThreadId = 0 then begin
     Ping(False);
     if FActive then begin
-      if Parameters.IsProxySQLAdmin then
+      if Parameters.IsProxySQLAdmin or Parameters.IsClickHouse then
         FThreadID := FLib.mysql_thread_id(FHandle)
       else
         FThreadID := StrToInt64Def(GetVar('SELECT CONNECTION_ID()'), 0);
@@ -5477,6 +5497,8 @@ end;
 
 
 function TMySQLConnection.GetAllDatabases: TStringList;
+var
+  i: Integer;
 begin
   Result := inherited;
   if not Assigned(Result) then begin
@@ -5490,6 +5512,13 @@ begin
           FAllDatabases := TStringList.Create;
           Log(lcError, f_('Database names not available due to missing privileges for user %s.', [CurrentUserHostCombination]));
         end;
+      end;
+    end;
+    if Parameters.IsClickHouse then begin
+      // ClickHouse has an uppercase duplicate of information_schema, for compatibility
+      for i:=FAllDatabases.Count-1 downto 0 do begin
+        if FAllDatabases[i] = UpperCase(FInfSch) then
+          FAllDatabases.Delete(i);
       end;
     end;
     Result := FAllDatabases;
@@ -5782,85 +5811,62 @@ end;
 }
 function TDBConnection.EscapeString(Text: String; ProcessJokerChars: Boolean=false; DoQuote: Boolean=True): String;
 var
-  c1, c2, c3, c4, EscChar: Char;
+  QuoteEscChar, c: Char;
+  BackslashChars: set of Char;
+  i, ResLen: Integer;
 begin
-  case FParameters.NetTypeGroup of
-    ngMySQL: begin
-      c1 := '''';
-      c2 := '\';
-      c3 := '%';
-      c4 := '_';
-      EscChar := '\';
-      if not ProcessJokerChars then begin
-        // Do not escape joker-chars which are used in a LIKE-clause
-        c4 := '''';
-        c3 := '''';
-      end;
-      Result := escChars(Text, EscChar, c1, c2, c3, c4);
-
-      // Remove characters that SynEdit chokes on, so that
-      // the SQL file can be non-corruptedly loaded again.
-      c1 := #13;
-      c2 := #10;
-      c3 := #0;
-      c4 := #0;
-      // TODO: SynEdit also chokes on Char($2028) and possibly Char($2029).
-      Result := escChars(Result, EscChar, c1, c2, c3, c4);
-    end;
-
-    ngMSSQL, ngSQLite: begin
-
-      c1 := '''';
-      c2 := '''';
-      c3 := '''';
-      c4 := '''';
-      EscChar := '''';
-      Result := escChars(Text, EscChar, c1, c2, c3, c4);
-
-      // Escape joker chars % and _ in conjunction with a specified escape char after the WHERE clause.
-      // See http://www.heidisql.com/forum.php?t=12747
-      if ProcessJokerChars then begin
-        c1 := '%';
-        c2 := '_';
-        c4 := '_';
-        c3 := '_';
-        EscChar := '\';
-        Result := escChars(Result, EscChar, c1, c2, c3, c4);
-      end;
-    end;
-
-    ngPgSQL: begin
-      if ProcessJokerChars then begin
-        c1 := '%';
-        c2 := '_';
-        c3 := '%';
-        c4 := '%';
-        EscChar := '\';
-        Result := escChars(Text, EscChar, c1, c2, c3, c4);
-      end else begin
-        Result := Text;
-      end;
-      // Escape single quote with a second single quote
-      Result := escChars(Result, '''', '''', '''', '''', '''');
-    end;
-
-    ngInterbase: begin
-      c1 := '''';
-      c2 := '''';
-      c3 := '''';
-      c4 := '''';
-      EscChar := '\';
-      Result := escChars(Text, EscChar, c1, c2, c3, c4);
-    end;
-
-    ngRedis: begin
-      // Redis 不使用 SQL 转义,直接返回原文(Quote 由调用方控制)
-      Result := Text;
-    end;
-
-    else Result := '';
-
+  if FParameters.NetTypeGroup = ngRedis then begin
+    // Redis 不使用 SQL 转义,直接返回原文(Quote 由调用方控制)
+    Result := Text;
+    if DoQuote then
+      Result := FStringQuoteChar + Result + FStringQuoteChar;
+    Exit;
   end;
+  // A single quote gets a preceding escape character: a backslash on MySQL, a second
+  // single quote on all other servers.
+  // BackslashChars are the further characters which get a preceding backslash.
+  if FParameters.NetTypeGroup = ngMySQL then begin
+    QuoteEscChar := '\';
+    // Besides the backslash itself, escape characters that SynEdit chokes on,
+    // so that the SQL file can be non-corruptedly loaded again.
+    // TODO: SynEdit also chokes on Char($2028) and possibly Char($2029).
+    BackslashChars := ['\', #13, #10, #0];
+  end else begin
+    QuoteEscChar := '''';
+    BackslashChars := [];
+  end;
+  // In a LIKE pattern, the joker chars % and _ need a preceding backslash, and so does
+  // the backslash itself. Some servers only accept that with an ESCAPE clause, see qLikeCompare.
+  // See http://www.heidisql.com/forum.php?t=12747
+  if ProcessJokerChars then begin
+    // MySQL escapes the backslash a second time below, for the string literal
+    if FParameters.NetTypeGroup = ngMySQL then
+      Text := StringReplace(Text, '\', '\\', [rfReplaceAll]);
+    BackslashChars := BackslashChars + ['\', '%', '_'];
+  end;
+
+  // Each character becomes two characters at most
+  SetLength(Result, Length(Text) * 2);
+  ResLen := 0;
+  for i := 1 to Length(Text) do begin
+    c := Text[i];
+    if (c = '''') or (c in BackslashChars) then begin
+      Inc(ResLen);
+      if c = '''' then
+        Result[ResLen] := QuoteEscChar
+      else
+        Result[ResLen] := '\';
+      // Line breaks and null bytes are written as \r, \n and \0
+      case c of
+        #13: c := 'r';
+        #10: c := 'n';
+        #0: c := '0';
+      end;
+    end;
+    Inc(ResLen);
+    Result[ResLen] := c;
+  end;
+  SetLength(Result, ResLen);
 
   if DoQuote then begin
     // Add surrounding single quotes
@@ -5903,57 +5909,6 @@ begin
     Result := ValuePrefix + EscapeString(Text, False)
   else
     Result := ValuePrefix + Text;
-end;
-
-
-{***
- Attempt to do string replacement faster than StringReplace
-}
-function TDBConnection.escChars(const Text: String; EscChar, Char1, Char2, Char3, Char4: Char): String;
-const
-  // Attempt to match whatever the CPU cache will hold.
-  block: Cardinal = 65536;
-var
-  bstart, bend, matches, i: Cardinal;
-  // These could be bumped to uint64 if necessary.
-  len, respos: Cardinal;
-  next: Char;
-begin
-  len := Length(Text);
-  Result := '';
-  bend := 0;
-  respos := 0;
-  repeat
-    bstart := bend + 1;
-    bend := bstart + block - 1;
-    if bend > len then bend := len;
-    matches := 0;
-    for i := bstart to bend do if
-      (Text[i] = Char1) or
-      (Text[i] = Char2) or
-      (Text[i] = Char3) or
-      (Text[i] = Char4)
-    then Inc(matches);
-    SetLength(Result, bend + 1 - bstart + matches + respos);
-    for i := bstart to bend do begin
-      next := Text[i];
-      if
-        (next = Char1) or
-        (next = Char2) or
-        (next = Char3) or
-        (next = Char4)
-      then begin
-        Inc(respos);
-        Result[respos] := EscChar;
-        // Special values for MySQL escape.
-        if next = #13 then next := 'r';
-        if next = #10 then next := 'n';
-        if next = #0 then next := '0';
-      end;
-      Inc(respos);
-      Result[respos] := next;
-    end;
-  until bend = len;
 end;
 
 
@@ -6219,13 +6174,20 @@ var
   Results: TDBQuery;
   engineName, engineSupport: String;
   rx: TRegExpr;
+  EngineNames: TStringList;
 begin
   // After a disconnect Ping triggers the cached engines to be reset
   Log(lcDebug, 'Fetching list of table engines ...');
   Ping(True);
   if not Assigned(FTableEngines) then begin
     FTableEngines := TStringList.Create;
-    try
+    if Parameters.IsClickHouse then begin
+      EngineNames := GetCol('SELECT name FROM system.table_engines ORDER BY name');
+      FTableEngines.AddStrings(EngineNames);
+      EngineNames.Free;
+      FTableEngineDefault := 'MergeTree';
+    end
+    else try
       Results := GetResults('SHOW ENGINES');
       while not Results.Eof do begin
         engineName := Results.Col('Engine');
@@ -6605,8 +6567,51 @@ var
   TableIdx: Integer;
   ColQuery: TDBQuery;
   Col: TTableColumn;
-  DefText, ExtraText: String;
+  DefText, ExtraText, ColName: String;
+  ColNames: TStringList;
 begin
+  if Parameters.IsClickHouse then begin
+    // ClickHouse reports MySQL compatible data types and nullability only in SHOW COLUMNS,
+    // which sorts by name. So the column order comes from system.columns.
+    Result := TTableColumnList.Create(True);
+    ColNames := GetCol('SELECT name FROM system.columns'+
+      ' WHERE database='+EscapeString(Table.Database)+' AND table='+EscapeString(Table.Name)+
+      ' ORDER BY position');
+    ColQuery := GetResults('SHOW FULL COLUMNS FROM '+QuoteIdent(Table.Database)+'.'+QuoteIdent(Table.Name));
+    for ColName in ColNames do begin
+      ColQuery.First;
+      while not ColQuery.Eof do begin
+        if ColQuery.Col(0) = ColName then begin
+          Col := TTableColumn.Create(Self);
+          Result.Add(Col);
+          Col.Name := ColName;
+          Col.OldName := Col.Name;
+          Col.ParseDatatype(ColQuery.Col('type'));
+          Col.AllowNull := SameText(ColQuery.Col('null'), 'yes');
+          Col.OnUpdateType := cdtNothing;
+          Col.OnUpdateText := '';
+          if ColQuery.IsNull('default') then begin
+            if Col.AllowNull then
+              Col.DefaultType := cdtNull
+            else
+              Col.DefaultType := cdtNothing;
+            Col.DefaultText := '';
+          end
+          else begin
+            Col.DefaultType := cdtExpression;
+            Col.DefaultText := ColQuery.Col('default');
+          end;
+          Col.Comment := ColQuery.Col('comment', True);
+          Break;
+        end;
+        ColQuery.Next;
+      end;
+    end;
+    ColQuery.Free;
+    ColNames.Free;
+    Exit;
+  end;
+
   TableIdx := InformationSchemaObjects.IndexOf('columns');
   if TableIdx > -1 then begin
     Result := inherited;
@@ -6829,11 +6834,34 @@ var
   KeyQuery, ColQuery: TDBQuery;
   NewKey: TTableKey;
   SizeQuery: String;
-  SizeByIndex: TStringList;
+  SizeByIndex, KeyColumns: TStringList;
+  KeyColumn: String;
 begin
   Result := TTableKeyList.Create(True);
 
-  if Parameters.IsProxySQLAdmin then begin
+  if Parameters.IsClickHouse then begin
+
+    // A ClickHouse table has one primary key, which does not enforce unique values.
+    // Return it as normal key, so the data grid does not rely on it for identifying a row.
+    KeyColumns := GetCol('SELECT name FROM system.columns'+
+      ' WHERE database='+EscapeString(Table.Database)+' AND table='+EscapeString(Table.Name)+
+      ' AND is_in_primary_key ORDER BY position');
+    if KeyColumns.Count > 0 then begin
+      NewKey := TTableKey.Create(Self);
+      Result.Add(NewKey);
+      NewKey.Name := 'primary_key';
+      NewKey.OldName := NewKey.Name;
+      NewKey.IndexType := TTableKey.KEY;
+      NewKey.OldIndexType := NewKey.IndexType;
+      for KeyColumn in KeyColumns do begin
+        NewKey.Columns.Add(KeyColumn);
+        NewKey.SubParts.Add('');
+        NewKey.Collations.Add('');
+      end;
+    end;
+    KeyColumns.Free;
+
+  end else if Parameters.IsProxySQLAdmin then begin
 
     ColQuery := GetResults('SELECT * '+
       'FROM pragma_table_info('+EscapeString(Table.Name)+') '+
@@ -7961,7 +7989,21 @@ begin
   // Tables and views
   Results := nil;
   try
-    if Parameters.IsProxySQLAdmin then begin
+    if Parameters.IsClickHouse then begin
+      // No SHOW TABLE STATUS, and IS.TABLES has no comment and modification time
+      Results := GetResults('SELECT '+
+          'name AS '+QuoteIdent('Name')+', '+
+          'engine AS '+QuoteIdent('Engine')+', '+
+          'NULL AS '+QuoteIdent('Version')+', '+
+          'total_rows AS '+QuoteIdent('Rows')+', '+
+          'total_bytes AS '+QuoteIdent('Data_length')+', '+
+          '0 AS '+QuoteIdent('Index_length')+', '+
+          'metadata_modification_time AS '+QuoteIdent('Update_time')+', '+
+          'comment AS '+QuoteIdent('Comment')+
+        ' FROM system.tables'+
+        ' WHERE database='+EscapeString(db)+' AND NOT is_temporary'
+        );
+    end else if Parameters.IsProxySQLAdmin then begin
       Results := GetResults('SHOW TABLES FROM '+QuoteIdent(db));
     end else if Parameters.FullTableStatus or (UpperCase(db) = UpperCase(InfSch)) then begin
       Results := GetResults('SHOW TABLE STATUS FROM '+QuoteIdent(db));
@@ -8013,6 +8055,9 @@ begin
         Obj.Engine := Results.Col('Type', True)
       else
         Obj.Engine := Results.Col('Engine', True);
+      // ClickHouse: View, MaterializedView, LiveView, WindowView
+      if Parameters.IsClickHouse and Obj.Engine.EndsWith('View', True) then
+        Obj.NodeType := lntView;
       Obj.Comment := Results.Col('Comment', True);
       // Sanitize comment from automatically appendage
       rx.Expression := '(;\s*)?InnoDB\s*free\:.*$';
@@ -8681,8 +8726,37 @@ var
   i: Integer;
   Param: TRoutineParam;
   InLiteral: Boolean;
+  MsSqlRoutine: TMsSqlRoutineStructure;
+  MsSqlParam: TMsSqlRoutineParam;
 begin
   // Parse CREATE code of stored function or procedure to detect parameters
+  Obj.Preamble := '';
+  Obj.RoutineOptions := '';
+  if FParameters.NetTypeGroup = ngMSSQL then begin
+    // T-SQL has its own syntax, e.g. no parentheses around procedure parameters. See GitHub issue #667
+    Obj.Definer := '';
+    Obj.Returns := '';
+    Obj.Comment := '';
+    if ParseMsSqlRoutine(Obj.CreateCode, MsSqlRoutine) then begin
+      for MsSqlParam in MsSqlRoutine.Params do begin
+        Param := TRoutineParam.Create;
+        Param.Name := MsSqlParam.Name;
+        Param.Datatype := MsSqlParam.Datatype;
+        Param.Context := MsSqlParam.Context;
+        Parameters.Add(Param);
+      end;
+      Obj.Preamble := MsSqlRoutine.Preamble;
+      Obj.Returns := MsSqlRoutine.Returns;
+      Obj.RoutineOptions := MsSqlRoutine.Options;
+      Obj.Body := MsSqlRoutine.Body;
+    end
+    else begin
+      // Unknown structure, show the whole code rather than a random part of it
+      Obj.Body := Obj.CreateCode;
+    end;
+    Exit;
+  end;
+
   rx := TRegExpr.Create;
   rx.ModifierI := True;
   rx.ModifierG := True;
@@ -8849,15 +8923,6 @@ begin
       // 让 TRedisQuery.Execute 能识别并提取 key 名）
       Result := QueryType + ' ' + QueryBody;
     end;
-  end;
-end;
-
-
-function TDBConnection.LikeClauseTail: String;
-begin
-  case FParameters.NetTypeGroup of
-    ngMSSQL: Result := ' ESCAPE ' + EscapeString('\');
-    else Result := '';
   end;
 end;
 
@@ -11241,6 +11306,8 @@ begin
   DataAccess := '';
   Security := '';
   ArgTypes := '';
+  Preamble := '';
+  RoutineOptions := '';
   Deterministic := False;
   RowsAreExact := False;
   IsMaterialized := False;
@@ -11294,6 +11361,8 @@ begin
     DataAccess := s.DataAccess;
     Security := s.Security;
     ArgTypes := s.ArgTypes;
+    Preamble := s.Preamble;
+    RoutineOptions := s.RoutineOptions;
     Deterministic := s.Deterministic;
     RowsAreExact := s.RowsAreExact;
     IsMaterialized := s.IsMaterialized;
