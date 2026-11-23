@@ -6,7 +6,7 @@ interface
 
 uses
   SysUtils, Classes, Graphics, Controls, Forms, Dialogs, StdCtrls, SynEdit,
-  ExtCtrls, Menus, LCLProc,
+  ExtCtrls, Menus, LCLProc, StrUtils,
   dbconnection, dbstructures, dbstructures.mysql, apphelpers, ComCtrls, extra_controls;
 
 type
@@ -122,7 +122,11 @@ begin
     rgCheck.Enabled := True;
     rgCheck.ItemIndex := 0;
     comboSecurity.ItemIndex := 0;
-    SynMemoBody.Text := 'SELECT ';
+    // Oracle, Snowflake: body includes everything after the view name, see ComposeCreateStatement
+    if Obj.Connection.Parameters.IsAnyOdbc then
+      SynMemoBody.Text := 'AS SELECT '
+    else
+      SynMemoBody.Text := 'SELECT ';
     lblDisabledWhy.Hide;
   end;
 
@@ -189,6 +193,11 @@ var
 begin
   // Save changes
   Result := mrOk;
+  if DBObject.Connection.Parameters.IsAnyOracle and DBObject.IsMaterialized then begin
+    ErrorDialog(f_('Saving is not yet supported in this editor on %s. Run a CREATE OR REPLACE statement in a query tab instead.', [DBObject.Connection.Parameters.NetTypeName(False)]));
+    Result := mrAbort;
+    Exit;
+  end;
 
   try
     Batch := ComposeCreateStatement;
@@ -234,8 +243,44 @@ end;
 
 function TfrmView.ComposeCreateStatement: TSQLBatch;
 var
-  sql, ViewName, RenameView: String;
+  sql, ViewName, RenameView, Modifiers, CreateCode: String;
 begin
+  if DBObject.Connection.Parameters.IsAnySnowflake then begin
+    // Keep SECURE, RECURSIVE and MATERIALIZED from the existing view. The body holds the optional
+    // column list, COMMENT and AS SELECT. CREATE OR REPLACE drops grants on the view, unless the
+    // body contains COPY GRANTS before AS.
+    Modifiers := '';
+    if ObjectExists then begin
+      CreateCode := DBObject.CreateCode;
+      Modifiers := RegExprGetMatch('^\s*CREATE\s+(OR\s+REPLACE\s+)?(.*?)\bVIEW\b', CreateCode, 2, False, True);
+      Modifiers := Trim(Modifiers);
+      if not Modifiers.IsEmpty then
+        Modifiers := UpperCase(Modifiers) + ' ';
+    end;
+    sql := '';
+    if ObjectExists and (DBObject.Name <> editName.Text) then
+      sql := sql + 'ALTER ' + IfThen(DBObject.IsMaterialized, 'MATERIALIZED VIEW ', 'VIEW ') +
+        DBObject.QuotedDbAndTableName + ' RENAME TO ' + DBObject.QuotedDatabase + '.' +
+        DBObject.Connection.QuoteIdent(editName.Text) + ';' + sLineBreak;
+    sql := sql + 'CREATE OR REPLACE ' + Modifiers + 'VIEW ' + DBObject.QuotedDatabase + '.' +
+      DBObject.Connection.QuoteIdent(editName.Text) + ' ' + SynMemoBody.Text + ';';
+    Result := TSQLBatch.Create(DBObject.Connection.Parameters.NetTypeGroup);
+    Result.SQL := Trim(sql);
+    Exit;
+  end;
+  if DBObject.Connection.Parameters.IsAnyOracle then begin
+    // CREATE OR REPLACE keeps the grants on the view. The body holds the optional column list,
+    // AS, the SELECT and optional WITH READ ONLY / CHECK OPTION. RENAME works in the own schema only.
+    sql := '';
+    if ObjectExists and (DBObject.Name <> editName.Text) then
+      sql := sql + 'RENAME ' + DBObject.Connection.QuoteIdent(DBObject.Name) +
+        ' TO ' + DBObject.Connection.QuoteIdent(editName.Text) + ';' + sLineBreak;
+    sql := sql + 'CREATE OR REPLACE VIEW ' + DBObject.QuotedDatabase + '.' +
+      DBObject.Connection.QuoteIdent(editName.Text) + ' ' + SynMemoBody.Text + ';';
+    Result := TSQLBatch.Create(DBObject.Connection.Parameters.NetTypeGroup);
+    Result.SQL := Trim(sql);
+    Exit;
+  end;
   // Create or Alter code
   if not ObjectExists then begin
     sql := 'CREATE ';

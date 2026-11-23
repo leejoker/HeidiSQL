@@ -7133,6 +7133,22 @@ msgstr "Switch to details view"
 msgid "Switch to icon view"
 msgstr "Switch to icon view"
 
+#: extfiledialog.pas
+msgid "Create new folder"
+msgstr "Create new folder"
+
+#: extfiledialog.pas
+msgid "Create folder"
+msgstr "Create folder"
+
+#: extfiledialog.pas
+msgid "Name of new folder in %s"
+msgstr "Name of new folder in %s"
+
+#: extfiledialog.pas
+msgid "Could not create folder \"%s\": %s"
+msgstr "Could not create folder \"%s\": %s"
+
 #: about.pas:123
 msgid "Compiled on: %s with"
 msgstr "Compiled on: %s with"
@@ -7512,3 +7528,87 @@ msgstr "User or role <%s@%s> already exists."
 #: view.lfm:230
 msgid "SQL security:"
 msgstr "SQL security:"
+
+#: dbconnection.pas
+msgid "No ODBC driver selected. Please install the ODBC driver for your database server, and select it in your session settings."
+msgstr "No ODBC driver selected. Please install the ODBC driver for your database server, and select it in your session settings."
+
+#: dbconnection.pas
+msgid "Your NLS_LANG environment variable is set to %s. Use a UTF-8 character set like %s to avoid broken non-ASCII text."
+msgstr "Your NLS_LANG environment variable is set to %s. Use a UTF-8 character set like %s to avoid broken non-ASCII text."
+
+#: dbconnection.pas
+msgid "Grid editing is not yet supported on %s."
+msgstr "Grid editing is not yet supported on %s."
+
+#: connections.pas
+msgid "Service name:"
+msgstr "Service name:"
+
+#: connections.pas
+msgid "ODBC driver:"
+msgstr "ODBC driver:"
+
+#: main.pas
+msgid "Dropping a database is not supported on %s."
+msgstr "Dropping a database is not supported on %s."
+
+#: routine_editor.pas trigger_editor.pas view.pas
+msgid "Saving is not yet supported in this editor on %s. Run a CREATE OR REPLACE statement in a query tab instead."
+msgstr "Saving is not yet supported in this editor on %s. Run a CREATE OR REPLACE statement in a query tab instead."
+
+#: table_editor.pas
+msgid "%d of %d statements were executed before the error. The editor shows the current state from the server now."
+msgstr "%d of %d statements were executed before the error. The editor shows the current state from the server now."
+
+#: connections.lfm
+msgid "Connection parameters:"
+msgstr "Connection parameters:"
+
+#: connections.lfm
+msgid "Added to the connection string of the client library, overriding built-in values. Stored unencrypted."
+msgstr "Added to the connection string of the client library, overriding built-in values. Stored unencrypted."
+
+#: dbconnection.pas
+msgid "Ignoring invalid option name \"%s\" in connection parameters"
+msgstr "Ignoring invalid option name \"%s\" in connection parameters"
+
+#: connections.lfm
+msgid "Warehouse:"
+msgstr "Warehouse:"
+
+#: connections.lfm
+msgid "Role:"
+msgstr "Role:"
+
+#: connections.lfm
+msgid "Optional, default role of the user"
+msgstr "Optional, default role of the user"
+
+#: connections.pas
+msgid "Account URL:"
+msgstr "Account URL:"
+
+#: dbconnection.pas
+msgid "No database selected. Please enter the name of a database in your session settings."
+msgstr "No database selected. Please enter the name of a database in your session settings."
+
+#: dbconnection.pas
+msgid "Could not detect the name of your time zone, keeping the default session time zone."
+msgstr "Could not detect the name of your time zone, keeping the default session time zone."
+
+#: extfiledialog.pas
+msgid "A file name cannot contain any of the following characters: %s"
+msgstr "A file name cannot contain any of the following characters: %s"
+
+#: extfiledialog.pas
+msgid "A file or folder with the name \"%s\" already exists."
+msgstr "A file or folder with the name \"%s\" already exists."
+
+#: extfiledialog.pas
+msgid "If you change a file name extension, the file might become unusable. Do you want to change it?"
+msgstr "If you change a file name extension, the file might become unusable. Do you want to change it?"
+
+#: extfiledialog.pas
+msgid "Could not rename \"%s\" to \"%s\": %s"
+msgstr "Could not rename \"%s\" to \"%s\": %s"

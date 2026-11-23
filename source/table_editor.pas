@@ -532,7 +532,7 @@ function TfrmTableEditor.ApplyModifications: TModalResult;
 var
   Batch: TSQLBatch;
   Query: TSQLSentence;
-  i: Integer;
+  i, ExecutedCount, TotalCount: Integer;
   Rename, ErrMessage, ErrMessageAdditional, InnodbStatus: String;
 begin
   // Check if all indexes have at least one column
@@ -552,9 +552,14 @@ begin
     Batch := ComposeCreateStatement
   else
     Batch := ComposeAlterStatement;
+  ExecutedCount := 0;
+  TotalCount := Batch.Count;
+  if ObjectExists and (editName.Text <> DBObject.Name) then
+    Inc(TotalCount);
   try
     for Query in Batch do begin
       DBObject.Connection.Query(Query.SQL);
+      Inc(ExecutedCount);
       DBObject.Connection.ShowWarnings;
     end;
     // Rename table
@@ -564,6 +569,7 @@ begin
           DBObject.Connection.QuoteIdent(editName.Text)
         ]);
       DBObject.Connection.Query(Rename);
+      Inc(ExecutedCount);
       DBObject.Connection.ShowWarnings;
     end;
     tabALTERcode.TabVisible := ObjectExists;
@@ -598,10 +604,23 @@ begin
         if not ErrMessageAdditional.IsEmpty then
           ErrMessage := ErrMessage + sLineBreak + sLineBreak + 'INNODB STATUS:' + sLineBreak + ErrMessageAdditional;
       end;
-      ErrorDialog(ErrMessage);
+      if (ExecutedCount > 0) and ObjectExists then begin
+        // DDL cannot be rolled back on most servers. The editor would otherwise compose statements
+        // against a state which is no longer on the server, e.g. drop an already dropped index.
+        ErrMessage := ErrMessage + sLineBreak + sLineBreak +
+          f_('%d of %d statements were executed before the error. The editor shows the current state from the server now.', [ExecutedCount, TotalCount]);
+        ErrorDialog(ErrMessage);
+        Modified := False;
+        DBObject.UnloadDetails;
+        Init(DBObject);
+        Mainform.RefreshTree(DBObject);
+      end
+      else
+        ErrorDialog(ErrMessage);
       Result := mrAbort;
     end;
   end;
+  Batch.Free;
 end;
 
 
@@ -627,6 +646,9 @@ begin
   end;
   FDeletedKeys.Clear;
   for i:=0 to FKeys.Count-1 do begin
+    // Saved keys were created as constraint or as plain index, see TTableKey.IsConstraint
+    if FKeys[i].Added or FKeys[i].Modified then
+      FKeys[i].IsConstraint := FKeys[i].InsideCreateCode;
     FKeys[i].OldName := FKeys[i].Name;
     FKeys[i].OldIndexType := FKeys[i].IndexType;
     FKeys[i].Added := False;
@@ -662,12 +684,23 @@ var
   Constraint: TCheckConstraint;
   Conn: TDBConnection;
   Params: TStringMap;
+  OrgColumns: TTableColumnList;
+  OrgCol: TTableColumn;
 
   procedure FinishSpecs;
+  var
+    Spec: String;
   begin
     if Specs.Count > 0 then begin
-      SQL := SQL + Trim('ALTER TABLE '+DBObject.QuotedName + sLineBreak +
-        CodeIndent + Implode(',' + sLineBreak + CodeIndent, Specs)) + ';' + sLineBreak;
+      if Conn.Parameters.IsAnyOdbc or Conn.Parameters.IsAnyMSSQL then begin
+        // Oracle has no comma separated list of alter clauses, Snowflake only for some of them.
+        // MSSQL has one for ADD and DROP, but without repeating the keyword, and none for ALTER COLUMN.
+        for Spec in Specs do
+          SQL := SQL + 'ALTER TABLE ' + DBObject.QuotedName + ' ' + Spec + ';' + sLineBreak;
+      end else begin
+        SQL := SQL + Trim('ALTER TABLE '+DBObject.QuotedName + sLineBreak +
+          CodeIndent + Implode(',' + sLineBreak + CodeIndent, Specs)) + ';' + sLineBreak;
+      end;
       Specs.Clear;
     end;
   end;
@@ -676,6 +709,40 @@ var
   begin
     FinishSpecs;
     SQL := SQL + Format(Query, [DBObject.QuotedName]) + ';' + sLineBreak;
+  end;
+
+  procedure AddStatement(Statement: String);
+  begin
+    // Same as AddQuery, without Format(), which breaks on "%" in comments and defaults
+    FinishSpecs;
+    SQL := SQL + Statement + ';' + sLineBreak;
+  end;
+
+  procedure MssqlDropDefault(ColName: String);
+  begin
+    // MSSQL has a named constraint per default value, mostly with a generated name
+    AddStatement('DECLARE @ConstraintName NVARCHAR(256)' + sLineBreak +
+      'DECLARE @Sql NVARCHAR(MAX)' + sLineBreak +
+      'SELECT @ConstraintName = d.name FROM sys.default_constraints AS d' + sLineBreak +
+      '  INNER JOIN sys.columns AS c ON c.object_id = d.parent_object_id AND c.column_id = d.parent_column_id' + sLineBreak +
+      '  WHERE d.parent_object_id = OBJECT_ID(' + Conn.EscapeString(DBObject.QuotedName) + ')' +
+      ' AND c.name = ' + Conn.EscapeString(ColName) + sLineBreak +
+      'IF @ConstraintName IS NOT NULL BEGIN' + sLineBreak +
+      '  SET @Sql = ' + Conn.EscapeString('ALTER TABLE ' + DBObject.QuotedName + ' DROP CONSTRAINT ') +
+      ' + QUOTENAME(@ConstraintName)' + sLineBreak +
+      '  EXEC sp_executesql @Sql' + sLineBreak +
+      'END');
+  end;
+
+  procedure OracleDropKey(Key: TTableKey);
+  begin
+    // Drop by what the key is on the server, not by its new type
+    if Key.OldIndexType = TTableKey.PRIMARY then
+      Specs.Add('DROP PRIMARY KEY')
+    else if Key.IsConstraint then
+      Specs.Add('DROP CONSTRAINT ' + Conn.QuoteIdent(Key.OldName))
+    else
+      AddStatement('DROP INDEX ' + Conn.QuoteIdent(Key.OldName));
   end;
 begin
   // Compose ALTER query, called by buttons and for SQL code tab
@@ -712,11 +779,19 @@ begin
 
   if memoComment.Tag = MODIFIEDFLAG then begin
     case Conn.Parameters.NetTypeGroup of
-      ngMySQL, ngMSSQL: begin
+      ngMySQL: begin
         Specs.Add('COMMENT=' + Conn.EscapeString(memoComment.Text));
+      end;
+      ngMSSQL: begin
+        Params := DBObject.AsStringMap;
+        Params.Add('NewComment', Conn.EscapeString(memoComment.Text));
+        AddStatement(Conn.SqlProvider.GetSql(qSetTableComment, Params));
       end;
       ngPgSQL: begin
         AddQuery('COMMENT ON TABLE '+DBObject.QuotedName+' IS '+Conn.EscapeString(memoComment.Text));
+      end;
+      ngOracle, ngSnowflake: begin
+        AddStatement('COMMENT ON TABLE '+DBObject.QuotedName+' IS '+Conn.EscapeString(memoComment.Text));
       end;
     end;
   end;
@@ -755,6 +830,10 @@ begin
 
   // Update columns
   PreviousCol := nil;
+  // Columns as they are on the server, for altering only the changed attributes on Oracle
+  OrgColumns := nil;
+  if (Conn.Parameters.IsAnyOdbc or Conn.Parameters.IsAnyMSSQL) and ObjectExists then
+    OrgColumns := DBObject.TableColumns;
   for Col in FColumns do begin
     if Col.Status <> esUntouched then begin
       OverrideCollation := IfThen(chkCharsetConvert.Checked, comboCollation.Text);
@@ -783,19 +862,47 @@ begin
         end;
 
         ngMSSQL: begin
-          ColSpec := Col.SQLCode(OverrideCollation);
+          // https://learn.microsoft.com/en-us/sql/t-sql/statements/alter-table-transact-sql
+          // ALTER COLUMN takes only type, collation and NULL. Defaults are constraints,
+          // renaming needs sp_rename, and the column order cannot be changed.
+          OrgCol := nil;
+          if Assigned(OrgColumns) then
+            OrgCol := OrgColumns.FindByName(Col.OldName);
           case Col.Status of
             esModified: begin
-              Specs.Add(Format(AlterColBase, [Conn.QuoteIdent(Col.OldName), ColSpec]));
+              if Col.Name <> Col.OldName then
+                AddStatement(Conn.SqlProvider.GetSql(qRenameColumn, [
+                  Conn.EscapeString(DBObject.QuotedName + '.' + Conn.QuoteIdent(Col.OldName)),
+                  Conn.EscapeString(Col.Name)
+                  ]));
+              ColSpec := Col.SQLCode(OverrideCollation, [cpType, cpCollation, cpAllowNull]);
+              if (not Assigned(OrgCol))
+                or (ColSpec <> OrgCol.SQLCode('', [cpType, cpCollation, cpAllowNull])) then begin
+                Specs.Add(Format(AlterColBase, [Conn.QuoteIdent(Col.Name), ColSpec]));
+                FinishSpecs;
+              end;
+              // IDENTITY cannot be added to or removed from an existing column
+              if ((not Assigned(OrgCol)) or (Col.SQLCode('', [cpDefault]) <> OrgCol.SQLCode('', [cpDefault])))
+                and (Col.DefaultType <> cdtAutoInc)
+                and ((not Assigned(OrgCol)) or (OrgCol.DefaultType <> cdtAutoInc)) then begin
+                MssqlDropDefault(Col.Name);
+                if Col.DefaultType in [cdtText, cdtExpression] then
+                  AddStatement('ALTER TABLE ' + DBObject.QuotedName + ' ADD ' + Col.SQLCode('', [cpDefault]) +
+                    ' FOR ' + Conn.QuoteIdent(Col.Name));
+              end;
             end;
             esAddedUntouched, esAddedModified: begin
-              Specs.Add(Format(AddColBase, [ColSpec]));
+              Specs.Add(Format(AddColBase, [Col.SQLCode(OverrideCollation)]));
+              FinishSpecs;
             end;
           end;
-          Params := DBObject.AsStringMap;
-          Params.Add('NewComment', Conn.EscapeString(Col.Comment));
-          Params.Add('TargetColumn', Conn.EscapeString(Col.Name));
-          AddQuery(Conn.SqlProvider.GetSql(qSetColumnComment, Params));
+          if (Assigned(OrgCol) and (Col.Comment <> OrgCol.Comment))
+            or ((not Assigned(OrgCol)) and (not Col.Comment.IsEmpty)) then begin
+            Params := DBObject.AsStringMap;
+            Params.Add('NewComment', Conn.EscapeString(Col.Comment));
+            Params.Add('TargetColumn', Conn.EscapeString(Col.Name));
+            AddStatement(Conn.SqlProvider.GetSql(qSetColumnComment, Params));
+          end;
         end;
 
         ngPgSQL: begin
@@ -855,6 +962,80 @@ begin
           FinishSpecs;
         end;
 
+        ngOracle: begin
+          // https://docs.oracle.com/en/database/oracle/oracle-database/21/sqlrf/ALTER-TABLE.html
+          OrgCol := nil;
+          if Assigned(OrgColumns) then
+            OrgCol := OrgColumns.FindByName(Col.OldName);
+          case Col.Status of
+            esModified: begin
+              if Col.Name <> Col.OldName then
+                Specs.Add(Conn.SqlProvider.GetSql(qRenameColumn, [Conn.QuoteIdent(Col.OldName), Conn.QuoteIdent(Col.Name)]));
+              // MODIFY only what changed: Oracle rejects NOT NULL on a NOT NULL column (ORA-01442),
+              // NULL on a nullable one (ORA-01451) and any type on LOB columns (ORA-22859)
+              ColSpec := '';
+              if (not Assigned(OrgCol))
+                or (Col.SQLCode('', [cpType, cpVirtuality]) <> OrgCol.SQLCode('', [cpType, cpVirtuality])) then
+                ColSpec := Col.SQLCode('', [cpType, cpVirtuality]);
+              if Assigned(OrgCol) and (OrgCol.DefaultType = cdtAutoInc) and (Col.DefaultType <> cdtAutoInc) then
+                Specs.Add('MODIFY (' + Conn.QuoteIdent(Col.Name) + ' DROP IDENTITY)')
+              else if (not Assigned(OrgCol)) or (Col.SQLCode('', [cpDefault]) <> OrgCol.SQLCode('', [cpDefault])) then begin
+                // There is no DROP DEFAULT
+                if Col.DefaultType = cdtNothing then
+                  ColSpec := ColSpec + ' DEFAULT NULL'
+                else
+                  ColSpec := ColSpec + ' ' + Col.SQLCode('', [cpDefault]);
+              end;
+              if (not Assigned(OrgCol)) or (Col.AllowNull <> OrgCol.AllowNull) then
+                ColSpec := ColSpec + IfThen(Col.AllowNull, ' NULL', ' NOT NULL');
+              ColSpec := Trim(ColSpec);
+              if not ColSpec.IsEmpty then
+                Specs.Add('MODIFY (' + Conn.QuoteIdent(Col.Name) + ' ' + ColSpec + ')');
+              if (not Assigned(OrgCol)) or (Col.Comment <> OrgCol.Comment) then
+                AddStatement('COMMENT ON COLUMN ' + DBObject.QuotedName + '.' + Conn.QuoteIdent(Col.Name) +
+                  ' IS ' + Conn.EscapeString(Col.Comment));
+            end;
+            esAddedUntouched, esAddedModified: begin
+              Specs.Add('ADD (' + Col.SQLCode + ')');
+              if not Col.Comment.IsEmpty then
+                AddStatement('COMMENT ON COLUMN ' + DBObject.QuotedName + '.' + Conn.QuoteIdent(Col.Name) +
+                  ' IS ' + Conn.EscapeString(Col.Comment));
+            end;
+          end;
+        end;
+
+        ngSnowflake: begin
+          // https://docs.snowflake.com/en/sql-reference/sql/alter-table-column
+          // Only changes which the server accepts: longer VARCHAR, higher NUMBER precision, NOT NULL,
+          // dropping a default, or a sequence default. Unchanged attributes are left out.
+          OrgCol := nil;
+          if Assigned(OrgColumns) then
+            OrgCol := OrgColumns.FindByName(Col.OldName);
+          case Col.Status of
+            esModified: begin
+              if Col.Name <> Col.OldName then
+                Specs.Add(Conn.SqlProvider.GetSql(qRenameColumn, [Conn.QuoteIdent(Col.OldName), Conn.QuoteIdent(Col.Name)]));
+              if (not Assigned(OrgCol)) or (Col.SQLCode('', [cpType]) <> OrgCol.SQLCode('', [cpType])) then
+                Specs.Add(Format(AlterColBase, [Conn.QuoteIdent(Col.Name), 'SET DATA TYPE ' + Col.SQLCode('', [cpType])]));
+              if (not Assigned(OrgCol)) or (Col.AllowNull <> OrgCol.AllowNull) then
+                Specs.Add(Format(AlterColBase, [Conn.QuoteIdent(Col.Name), IfThen(Col.AllowNull, 'DROP NOT NULL', 'SET NOT NULL')]));
+              if (not Assigned(OrgCol)) or (Col.SQLCode('', [cpDefault]) <> OrgCol.SQLCode('', [cpDefault])) then begin
+                if Col.DefaultType = cdtNothing then
+                  Specs.Add(Format(AlterColBase, [Conn.QuoteIdent(Col.Name), 'DROP DEFAULT']))
+                else
+                  Specs.Add(Format(AlterColBase, [Conn.QuoteIdent(Col.Name), 'SET ' + Col.SQLCode('', [cpDefault])]));
+              end;
+              if (not Assigned(OrgCol)) or (Col.Comment <> OrgCol.Comment) then
+                AddStatement('COMMENT ON COLUMN ' + DBObject.QuotedName + '.' + Conn.QuoteIdent(Col.Name) +
+                  ' IS ' + Conn.EscapeString(Col.Comment));
+            end;
+            esAddedUntouched, esAddedModified: begin
+              // Including the column comment
+              Specs.Add(Format(AddColBase, [Col.SQLCode]));
+            end;
+          end;
+        end;
+
       end;
 
     end;
@@ -864,22 +1045,54 @@ begin
   // Deleted columns
   for Col in FColumns do begin
     if Col.Status = esDeleted then begin
+      // MSSQL refuses to drop a column with a default constraint
+      if Conn.Parameters.IsAnyMSSQL then begin
+        OrgCol := nil;
+        if Assigned(OrgColumns) then
+          OrgCol := OrgColumns.FindByName(Col.OldName);
+        if (not Assigned(OrgCol)) or (not (OrgCol.DefaultType in [cdtNothing, cdtAutoInc])) then
+          MssqlDropDefault(Col.OldName);
+      end;
       Specs.Add('DROP COLUMN '+Conn.QuoteIdent(Col.OldName));
       // MSSQL + SQLite want one ALTER TABLE query per DROP COLUMN
-      if Conn.Parameters.NetTypeGroup in [ngMSSQL, ngSQLite] then
+      if Conn.Parameters.NetTypeGroup in [ngMSSQL, ngSQLite, ngOracle, ngSnowflake] then
         FinishSpecs;
+    end;
+  end;
+
+  // Oracle, Snowflake: drop deleted and modified keys, then add new and modified ones as constraint or index
+  if Conn.Parameters.IsAnyOdbc then begin
+    for TblKey in FDeletedKeys do
+      OracleDropKey(TblKey);
+    for TblKey in FKeys do begin
+      if TblKey.Modified and (not TblKey.Added) then
+        OracleDropKey(TblKey);
+    end;
+    for TblKey in FKeys do begin
+      if not (TblKey.Added or TblKey.Modified) then
+        Continue;
+      if TblKey.InsideCreateCode then
+        Specs.Add('ADD ' + TblKey.SQLCode)
+      else
+        AddStatement(TblKey.SQLCode(DBObject.Name));
     end;
   end;
 
   // Drop indexes
   for TblKey in FDeletedKeys do begin
-    if not TblKey.InsideCreateCode then
+    if Conn.Parameters.IsAnyOdbc or (not TblKey.InsideCreateCode) then
       Continue;
     if Conn.Parameters.IsAnyPostgreSQL then begin
       if TblKey.IsPrimary or TblKey.IsUnique then
         IndexSQL := 'CONSTRAINT ' + TblKey.OldName
       else // wrong:
         IndexSQL := 'INDEX ' + Conn.QuoteIdent(TblKey.OldName);
+    end
+    else if Conn.Parameters.IsAnyOracle then begin
+      if TblKey.IsPrimary then
+        IndexSQL := 'PRIMARY KEY'
+      else
+        IndexSQL := 'CONSTRAINT ' + Conn.QuoteIdent(TblKey.OldName);
     end
     else begin
       if TblKey.IsPrimary then
@@ -892,7 +1105,7 @@ begin
 
   // Drop changed indexes, and add changed or added indexes
   for TblKey in FKeys do begin
-    if not TblKey.InsideCreateCode then
+    if Conn.Parameters.IsAnyOdbc or (not TblKey.InsideCreateCode) then
       Continue;
     if TblKey.Modified and (not TblKey.Added) then begin
       if Conn.Parameters.IsAnyPostgreSQL then begin
@@ -900,6 +1113,12 @@ begin
           IndexSQL := 'CONSTRAINT ' + TblKey.OldName
         else // wrong:
           IndexSQL := 'INDEX ' + Conn.QuoteIdent(TblKey.OldName);
+      end
+      else if Conn.Parameters.IsAnyOracle then begin
+        if TblKey.OldIndexType = TTableKey.PRIMARY then
+          IndexSQL := 'PRIMARY KEY'
+        else
+          IndexSQL := 'CONSTRAINT ' + Conn.QuoteIdent(TblKey.OldName);
       end
       else begin
         if TblKey.OldIndexType = TTableKey.PRIMARY then
@@ -954,7 +1173,7 @@ begin
 
   // Drop indexes, also changed indexes, which will be readded below
   for i:=0 to FDeletedKeys.Count-1 do begin
-    if FDeletedKeys[i].InsideCreateCode then
+    if Conn.Parameters.IsAnyOdbc or FDeletedKeys[i].InsideCreateCode then
       Continue;
     if FDeletedKeys[i].IsPrimary then
       IndexSQL := 'PRIMARY KEY'
@@ -964,7 +1183,7 @@ begin
   end;
   // Add changed or added indexes
   for i:=0 to FKeys.Count-1 do begin
-    if FKeys[i].InsideCreateCode then
+    if Conn.Parameters.IsAnyOdbc or FKeys[i].InsideCreateCode then
       Continue;
     if FKeys[i].Modified and (not FKeys[i].Added) then begin
       if FKeys[i].OldIndexType = TTableKey.PRIMARY then
@@ -980,6 +1199,7 @@ begin
   Result := TSQLBatch.Create(DBObject.Connection.Parameters.NetTypeGroup);
   Result.SQL := SQL;
 
+  FreeAndNil(OrgColumns);
   FreeAndNil(Specs);
   Mainform.ShowStatusMsg;
   Screen.Cursor := crDefault;
@@ -1003,7 +1223,7 @@ begin
       CreateLines.Add(Col.SQLCode);
   end;
   for i:=0 to FKeys.Count-1 do begin
-    if not FKeys[i].InsideCreateCode then
+    if (not FKeys[i].InsideCreateCode) or FKeys[i].InlinedInColumn(FColumns) then
       Continue;
     tmp := FKeys[i].SQLCode;
     if tmp <> '' then begin
@@ -1020,8 +1240,12 @@ begin
       + ')' + sLineBreak;
   CreateLines.Free;
 
-  if (memoComment.Text <> '') and (not DBObject.Connection.Parameters.IsAnyPostgreSQL) then
+  if (memoComment.Text <> '') and (not DBObject.Connection.Parameters.IsAnyPostgreSQL)
+    and (not DBObject.Connection.Parameters.IsAnyOracle)
+    and (not DBObject.Connection.Parameters.IsAnyMSSQL) then
     SQL := SQL + 'COMMENT='+DBObject.Connection.EscapeString(memoComment.Text) + sLineBreak;
+  // MySQL table options. Oracle and Snowflake have none of these.
+  if not DBObject.Connection.Parameters.IsAnyOdbc then begin
   if comboCollation.Text <> '' then
     SQL := SQL + 'COLLATE='+DBObject.Connection.EscapeString(comboCollation.Text) + sLineBreak;
   if (comboEngine.Text <> '') and (comboEngine.ItemIndex > 0) then begin
@@ -1046,6 +1270,7 @@ begin
     SQL := SQL + 'INSERT_METHOD='+comboInsertMethod.Text + sLineBreak;
   if SynMemoPartitions.GetTextLen > 0 then
     SQL := SQL +  '/*!50100 ' + SynMemoPartitions.Text + ' */';
+  end;
   SQL := SQL + ';' + sLineBreak;
 
   // Separate queries from here on
@@ -1056,6 +1281,43 @@ begin
         ' IS '+DBObject.Connection.EscapeString(memoComment.Text) + ';' + sLineBreak;
     end;
     for Col in FColumns do begin
+      SQL := SQL + 'COMMENT ON COLUMN '+
+        DBObject.Connection.QuoteIdent(editName.Text)+'.'+DBObject.Connection.QuoteIdent(Col.Name)+
+        ' IS '+DBObject.Connection.EscapeString(Col.Comment) + ';' + sLineBreak;
+    end;
+  end;
+
+  if DBObject.Connection.Parameters.IsAnyMSSQL then begin
+    // Comments are extended properties. The new table is in the default schema.
+    if memoComment.Text <> '' then begin
+      SQL := SQL + 'DECLARE @Schema SYSNAME = SCHEMA_NAME()' + sLineBreak +
+        'EXEC sys.sp_addextendedproperty @name = N''MS_Description'',' +
+        ' @value = ' + DBObject.Connection.EscapeString(memoComment.Text) + ',' +
+        ' @level0type = N''SCHEMA'', @level0name = @Schema,' +
+        ' @level1type = N''TABLE'', @level1name = ' + DBObject.Connection.EscapeString(editName.Text) +
+        ';' + sLineBreak;
+    end;
+    for Col in FColumns do begin
+      if (Col.Comment = '') or (Col.Status in [esDeleted, esAddedDeleted]) then
+        Continue;
+      SQL := SQL + 'DECLARE @Schema SYSNAME = SCHEMA_NAME()' + sLineBreak +
+        'EXEC sys.sp_addextendedproperty @name = N''MS_Description'',' +
+        ' @value = ' + DBObject.Connection.EscapeString(Col.Comment) + ',' +
+        ' @level0type = N''SCHEMA'', @level0name = @Schema,' +
+        ' @level1type = N''TABLE'', @level1name = ' + DBObject.Connection.EscapeString(editName.Text) + ',' +
+        ' @level2type = N''COLUMN'', @level2name = ' + DBObject.Connection.EscapeString(Col.Name) +
+        ';' + sLineBreak;
+    end;
+  end;
+
+  if DBObject.Connection.Parameters.IsAnyOracle then begin
+    if memoComment.Text <> '' then begin
+      SQL := SQL + 'COMMENT ON TABLE '+DBObject.Connection.QuoteIdent(editName.Text)+
+        ' IS '+DBObject.Connection.EscapeString(memoComment.Text) + ';' + sLineBreak;
+    end;
+    for Col in FColumns do begin
+      if (Col.Comment = '') or (Col.Status in [esDeleted, esAddedDeleted]) then
+        Continue;
       SQL := SQL + 'COMMENT ON COLUMN '+
         DBObject.Connection.QuoteIdent(editName.Text)+'.'+DBObject.Connection.QuoteIdent(Col.Name)+
         ' IS '+DBObject.Connection.EscapeString(Col.Comment) + ';' + sLineBreak;
@@ -1520,11 +1782,11 @@ begin
     // No editing of collation allowed if "Convert data" was checked
     ColNumCollation: Result := not chkCharsetConvert.Checked;
 
-    ColNumSrid: Result := (Col.DataType.Category = dtcSpatial) and DBObject.Connection.Has(frSrid);
+    ColNumSrid: Result := (Col.DataType.Category = dtcSpatial) and DBObject.Connection.SqlProvider.Has(qColumnSrid);
 
-    ColNumInvisible: Result := DBObject.Connection.Has(frInvisibleColumns);
+    ColNumInvisible: Result := DBObject.Connection.SqlProvider.Has(qColumnInvisible);
 
-    ColNumCompressed: Result := DBObject.Connection.Has(frCompressedColumns);
+    ColNumCompressed: Result := DBObject.Connection.SqlProvider.Has(qColumnCompressed);
 
     else Result := True;
   end;
@@ -1599,7 +1861,7 @@ begin
     ColNumVirtuality: CellText := Col.Virtuality;
 
     ColNumSrid: begin
-      if (Col.DataType.Category = dtcSpatial) and (Col.Connection.Has(frSrid)) then
+      if (Col.DataType.Category = dtcSpatial) and Col.Connection.SqlProvider.Has(qColumnSrid) then
         CellText := Col.SRID.ToString;
     end;
 
@@ -1800,7 +2062,8 @@ var
 begin
   // Handle click event
   VT := Sender as TLazVirtualStringTree;
-  VT.GetHitTestInfoAt(Mouse.CursorPos.X-VT.ClientOrigin.X, Mouse.CursorPos.Y-VT.ClientOrigin.Y, True, {%H-}Click);
+  Click := Default(THitInfo);
+  VT.GetHitTestInfoAt(Mouse.CursorPos.X-VT.ClientOrigin.X, Mouse.CursorPos.Y-VT.ClientOrigin.Y, True, Click);
   vtHandleClickOrKeyPress(VT, Click.HitNode, Click.HitColumn, Click.HitPositions);
 end;
 
@@ -2235,7 +2498,8 @@ var
 begin
   // Handle click event
   VT := Sender as TLazVirtualStringTree;
-  VT.GetHitTestInfoAt(Mouse.CursorPos.X-VT.ClientOrigin.X, Mouse.CursorPos.Y-VT.ClientOrigin.Y, True, {%H-}Click);
+  Click := Default(THitInfo);
+  VT.GetHitTestInfoAt(Mouse.CursorPos.X-VT.ClientOrigin.X, Mouse.CursorPos.Y-VT.ClientOrigin.Y, True, Click);
   if Assigned(Click.HitNode) and (Click.HitColumn > NoColumn) and (hiOnItemLabel in Click.HitPositions) then
     VT.EditNode(Click.HitNode, Click.HitColumn);
 end;
@@ -2456,7 +2720,13 @@ begin
     // Index type pulldown
     EnumEditor := TEnumEditorLink.Create(VT, True, nil);
     EnumEditor.ValueList := TStringList.Create;
-    EnumEditor.ValueList.CommaText := TTableKey.PRIMARY +','+ TTableKey.KEY +','+ TTableKey.UNIQUE +','+ TTableKey.FULLTEXT +','+ TTableKey.SPATIAL;
+    EnumEditor.ValueList.CommaText := TTableKey.PRIMARY +','+ TTableKey.KEY +','+ TTableKey.UNIQUE;
+    // Oracle: full text and spatial indexes are domain indexes with their own syntax
+    // Snowflake: no indexes on standard tables, only primary and unique constraints
+    if DBObject.Connection.Parameters.IsAnySnowflake then
+      EnumEditor.ValueList.CommaText := TTableKey.PRIMARY +','+ TTableKey.UNIQUE
+    else if not DBObject.Connection.Parameters.IsAnyOracle then
+      EnumEditor.ValueList.CommaText := EnumEditor.ValueList.CommaText +','+ TTableKey.FULLTEXT +','+ TTableKey.SPATIAL;
     EditLink := EnumEditor;
   end else if (Level = 0) and (Column = IndexColNumAlgorithm) then begin
     // Algorithm pulldown
@@ -2800,10 +3070,13 @@ begin
   // ... and for item "Create index"
   Item := AddItem(menuCreateIndex, TTableKey.PRIMARY, ICONINDEX_PRIMARYKEY);
   Item.Enabled := not PrimaryKeyExists;
-  AddItem(menuCreateIndex, TTableKey.KEY, ICONINDEX_INDEXKEY);
+  if not DBObject.Connection.Parameters.IsAnySnowflake then
+    AddItem(menuCreateIndex, TTableKey.KEY, ICONINDEX_INDEXKEY);
   AddItem(menuCreateIndex, TTableKey.UNIQUE, ICONINDEX_UNIQUEKEY);
-  AddItem(menuCreateIndex, TTableKey.FULLTEXT, ICONINDEX_FULLTEXTKEY);
-  AddItem(menuCreateIndex, TTableKey.SPATIAL, ICONINDEX_SPATIALKEY);
+  if not DBObject.Connection.Parameters.IsAnyOdbc then begin
+    AddItem(menuCreateIndex, TTableKey.FULLTEXT, ICONINDEX_FULLTEXTKEY);
+    AddItem(menuCreateIndex, TTableKey.SPATIAL, ICONINDEX_SPATIALKEY);
+  end;
 end;
 
 

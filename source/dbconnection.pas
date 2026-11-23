@@ -9,10 +9,10 @@ uses
   DateUtils, Types, Math, Dialogs, Graphics, ExtCtrls, StrUtils,
   Controls, Forms, IniFiles, Variants, FileUtil,
   RegExpr, process, Pipes, SQLDB, LConvEncoding,
-  MSSQLConn, IBConnection, ibase60dyn, SQLDBLib, DB,
+  MSSQLConn, IBConnection, ibase60dyn, SQLDBLib, DB, FmtBCD, odbcconn, odbcfixed,
   generic_types, lazaruscompat,
   dbstructures, dbstructures.mysql, dbstructures.mssql, dbstructures.postgresql, dbstructures.sqlite, dbstructures.interbase,
-  dbstructures.redis, redisclient;
+  dbstructures.redis, redisclient, dbstructures.oracle, dbstructures.snowflake;
 
 
 type
@@ -90,6 +90,8 @@ type
       IndexType, OldIndexType, Algorithm, Comment: String;
       // Full "CREATE INDEX" definition from pg_get_indexdef, used by PostgreSQL create code
       Definition: String;
+      // Oracle: exists on the server as PRIMARY KEY or UNIQUE constraint, not only as an index
+      IsConstraint: Boolean;
       Size: Int64;
       Columns, SubParts, Collations: TStringList;
       Modified, Added, Visible: Boolean;
@@ -105,6 +107,7 @@ type
       function IsExpression(KeyPart: Integer): Boolean;
       procedure Modification(Sender: TObject);
       function SQLCode(TableName: String=''): String;
+      function InlinedInColumn(TableColumns: TTableColumnList): Boolean;
       property InsideCreateCode: Boolean read GetInsideCreateCode;
       property ImageIndex: Integer read GetImageIndex;
       property Connection: TDBConnection read FConnection;
@@ -310,10 +313,13 @@ type
       FLogFileDdl: Boolean;
       FLogFileDml: Boolean;
       FLogFilePath: String;
+      FAdditionalParams: String;
+      FSnowflakeWarehouse, FSnowflakeRole: String;
       class var FLibraries: TNetTypeLibs;
       function GetImageIndex: Integer;
       function GetSessionName: String;
       function GetAllDatabasesList: TStringList;
+      function GetAdditionalParamsList: TStringList;
     public
       constructor Create; overload;
       constructor Create(SessionRegPath: String); overload;
@@ -330,6 +336,10 @@ type
       function IsAnyPostgreSQL: Boolean;
       function IsAnySQLite: Boolean;
       function IsAnyInterbase: Boolean;
+      function IsAnyOracle: Boolean;
+      function IsAnySnowflake: Boolean;
+      // Connected through an ODBC driver, see TOdbcConnection
+      function IsAnyOdbc: Boolean;
       function IsMariaDB: Boolean;
       function IsMySQL(StrictDetect: Boolean): Boolean;
       function IsPercona: Boolean;
@@ -353,6 +363,7 @@ type
       function DefaultUsername: String;
       function DefaultIgnoreDatabasePattern: String;
       function DefaultSshActive: Boolean;
+      function AdditionalParamsSupported: Boolean;
       function GetExternalCliArguments(Connection: TDBConnection; ReplacePassword: TThreeStateBoolean): String;
     published
       property IsFolder: Boolean read FIsFolder write FIsFolder;
@@ -401,6 +412,11 @@ type
       property LogFileDdl: Boolean read FLogFileDdl write FLogFileDdl;
       property LogFileDml: Boolean read FLogFileDml write FLogFileDml;
       property LogFilePath: String read FLogFilePath write FLogFilePath;
+      // Raw "key=value;key=value" string, appended to the connection string of the client library
+      property AdditionalParams: String read FAdditionalParams write FAdditionalParams;
+      property AdditionalParamsList: TStringList read GetAdditionalParamsList;
+      property SnowflakeWarehouse: String read FSnowflakeWarehouse write FSnowflakeWarehouse;
+      property SnowflakeRole: String read FSnowflakeRole write FSnowflakeRole;
   end;
   PConnectionParameters = ^TConnectionParameters;
 
@@ -417,21 +433,6 @@ type
   TDBLogItems = TObjectList<TDBLogItem>;
   TDBLogEvent = procedure(Msg: String; Category: TDBLogCategory=lcInfo; Connection: TDBConnection=nil) of object;
   TDBEvent = procedure(Connection: TDBConnection; Database: String) of object;
-  TDBDataTypeArray = Array of TDBDataType;
-  TFeatureOrRequirement = (
-    frSrid,
-    frTemporalTypesFraction,
-    frIntegerDisplayWidth,
-    frColumnDefaultParentheses,
-    frEditVariables,
-    frCreateView,
-    frCreateProcedure,
-    frCreateFunction,
-    frCreateTrigger,
-    frCreateEvent,
-    frInvisibleColumns,
-    frCompressedColumns
-    ) deprecated 'Use TQueryId and TSqlProvider instead';
 
   TDBConnection = class(TComponent)
     private
@@ -575,6 +576,7 @@ type
       procedure PurgePrefetchResults;
       function GetDatatypeByName(var DataType: String; DeleteFromSource: Boolean; Identifier: String=''): TDBDatatype;
       function GetDatatypeByNativeType(NativeType: Integer; Identifier: String=''): TDBDatatype;
+      function GetDatatypeByIndex(Index: TDBDatatypeIndex): TDBDatatype;
       function ApplyLimitClause(QueryType, QueryBody: String; Limit, Offset: Int64): String;
       property Parameters: TConnectionParameters read FParameters write FParameters;
       property OwnsParameters: Boolean read FOwnsParameters write FOwnsParameters;
@@ -632,10 +634,11 @@ type
       property SQLFunctions: TSQLFunctionList read FSQLFunctions;
       function IsNumeric(Text: String): Boolean;
       function IsHex(Text: String): Boolean;
-      function Has(Item: TFeatureOrRequirement): Boolean; deprecated 'Use SqlProvider.Has(TQueryId) instead';
       property SqlProvider: TSqlProvider read FSqlProvider;
       property NamedEnums: TStringList read FNamedEnums;
       procedure GetColumnDefaultExpressions(Items: TStrings); virtual;
+      // Expression for a column in the data grid SELECT, if the column cannot be selected as is
+      function GetGridColumnExpression(Col: TTableColumn): String; virtual;
       property HexPrefix: String read FHexPrefix;
       property HexPostfix: String read FHexPostfix;
     published
@@ -847,6 +850,79 @@ type
     function DeleteKeysByPrefix(const APrefix: String; const ADatabase: String): Int64;
     property Client: TRedisClient read FClient;
     property LastResultCount: Int64 read FLastResultCount write FLastResultCount;
+  end;
+
+  // Base for DBMS connected through an installed ODBC driver, using SQLDB with fixes in odbcfixed
+  TOdbcRawResults = TObjectList<TSQLQuery>;
+  TOdbcConnection = class(TDBConnection)
+    private
+      FHandle: TFixedODBCConnection;
+      FTransaction: TSQLTransaction;
+      FLastError: String;
+      FLastErrorCode: Integer;
+      FLastRawResults: TOdbcRawResults;
+      procedure SetActive(Value: Boolean); override;
+      function GetLastErrorCode: Cardinal; override;
+      function GetLastErrorMsg: String; override;
+      procedure SetLastError(E: Exception);
+    protected
+      // Set driver specific connection string parameters
+      procedure PrepareHandle(FinalHost: String; FinalPort: Integer); virtual; abstract;
+      // Fetch server version etc., right after the handle got opened
+      procedure AfterHandleOpened; virtual; abstract;
+      function PingSQL: String; virtual; abstract;
+    public
+      constructor Create(AOwner: TComponent); override;
+      destructor Destroy; override;
+      procedure Query(SQL: String; DoStoreResult: Boolean=False; LogCategory: TDBLogCategory=lcSQL); override;
+      function Ping(Reconnect: Boolean): Boolean; override;
+      function ConnectionInfo: TStringList; override;
+      function GetLastResults: TDBQueryList; override;
+      property LastRawResults: TOdbcRawResults read FLastRawResults;
+  end;
+
+  TOracleConnection = class(TOdbcConnection)
+    private
+      function GetThreadId: Int64; override;
+      function GetAllDatabases: TStringList; override;
+      procedure FetchDbObjects(db: String; var Cache: TDBObjectList); override;
+      procedure Drop(Obj: TDBObject); override;
+    protected
+      procedure DoBeforeConnect; override;
+      procedure DoAfterConnect; override;
+      procedure PrepareHandle(FinalHost: String; FinalPort: Integer); override;
+      procedure AfterHandleOpened; override;
+      function PingSQL: String; override;
+    public
+      constructor Create(AOwner: TComponent); override;
+      function GetCreateCode(Obj: TDBObject): String; override;
+      function GetTableColumns(Table: TDBObject): TTableColumnList; override;
+      function GetTableKeys(Table: TDBObject): TTableKeyList; override;
+      function GetTableForeignKeys(Table: TDBObject): TForeignKeyList; override;
+      function GetGridColumnExpression(Col: TTableColumn): String; override;
+  end;
+
+  // Snowflake: one connection sees the whole account. The session's database is the
+  // "Databases" setting, its schemas are shown as databases in the tree.
+  TSnowflakeConnection = class(TOdbcConnection)
+    private
+      function GetThreadId: Int64; override;
+      function GetAllDatabases: TStringList; override;
+      procedure FetchDbObjects(db: String; var Cache: TDBObjectList); override;
+      procedure Drop(Obj: TDBObject); override;
+    protected
+      procedure DoAfterConnect; override;
+      procedure PrepareHandle(FinalHost: String; FinalPort: Integer); override;
+      procedure AfterHandleOpened; override;
+      function PingSQL: String; override;
+    public
+      constructor Create(AOwner: TComponent); override;
+      function GetCreateCode(Obj: TDBObject): String; override;
+      function GetTableColumns(Table: TDBObject): TTableColumnList; override;
+      function GetTableKeys(Table: TDBObject): TTableKeyList; override;
+      function GetTableForeignKeys(Table: TDBObject): TForeignKeyList; override;
+      function GetTableCheckConstraints(Table: TDBObject): TCheckConstraintList; override;
+      function GetGridColumnExpression(Col: TTableColumn): String; override;
   end;
 
 
@@ -1082,6 +1158,28 @@ type
       FConnection: TInterbaseConnection;
       FCurrentResults: TSQLQuery;
       FResultList: TInterbaseRawResults;
+      procedure SetRecNo(Value: Int64); override;
+    public
+      constructor Create(AOwner: TComponent); override;
+      destructor Destroy; override;
+      procedure Execute(AddResult: Boolean=False; UseRawResult: Integer=-1); override;
+      function GetColBinData(Column: Integer; var baData: TBytes): Boolean; override;
+      function Col(Column: Integer; IgnoreErrors: Boolean=False): String; overload; override;
+      function ColIsPrimaryKeyPart(Column: Integer): Boolean; override;
+      function ColIsUniqueKeyPart(Column: Integer): Boolean; override;
+      function ColIsKeyPart(Column: Integer): Boolean; override;
+      function IsNull(Column: Integer): Boolean; overload; override;
+      function HasResult: Boolean; override;
+      function IsResultAlive: Boolean; override;
+      function DatabaseName: String; override;
+      function TableName(Column: Integer): String; overload; override;
+  end;
+
+  TOdbcQuery = class(TDBQuery)
+    private
+      FConnection: TOdbcConnection;
+      FCurrentResults: TSQLQuery;
+      FResultList: TOdbcRawResults;
       procedure SetRecNo(Value: Int64); override;
     public
       constructor Create(AOwner: TComponent); override;
@@ -1414,6 +1512,9 @@ begin
   FLogFileDdl := AppSettings.GetDefaultBool(asLogFileDdl);
   FLogFileDml := AppSettings.GetDefaultBool(asLogFileDml);
   FLogFilePath := AppSettings.GetDefaultString(asLogFilePath);
+  FAdditionalParams := AppSettings.GetDefaultString(asAdditionalParams);
+  FSnowflakeWarehouse := AppSettings.GetDefaultString(asSnowflakeWarehouse);
+  FSnowflakeRole := AppSettings.GetDefaultString(asSnowflakeRole);
 
   FLastConnect := 0;
   FCounter := 0;
@@ -1491,6 +1592,9 @@ begin
     FLogFileDdl := AppSettings.ReadBool(asLogFileDdl);
     FLogFileDml := AppSettings.ReadBool(asLogFileDml);
     FLogFilePath := AppSettings.ReadString(asLogFilePath);
+    FAdditionalParams := AppSettings.ReadString(asAdditionalParams);
+    FSnowflakeWarehouse := AppSettings.ReadString(asSnowflakeWarehouse);
+    FSnowflakeRole := AppSettings.ReadString(asSnowflakeRole);
 
     FServerVersion := AppSettings.ReadString(asServerVersionFull);
     DummyDate := 0;
@@ -1567,6 +1671,9 @@ begin
     AppSettings.WriteBool(asLogFileDdl, FLogFileDdl);
     AppSettings.WriteBool(asLogFileDml, FLogFileDml);
     AppSettings.WriteString(asLogFilePath, FLogFilePath);
+    AppSettings.WriteString(asAdditionalParams, FAdditionalParams);
+    AppSettings.WriteString(asSnowflakeWarehouse, FSnowflakeWarehouse);
+    AppSettings.WriteString(asSnowflakeRole, FSnowflakeRole);
     AppSettings.ResetPath;
   end;
 end;
@@ -1587,6 +1694,10 @@ begin
       Result := TRedisConnection.Create(AOwner);
     ngInterbase:
       Result := TInterbaseConnection.Create(AOwner);
+    ngOracle:
+      Result := TOracleConnection.Create(AOwner);
+    ngSnowflake:
+      Result := TSnowflakeConnection.Create(AOwner);
     else
       raise Exception.CreateFmt(_(MsgUnhandledNetType), [Integer(FNetType)]);
   end;
@@ -1609,6 +1720,8 @@ begin
       Result := TRedisQuery.Create(Connection);
     ngInterbase:
       Result := TInterbaseQuery.Create(Connection);
+    ngOracle, ngSnowflake:
+      Result := TOdbcQuery.Create(Connection);
     else
       raise Exception.CreateFmt(_(MsgUnhandledNetType), [Integer(FNetType)]);
   end;
@@ -1626,6 +1739,8 @@ const
   PrefixSqlite = 'SQLite';
   PrefixInterbase = 'Interbase';
   PrefixFirebird = 'Firebird';
+  PrefixOracle = 'Oracle';
+  PrefixSnowflake = 'Snowflake';
 begin
   // Return the name of a net type, either in short or long format
   Result := 'Unknown';
@@ -1635,8 +1750,8 @@ begin
       ntMySQL_TCPIP:            Result := PrefixMysql+' (TCP/IP)';
       ntMySQL_NamedPipe:        Result := PrefixMysql+' (named pipe)';
       ntMySQL_SSHtunnel:        Result := PrefixMysql+' (SSH tunnel)';
-      ntMySQL_ProxySQLAdmin:    Result := PrefixProxysql+' (Experimental)';
-      ntMySQL_ClickHouse:       Result := PrefixClickhouse+' (MySQL protocol, experimental)';
+      ntMySQL_ProxySQLAdmin:    Result := PrefixProxysql;
+      ntMySQL_ClickHouse:       Result := PrefixClickhouse+' (MySQL protocol)';
       ntMySQL_RDS:              Result := 'MySQL on RDS';
       ntMSSQL_NamedPipe:        Result := PrefixMssql+' (named pipe, unsuppported)';
       ntMSSQL_TCPIP:            Result := PrefixMssql+' (TCP/IP)';
@@ -1647,15 +1762,17 @@ begin
       ntPgSQL_SSHtunnel:        Result := PrefixPostgres+' (SSH tunnel)';
       ntSQLite:                 Result := PrefixSqlite;
       ntSQLiteEncrypted:        Result := PrefixSqlite+' (Encrypted)';
-      ntInterbase_TCPIP:        Result := PrefixInterbase+' (TCP/IP, experimental)';
-      ntInterbase_Local:        Result := PrefixInterbase+' (Local, experimental)';
-      ntFirebird_TCPIP:         Result := PrefixFirebird+' (TCP/IP, experimental)';
-      ntFirebird_Local:         Result := PrefixFirebird+' (Local, experimental)';
+      ntInterbase_TCPIP:        Result := PrefixInterbase+' (TCP/IP)';
+      ntInterbase_Local:        Result := PrefixInterbase+' (Local)';
+      ntFirebird_TCPIP:         Result := PrefixFirebird+' (TCP/IP)';
+      ntFirebird_Local:         Result := PrefixFirebird+' (Local)';
       ntRedis_TCPIP:            Result := 'Redis (TCP/IP)';
       ntRedis_SSHtunnel:        Result := 'Redis (SSH tunnel)';
       ntRedis_TLS:              Result := 'Redis (TLS)';
       ntRedis_Sentinel:         Result := 'Redis (Sentinel, not yet implemented)';
       ntRedis_Cluster:          Result := 'Redis (Cluster, not yet implemented)';
+      ntOracle_ODBC:            Result := PrefixOracle+' (ODBC, experimental)';
+      ntSnowflake_ODBC:         Result := PrefixSnowflake+' (ODBC, experimental)';
     end;
   end
   else begin
@@ -1680,6 +1797,8 @@ begin
       ngSQLite:                        Result := PrefixSqlite;
       ngInterbase:                     Result := PrefixInterbase;
       ngRedis:                         Result := 'Redis';
+      ngOracle:                        Result := PrefixOracle;
+      ngSnowflake:                     Result := PrefixSnowflake;
     end;
   end;
 end;
@@ -1700,6 +1819,10 @@ begin
       Result := ngInterbase;
     ntRedis_TCPIP, ntRedis_SSHtunnel, ntRedis_TLS, ntRedis_Sentinel, ntRedis_Cluster:
       Result := ngRedis;
+    ntOracle_ODBC:
+      Result := ngOracle;
+    ntSnowflake_ODBC:
+      Result := ngSnowflake;
     else begin
       // Return default net group here. Raising an exception lets the app die for some reason.
       // Reproduction: click drop-down button on "Database(s)" session setting
@@ -1712,7 +1835,7 @@ end;
 
 function TConnectionParameters.SshSupport: Boolean;
 begin
-  Result := FNetType in [ntMySQL_SSHtunnel, ntMySQL_RDS, ntPgSQL_SSHtunnel, ntMSSQL_TCPIP, ntRedis_SSHtunnel];
+  Result := FNetType in [ntMySQL_SSHtunnel, ntMySQL_RDS, ntPgSQL_SSHtunnel, ntMSSQL_TCPIP, ntRedis_SSHtunnel, ntOracle_ODBC];
 end;
 
 
@@ -1743,6 +1866,24 @@ end;
 function TConnectionParameters.IsAnyInterbase;
 begin
   Result := NetTypeGroup = ngInterbase;
+end;
+
+
+function TConnectionParameters.IsAnyOracle: Boolean;
+begin
+  Result := NetTypeGroup = ngOracle;
+end;
+
+
+function TConnectionParameters.IsAnySnowflake: Boolean;
+begin
+  Result := NetTypeGroup = ngSnowflake;
+end;
+
+
+function TConnectionParameters.IsAnyOdbc: Boolean;
+begin
+  Result := NetTypeGroup in [ngOracle, ngSnowflake];
 end;
 
 
@@ -1883,6 +2024,8 @@ begin
       if IsFirebird then Result := 204;
     end;
     ngRedis: Result := ICONINDEX_SERVER;
+    ngOracle: Result := 208;
+    ngSnowflake: Result := 209;
     else Result := ICONINDEX_SERVER;
   end;
 end;
@@ -1903,6 +2046,9 @@ begin
     ngPgSQL: Result := 5432;
     ngInterbase: Result := 3050;
     ngRedis: Result := REDIS_DEFAULT_PORT;
+    ngOracle: Result := 1521;
+    // HTTPS
+    ngSnowflake: Result := 443;
     else Result := 0;
   end;
 end;
@@ -1927,7 +2073,7 @@ var
 begin
   Result := '';
   case NetTypeGroup of
-    ngMySQL, ngMSSQL, ngPgSQL, ngSQLite: begin
+    ngMySQL, ngMSSQL, ngPgSQL, ngSQLite, ngOracle, ngSnowflake: begin
       AllLibs := GetLibraries;
       if AllLibs.Count > 0 then
         Result := AllLibs[0];
@@ -1948,6 +2094,8 @@ begin
   Result := '';
   case NetTypeGroup of
     ngSQLite: Result := '';
+    // <account>.snowflakecomputing.com
+    ngSnowflake: Result := '';
     else Result := '127.0.0.1';
   end;
 end;
@@ -1965,6 +2113,30 @@ end;
 function TConnectionParameters.DefaultSshActive: Boolean;
 begin
   Result := FNetType in [ntMySQL_SSHtunnel, ntMySQL_RDS, ntPgSQL_SSHtunnel, ntRedis_SSHtunnel];
+end;
+
+
+function TConnectionParameters.AdditionalParamsSupported: Boolean;
+begin
+  // Client libraries with a key/value connection string, or an option file for MySQL.
+  // MS SQL via FreeTDS has none.
+  Result := IsAnyMySQL or IsAnyPostgreSQL or IsAnyOdbc;
+end;
+
+
+function TConnectionParameters.GetAdditionalParamsList: TStringList;
+var
+  Pair, Key: String;
+begin
+  // Split "key=value;key=value" into name/value pairs. Caller must free the result.
+  Result := TStringList.Create;
+  for Pair in FAdditionalParams.Split([';']) do begin
+    if Pos('=', Pair) < 2 then
+      Continue;
+    Key := Trim(Copy(Pair, 1, Pos('=', Pair)-1));
+    if not Key.IsEmpty then
+      Result.AddPair(Key, Trim(Copy(Pair, Pos('=', Pair)+1, MaxInt)));
+  end;
 end;
 
 
@@ -2120,6 +2292,16 @@ begin
         end;
         {$EndIf}
       end;
+      ngOracle: begin
+        // ODBC driver names, not library files. The driver manager is part of the OS.
+        FoundLibs.Free;
+        FoundLibs := GetOdbcDriverNames('oracle');
+      end;
+      ngSnowflake: begin
+        // "SnowflakeDSIIDriver" on Windows, "Snowflake" or "SnowflakeDSIIDriver" on Linux/macOS
+        FoundLibs.Free;
+        FoundLibs := GetOdbcDriverNames('snowflake');
+      end;
     end;
     rx.Free;
     FLibraries.Add(Ord(NetType), FoundLibs);
@@ -2215,44 +2397,31 @@ end;
 
 
 constructor TMySQLConnection.Create(AOwner: TComponent);
-var
-  i: Integer;
 begin
   inherited;
   FQuoteChar := '`';
   FQuoteChars := '`"';
   FStatementNum := 0;
-  // The compiler complains that dynamic and static arrays are incompatible, so this does not work:
-  // FDatatypes := MySQLDatatypes
-  SetLength(FDatatypes, Length(MySQLDatatypes));
-  for i:=0 to High(MySQLDatatypes) do
-    FDatatypes[i] := MySQLDatatypes[i];
+  // Copy, as FDatatypes gets modified per connection
+  FDatatypes := Copy(MySQLDatatypes);
 end;
 
 constructor TSqlSrvConnection.Create(AOwner: TComponent);
-var
-  i: Integer;
 begin
   inherited;
-  SetLength(FDatatypes, Length(MSSQLDatatypes));
-  for i:=0 to High(MSSQLDatatypes) do
-    FDatatypes[i] := MSSQLDatatypes[i];
+  FDatatypes := Copy(MSSQLDatatypes);
   FInfSch := 'INFORMATION_SCHEMA';
   FMaxRowsPerInsert := 1000;
   FLastRawResults := TSqlSrvResults.Create(False);
 end;
 
 constructor TPgConnection.Create(AOwner: TComponent);
-var
-  i: Integer;
 begin
   inherited;
   FQuoteChars := '"';
   FHexPrefix := '''\x';
   FHexPostfix := '''';
-  SetLength(FDatatypes, Length(PostGreSQLDatatypes));
-  for i:=0 to High(PostGreSQLDatatypes) do
-    FDatatypes[i] := PostGreSQLDatatypes[i];
+  FDatatypes := Copy(PostgreSQLDatatypes);
   // cache for 123::regclass queries:
   FRegClasses := TOidStringPairs.Create;
   // Identifiers with uppercase characters must be quoted, see #1072
@@ -2261,28 +2430,43 @@ end;
 
 
 constructor TSQLiteConnection.Create(AOwner: TComponent);
-var
-  i: Integer;
 begin
   inherited;
   FHexPrefix := 'x''';
   FHexPostfix := '''';
-  SetLength(FDatatypes, Length(SQLiteDatatypes));
-  for i:=0 to High(SQLiteDatatypes) do
-    FDatatypes[i] := SQLiteDatatypes[i];
+  FDatatypes := Copy(SQLiteDatatypes);
   // SQLite does not have IS:
   FInfSch := '';
 end;
 
 
-constructor TInterbaseConnection.Create(AOwner: TComponent);
-var
-  i: Integer;
+constructor TOdbcConnection.Create(AOwner: TComponent);
 begin
   inherited;
-  SetLength(FDatatypes, Length(InterbaseDatatypes));
-  for i:=0 to High(InterbaseDatatypes) do
-    FDatatypes[i] := InterbaseDatatypes[i];
+  FLastRawResults := TOdbcRawResults.Create(False);
+  FLastErrorCode := 0;
+end;
+
+
+constructor TOracleConnection.Create(AOwner: TComponent);
+begin
+  inherited;
+  FDatatypes := Copy(OracleDatatypes);
+  // Oracle has no IS, but ALL_* dictionary views
+  FInfSch := '';
+  // Unquoted identifiers are folded to uppercase
+  FIdentCharsNoQuote := ['A'..'Z', '0'..'9', '_', '$', '#'];
+  FQuoteChars := '"';
+  FHexPrefix := 'HEXTORAW(''';
+  FHexPostfix := ''')';
+  FMaxRowsPerInsert := 1;
+end;
+
+
+constructor TInterbaseConnection.Create(AOwner: TComponent);
+begin
+  inherited;
+  FDatatypes := Copy(InterbaseDatatypes);
   // Interbase does not have IS:
   FInfSch := '';
   FLastRawResults := TInterbaseRawResults.Create(False);
@@ -2291,22 +2475,17 @@ end;
 
 procedure TInterbaseConnection.UpdateDatatypes;
 var
-  i: Integer;
+  DT: TDBDatatype;
 begin
   // Skip the Firebird-only column types when connecting to InterBase, which
   // rejects them in DDL and never returns them: BIGINT (16), DECFLOAT (24/25),
   // INT128 (26) and the time zone types (28/29), see RDB$TYPES.
   // Called from SetActive, as the nettype is unknown in the constructor.
   if Parameters.IsInterbase then begin
-    SetLength(FDatatypes, 0);
-    for i:=0 to High(InterbaseDatatypes) do begin
-      if InterbaseDatatypes[i].NativeTypes = '16' then Continue;
-      if InterbaseDatatypes[i].NativeTypes = '24|25' then Continue;
-      if InterbaseDatatypes[i].NativeTypes = '26' then Continue;
-      if InterbaseDatatypes[i].NativeTypes = '28' then Continue;
-      if InterbaseDatatypes[i].NativeTypes = '29' then Continue;
-      SetLength(FDatatypes, Length(FDatatypes)+1);
-      FDatatypes[High(FDatatypes)] := InterbaseDatatypes[i];
+    FDatatypes := [];
+    for DT in InterbaseDatatypes do begin
+      if not MatchStr(DT.NativeTypes, ['16', '24|25', '26', '28', '29']) then
+        FDatatypes := FDatatypes + [DT];
     end;
   end;
 end;
@@ -2362,6 +2541,16 @@ begin
 end;
 
 
+destructor TOdbcConnection.Destroy;
+begin
+  if Active then Active := False;
+  FreeAndNil(FLastRawResults);
+  FreeAndNil(FTransaction);
+  FreeAndNil(FHandle);
+  inherited;
+end;
+
+
 destructor TInterbaseConnection.Destroy;
 begin
   if Active then Active := False;
@@ -2374,7 +2563,8 @@ end;
 
 function TDBConnection.GetDatatypeByName(var DataType: String; DeleteFromSource: Boolean; Identifier: String=''): TDBDatatype;
 var
-  i, MatchLen: Integer;
+  MatchLen: Integer;
+  DT: TDBDatatype;
   Match: Boolean;
   rx: TRegExpr;
   Types, tmp: String;
@@ -2386,10 +2576,10 @@ begin
   MatchLen := 0;
   // Remove quotes around PG enums: "UserStatus"
   DataType := DeQuoteIdent(DataType);
-  for i:=0 to High(FDatatypes) do begin
-    Types := FDatatypes[i].Name;
-    if FDatatypes[i].Names <> '' then begin
-      Types := Types + '|' + FDatatypes[i].Names;
+  for DT in FDatatypes do begin
+    Types := DT.Name;
+    if DT.Names <> '' then begin
+      Types := Types + '|' + DT.Names;
       // Move more exact (longer) types to the beginning
       TypesSorted := Explode('|', Types);
       TypesSorted.CustomSort(StringListCompareByLength);
@@ -2407,7 +2597,7 @@ begin
         // TODO: detect array style datatypes, e.g. TEXT[]
       end else begin
         MatchLen := rx.MatchLen[1];
-        Result := FDatatypes[i];
+        Result := DT;
       end;
     end;
   end;
@@ -2435,7 +2625,7 @@ end;
 
 function TDBConnection.GetDatatypeByNativeType(NativeType: Integer; Identifier: String=''): TDBDatatype;
 var
-  i: Integer;
+  DT: TDBDatatype;
   rx: TRegExpr;
   TypeFound: Boolean;
 begin
@@ -2443,21 +2633,22 @@ begin
   rx := TRegExpr.Create;
   TypeFound := False;
 
-  for i:=0 to High(Datatypes) do begin
+  for DT in FDatatypes do begin
     // Skip if native ids / oid's are (yet) empty
-    if Datatypes[i].NativeTypes.IsEmpty then
+    if DT.NativeTypes.IsEmpty then
       Continue;
     // Skip ? and e which have a special meaning in PostgreSQL. Do not skip
     // single digit ids of other servers, e.g. Firebird's 7, 8 and 9.
-    if (Datatypes[i].NativeTypes = '?') or (Datatypes[i].NativeTypes = 'e') then
+    if (DT.NativeTypes = '?') or (DT.NativeTypes = 'e') then
       Continue;
-    rx.Expression := '\b('+Datatypes[i].NativeTypes+')\b';
+    rx.Expression := '\b('+DT.NativeTypes+')\b';
     if rx.Exec(IntToStr(NativeType)) then begin
-      Result := Datatypes[i];
+      Result := DT;
       TypeFound := True;
       break;
     end;
   end;
+  rx.Free;
 
   { Dynamically retrieve data type from pg_type.
     Problematic because we would not know which TDBDatatypeIndex to assign.
@@ -2476,6 +2667,19 @@ begin
     else
       Log(lcError, f_('Unknown datatype oid #%0:d. Fall back to %1:s.', [NativeType, Result.Name]));
   end;
+end;
+
+
+function TDBConnection.GetDatatypeByIndex(Index: TDBDatatypeIndex): TDBDatatype;
+var
+  DT: TDBDatatype;
+begin
+  // Return the first data type with the given index, or the unknown type
+  for DT in FDatatypes do begin
+    if DT.Index = Index then
+      Exit(DT);
+  end;
+  Result := FDatatypes[0];
 end;
 
 
@@ -2518,8 +2722,13 @@ var
   VerifyServerCert: Integer;
   Error, StatusName: String;
   FinalHost, FinalSocket, FinalUsername, FinalPassword: String;
-  ErrorHint: String;
-  PluginDir, TlsVersions: AnsiString;
+  ErrorHint, OptionsFile, OptionsContent: String;
+  PluginDir, TlsVersions, OptionsFileAnsi: AnsiString;
+  FinalSocketUtf8, OptionsUtf8: UTF8String;
+  SocketArg: PAnsiChar;
+  AdditionalParams: TStringList;
+  OptionsStream: TFileStream;
+  i: Integer;
   Status: TDBQuery;
   PasswordChangeDialog: TfrmPasswordChange;
   {UserNameSize: DWORD;}
@@ -2643,16 +2852,56 @@ begin
     // Ensure we have some connection timeout
     SetOption(FLib.MYSQL_OPT_CONNECT_TIMEOUT, @(FParameters.QueryTimeout));
 
-    Connected := FLib.mysql_real_connect(
-      FHandle,
-      PAnsiChar(Utf8Encode(FinalHost)),
-      PAnsiChar(Utf8Encode(FinalUsername)),
-      PAnsiChar(Utf8Encode(FinalPassword)),
-      nil,
-      FinalPort,
-      PAnsiChar(Utf8Encode(FinalSocket)),
-      ClientFlags
-      );
+    // User defined parameters go into an option file, in my.cnf syntax. The library reads it
+    // in mysql_real_connect, after the above options, so these values override them.
+    // Avoids mapping option names to MYSQL_OPT_* numbers, which differ between library versions.
+    OptionsFile := '';
+    AdditionalParams := FParameters.AdditionalParamsList;
+    if AdditionalParams.Count > 0 then begin
+      OptionsContent := '[client]' + sLineBreak;
+      for i:=0 to AdditionalParams.Count-1 do begin
+        // Other characters, e.g. "[", could break the file format
+        if ExecRegExpr('^[a-zA-Z0-9_\-]+$', AdditionalParams.Names[i]) then
+          OptionsContent := OptionsContent + AdditionalParams.Names[i] + '=' + AdditionalParams.ValueFromIndex[i] + sLineBreak
+        else
+          Log(lcError, f_('Ignoring invalid option name "%s" in connection parameters', [AdditionalParams.Names[i]]));
+      end;
+      OptionsFile := SysUtils.GetTempDir + APPNAME + '-' + IntToStr(GetProcessID) + '-' + IntToStr(GetTickCount64) + '.cnf';
+      OptionsUtf8 := UTF8Encode(OptionsContent);
+      OptionsStream := TFileStream.Create(OptionsFile, fmCreate);
+      try
+        OptionsStream.WriteBuffer(PAnsiChar(OptionsUtf8)^, Length(OptionsUtf8));
+      finally
+        OptionsStream.Free;
+      end;
+      OptionsFileAnsi := AnsiString(OptionsFile);
+      SetOption(FLib.MYSQL_READ_DEFAULT_FILE, PAnsiChar(OptionsFileAnsi));
+    end;
+    AdditionalParams.Free;
+
+    // An empty socket would hide a "socket" value from the option file
+    FinalSocketUtf8 := Utf8Encode(FinalSocket);
+    if FinalSocket.IsEmpty and (not OptionsFile.IsEmpty) then
+      SocketArg := nil
+    else
+      SocketArg := PAnsiChar(FinalSocketUtf8);
+
+    try
+      Connected := FLib.mysql_real_connect(
+        FHandle,
+        PAnsiChar(Utf8Encode(FinalHost)),
+        PAnsiChar(Utf8Encode(FinalUsername)),
+        PAnsiChar(Utf8Encode(FinalPassword)),
+        nil,
+        FinalPort,
+        SocketArg,
+        ClientFlags
+        );
+    finally
+      // Contains user input in plain text, so do not keep it
+      if not OptionsFile.IsEmpty then
+        SysUtils.DeleteFile(OptionsFile);
+    end;
     if Connected = nil then begin
       Error := LastErrorMsg;
       Log(lcError, Error);
@@ -2900,7 +3149,7 @@ end;
 procedure TPgConnection.SetActive(Value: Boolean);
 var
   ConnectionString, OptionValue, Error: String;
-  ConnectOptions: TStringList;
+  ConnectOptions, AdditionalParams: TStringList;
   FinalHost, ErrorHint: String;
   FinalPort, i: Integer;
 begin
@@ -2940,6 +3189,11 @@ begin
         ConnectOptions.AddPair('sslrootcert', GetOutputFilename(FParameters.SSLCACertificate, nil));
       //if FParameters.SSLCipher <> '' then ??
     end;
+    // User defined parameters, overriding the above ones
+    AdditionalParams := FParameters.AdditionalParamsList;
+    for i:=0 to AdditionalParams.Count-1 do
+      ConnectOptions.Values[AdditionalParams.Names[i]] := AdditionalParams.ValueFromIndex[i];
+    AdditionalParams.Free;
     ConnectionString := '';
     for i:=0 to ConnectOptions.Count-1 do begin
       // Escape values. See issue #704 and #1417, and docs: https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING
@@ -3240,6 +3494,11 @@ begin
       else
         FServerVersionUntouched := GetVar('SELECT rdb$get_context(''SYSTEM'', ''ENGINE_VERSION'') as version from rdb$database');
 
+      // Session level statement timeout, supported since Firebird 4. The client library has no
+      // timeout of its own, so without this a query would run until the server finishes it.
+      if Parameters.IsFirebird and (ServerVersionInt >= 40000) then
+        Query('SET STATEMENT TIMEOUT '+IntToStr(Parameters.QueryTimeout)+' SECOND');
+
       FRealHostname := Parameters.Hostname;
 
       // Triggers OnDatabaseChange event for <no db>
@@ -3260,6 +3519,105 @@ begin
           ErrorHint := '';
         end;
         raise EDbError.Create(Error, LastErrorCode, ErrorHint);
+      end;
+    end;
+  end else begin
+    if FHandle <> nil then begin
+      try
+        FHandle.Close;
+      except
+        on E:Exception do
+          Log(lcError, 'Error while closing handle: '+E.Message);
+      end;
+    end;
+    FActive := False;
+    ClearCache(False);
+    FConnectionStarted := 0;
+    EndSSHTunnel;
+    Log(lcInfo, f_(MsgDisconnect, [FParameters.Hostname, DateTimeToStr(Now)]));
+  end;
+end;
+
+
+procedure TOdbcConnection.SetLastError(E: Exception);
+begin
+  if E is EODBCException then
+    FLastError := OdbcErrorText(E.Message)
+  else
+    FLastError := E.Message;
+  if E is ESQLDatabaseError then
+    FLastErrorCode := ESQLDatabaseError(E).ErrorCode
+  else
+    FLastErrorCode := 0;
+end;
+
+
+procedure TOdbcConnection.SetActive(Value: Boolean);
+var
+  Error: String;
+  FinalHost: String;
+  FinalPort, i: Integer;
+  AdditionalParams: TStringList;
+begin
+  if Value then begin
+    DoBeforeConnect;
+
+    if Parameters.LibraryOrProvider.Trim.IsEmpty then
+      raise EDbError.Create(_('No ODBC driver selected. Please install the ODBC driver for your database server, and select it in your session settings.'));
+
+    FinalHost := Parameters.Hostname;
+    FinalPort := Parameters.Port;
+    StartSSHTunnel(FinalHost, FinalPort);
+
+    // Results of a previous connection are owned by their TDBQuery objects, see TOdbcQuery.Destroy
+    FLastRawResults.Clear;
+    FreeAndNil(FTransaction);
+    FreeAndNil(FHandle);
+    FHandle := TFixedODBCConnection.Create(nil);
+    FTransaction := TSQLTransaction.Create(nil);
+    FTransaction.Database := FHandle;
+    FHandle.Transaction := FTransaction;
+    FHandle.Driver := Parameters.LibraryOrProvider;
+    FHandle.UserName := Parameters.Username;
+    FHandle.Password := Parameters.Password;
+    PrepareHandle(FinalHost, FinalPort);
+    // User defined parameters, overriding the ones from PrepareHandle
+    AdditionalParams := Parameters.AdditionalParamsList;
+    for i:=0 to AdditionalParams.Count-1 do
+      FHandle.Params.Values[AdditionalParams.Names[i]] := AdditionalParams.ValueFromIndex[i];
+    AdditionalParams.Free;
+
+    try
+      LoadOdbcDriverManager;
+      FHandle.Open;
+      FActive := True;
+      FConnectionStarted := GetTickCount64 div 1000;
+      FServerUptime := -1;
+      AfterHandleOpened;
+      FRealHostname := Parameters.Hostname;
+
+      // Triggers OnDatabaseChange event for <no db>
+      Database := '';
+      DoAfterConnect;
+
+    except
+      on E:Exception do begin
+        if E is EDbError then
+          Error := E.Message // Already formatted and logged by Query()
+        else begin
+          SetLastError(E);
+          Error := LastErrorMsg;
+          Log(lcError, Error);
+        end;
+        try
+          FHandle.Close;
+        except
+          on E2:Exception do;
+        end;
+        FActive := False;
+        FConnectionStarted := 0;
+        EndSSHTunnel;
+        raise EDbError.Create(Error, LastErrorCode);
       end;
     end;
   end else begin
@@ -3362,6 +3720,10 @@ begin
       FSqlProvider := TInterbaseProvider.Create(FParameters.NetType);
     ngRedis:
       FSqlProvider := TRedisProvider.Create(FParameters.NetType);
+    ngOracle:
+      FSqlProvider := TOracleProvider.Create(FParameters.NetType);
+    ngSnowflake:
+      FSqlProvider := TSnowflakeProvider.Create(FParameters.NetType);
     else
       raise Exception.CreateFmt(_(MsgUnhandledNetType), [Integer(FParameters.NetType)]);
   end;
@@ -3432,6 +3794,75 @@ begin
 end;
 
 
+procedure TOracleConnection.DoBeforeConnect;
+var
+  NlsLang: String;
+begin
+  // Must happen before the ODBC driver loads oci.dll
+  NlsLang := PrepareOracleClientEnvironment;
+  Log(lcDebug, 'NLS_LANG='+NlsLang);
+  if not ExecRegExprI('\.(AL32UTF8|UTF8)$', NlsLang) then
+    Log(lcError, f_('Your NLS_LANG environment variable is set to %s. Use a UTF-8 character set like %s to avoid broken non-ASCII text.', [NlsLang, '.AL32UTF8']));
+  inherited;
+end;
+
+
+procedure TOracleConnection.PrepareHandle(FinalHost: String; FinalPort: Integer);
+var
+  Dbq, Service: String;
+begin
+  // Easy Connect syntax: //host:port/service
+  Service := Trim(Parameters.AllDatabasesStr);
+  Dbq := '//' + FinalHost + ':' + IntToStr(FinalPort);
+  if not Service.IsEmpty then
+    Dbq := Dbq + '/' + Service;
+  FHandle.Params.Add('DBQ=' + Dbq);
+  // Decimal separator "." in numbers fetched as text, independent of the client locale
+  FHandle.Params.Add('NUM=US');
+  FHandle.Float38AsDecimal := True;
+end;
+
+
+procedure TOracleConnection.AfterHandleOpened;
+begin
+  try
+    // "Oracle Database 21c Express Edition Release 21.0.0.0.0 - Production"
+    FServerVersionUntouched := GetVar('SELECT BANNER FROM v$version WHERE ROWNUM = 1');
+  except
+    on E:EDbError do
+      FServerVersionUntouched := 'Oracle ' + FHandle.GetConnectionInfo(citServerVersionString);
+  end;
+  FServerDateTimeOnStartup := GetVar('SELECT ' + FSqlProvider.GetSql(qFuncNow));
+end;
+
+
+function TOracleConnection.PingSQL: String;
+begin
+  Result := 'SELECT 1 FROM dual';
+end;
+
+
+procedure TOracleConnection.DoAfterConnect;
+begin
+  try
+    if not Parameters.LocalTimeZone then begin
+      // OCI sets the session time zone from the client OS. Use the server's one
+      // in that case, as MySQL does.
+      Query('ALTER SESSION SET TIME_ZONE = DBTIMEZONE');
+    end;
+    // Leave out storage clauses in CREATE code from DBMS_METADATA.GET_DDL.
+    // SQLTERMINATOR stays off, it would append a SQL*Plus "/" to PL/SQL code.
+    Query('BEGIN'+
+      ' DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, ''SEGMENT_ATTRIBUTES'', FALSE);'+
+      ' END;');
+  except
+    on E:EDbError do; // Logged already
+  end;
+  // Sets the client time zone if "Use own client time zone" is checked, and runs the startup script
+  inherited;
+end;
+
+
 procedure TDBConnection.StartSSHTunnel(var FinalHost: String; var FinalPort: Integer);
 begin
   // Create SSH process
@@ -3467,6 +3898,8 @@ var
   Offset: String;
 begin
   FSqlProvider.ServerVersion := ServerVersionInt;
+  FSqlProvider.ServerIsMariaDB := FParameters.IsMariaDB;
+  FSqlProvider.ServerIsMySQL := FParameters.IsMySQL(True);
 
   for i:=0 to High(Datatypes) do begin
 
@@ -3535,6 +3968,10 @@ begin
     SQLFunctionsFile := 'firebird'
   else if FParameters.IsAnyInterbase then
     SQLFunctionsFile := 'interbase'
+  else if FParameters.IsAnyOracle then
+    SQLFunctionsFile := 'oracle'
+  else if FParameters.IsAnySnowflake then
+    SQLFunctionsFile := 'snowflake'
   else
     SQLFunctionsFile := '';
   FSQLFunctions := TSQLFunctionList.Create(Self, SQLFunctionsFile);
@@ -3580,7 +4017,8 @@ begin
   inherited;
 
   // Support microseconds in some temporal datatypes of MariaDB 5.3+ and MySQL 5.6
-  if Has(frTemporalTypesFraction) then begin
+  if (FParameters.IsMariaDB and (ServerVersionInt >= 50300))
+    or (FParameters.IsMySQL(True) and (ServerVersionInt >= 50604)) then begin
     for i:=Low(FDatatypes) to High(FDatatypes) do begin
       if FDatatypes[i].Index in [dbdtDatetime, dbdtDatetime2, dbdtTime, dbdtTimestamp] then
         FDatatypes[i].HasLength := True;
@@ -3744,6 +4182,27 @@ begin
         Active := True;
     end;
   end;
+  Result := FActive;
+  RestartKeepAliveTimer;
+end;
+
+
+function TOdbcConnection.Ping(Reconnect: Boolean): Boolean;
+begin
+  Log(lcDebug, 'Ping server ...');
+  if FActive then try
+    FHandle.ExecuteDirect(PingSQL);
+  except
+    on E:Exception do begin
+      SetLastError(E);
+      Log(lcError, LastErrorMsg);
+      Active := False;
+      if Reconnect then
+        Active := True;
+    end;
+  end
+  else if Reconnect then
+    Active := True;
   Result := FActive;
   RestartKeepAliveTimer;
 end;
@@ -4090,8 +4549,10 @@ begin
     QueryResult.DataBase := FHandle;
     QueryResult.Transaction := FTransaction;
     QueryResult.SQL.Text := SQL;
-    QueryResult.Options := [sqoAutoApplyUpdates, sqoAutoCommit, sqoCancelUpdatesOnRefresh];
-    QueryResult.PacketRecords := 10000;
+    // Keep results open when the next statement in a batch commits, which closes all datasets
+    // of the transaction otherwise. This also fetches all rows at once.
+    QueryResult.Options := [sqoKeepOpenOnCommit, sqoAutoApplyUpdates, sqoAutoCommit, sqoCancelUpdatesOnRefresh];
+    QueryResult.PacketRecords := -1;
     // Prepare explicitly, so the cursor tells us whether a result set came back.
     // Read FSelectable before ExecSQL: unlike TSqlSrvConnection, TIBConnection keeps
     // the default sqCommitEndsPrepared option, so the sqoAutoCommit commit inside
@@ -4119,6 +4580,105 @@ begin
       Log(lcError, GetLastErrorMsg);
       raise EDbError.Create(GetLastErrorMsg);
     end;
+  end;
+end;
+
+
+procedure TOdbcConnection.Query(SQL: String; DoStoreResult: Boolean=False; LogCategory: TDBLogCategory=lcSQL);
+var
+  TimerStart: QWord;
+  QueryResult: TSQLQuery;
+  i, ColCount: Integer;
+  HasRows: Boolean;
+begin
+  inherited;
+
+  TimerStart := GetTickCount64;
+  // Free results which no TDBQuery took over, see TOdbcQuery.Execute
+  for i:=0 to FLastRawResults.Count-1 do
+    FLastRawResults[i].Free;
+  FLastRawResults.Clear;
+  QueryResult := nil;
+  try
+    // No owner: the TDBQuery taking over this result frees it, also after a reconnect
+    QueryResult := TSQLQuery.Create(nil);
+    QueryResult.DataBase := FHandle;
+    QueryResult.Transaction := FTransaction;
+    // Do not convert :name to parameters, e.g. :NEW in trigger bodies
+    QueryResult.ParseSQL := False;
+    QueryResult.SQL.Text := SQL;
+    // Keep results open when the next statement commits, and fetch all rows at once
+    QueryResult.Options := [sqoKeepOpenOnCommit, sqoAutoCommit];
+    QueryResult.PacketRecords := -1;
+    QueryResult.Prepare;
+    // Ask the driver for result columns, so a SELECT is executed only once, by Open
+    ColCount := OdbcPreparedColumnCount(TSQLQueryAccess(QueryResult).Cursor);
+    if ColCount > 0 then begin
+      try
+        QueryResult.Open;
+        HasRows := True;
+        Inc(FRowsFound, QueryResult.RecordCount);
+      except
+        on E:EDatabaseError do begin
+          // Snowflake describes USE and other commands with a status column on SQLPrepare, but
+          // returns no result set after SQLExecute. SQLDB then raises "Cannot open a non-select
+          // statement", after the statement was executed successfully.
+          if (TSQLQueryAccess(QueryResult).Cursor = nil)
+            or TSQLQueryAccess(QueryResult).Cursor.FSelectable then
+            raise;
+          HasRows := False;
+          if FTransaction.Active then
+            FTransaction.Commit;
+        end;
+      end;
+    end else if ColCount = 0 then begin
+      // Execute without SQLPrepare, which takes :NEW in trigger bodies for a bind variable
+      HasRows := False;
+      QueryResult.UnPrepare;
+      Inc(FRowsAffected, Max(OdbcExecDirect(FHandle, SQL), 0));
+      if FTransaction.Active then
+        FTransaction.Commit;
+    end else begin
+      QueryResult.ExecSQL;
+      Inc(FRowsAffected, Max(QueryResult.RowsAffected, 0));
+      HasRows := (ColCount < 0) and TSQLQueryAccess(QueryResult).Cursor.FSelectable;
+      QueryResult.UnPrepare;
+      if HasRows then begin
+        // Unknown before execution: execute again for fetching
+        QueryResult.Open;
+        Inc(FRowsFound, QueryResult.RecordCount);
+      end;
+    end;
+    if HasRows and DoStoreResult then
+      FLastRawResults.Add(QueryResult)
+    else
+      FreeAndNil(QueryResult);
+    FLastQueryDuration := GetTickCount64 - TimerStart;
+    FLastQueryNetworkDuration := 0;
+
+    DetectUSEQuery(SQL);
+  except
+    on E:Exception do begin
+      SetLastError(E);
+      QueryResult.Free;
+      Log(lcError, GetLastErrorMsg);
+      raise EDbError.Create(GetLastErrorMsg, LastErrorCode);
+    end;
+  end;
+end;
+
+
+function TOdbcConnection.GetLastResults: TDBQueryList;
+var
+  r: TDBQuery;
+  i: Integer;
+begin
+  Result := TDBQueryList.Create(False);
+  for i:=0 to FLastRawResults.Count-1 do begin
+    r := Parameters.CreateQuery(Self);
+    r.SQL := FLastQuerySQL;
+    r.Execute(False, i);
+    Result.Add(r);
   end;
 end;
 
@@ -4415,6 +4975,9 @@ var
   FkDeferrable, FkInitiallyDeferred: Boolean;
 begin
   Result := '';
+  FkRefTable := '';
+  FkOnUpdate := '';
+  FkOnDelete := '';
   FkDeferrable := False;
   FkInitiallyDeferred := False;
   case Obj.NodeType of
@@ -4473,7 +5036,8 @@ begin
           if Trim(Q.Col('dimensions')) <> '' then
             Line := Line+' ['+Trim(Q.Col('dimensions'))+']';
           if not Q.IsNull('identity_type') then begin
-            if MakeInt(Q.Col('identity_type')) = 1 then
+            // RDB$IDENTITY_TYPE: 0 = ALWAYS, 1 = BY DEFAULT
+            if MakeInt(Q.Col('identity_type')) = 0 then
               Line := Line+' GENERATED ALWAYS AS IDENTITY'
             else
               Line := Line+' GENERATED BY DEFAULT AS IDENTITY';
@@ -5357,6 +5921,68 @@ begin
 end;
 
 
+function TOdbcConnection.GetLastErrorCode: Cardinal;
+begin
+  // Native error of the driver, e.g. 942 for ORA-00942
+  Result := Abs(FLastErrorCode);
+end;
+
+
+function TOdbcConnection.GetLastErrorMsg: String;
+begin
+  if FLastError <> '' then
+    Result := f_(MsgSQLError, [LastErrorCode, FLastError])
+  else
+    Result := '';
+end;
+
+
+function TOdbcConnection.ConnectionInfo: TStringList;
+begin
+  Result := Inherited;
+  if FActive then begin
+    Result.Values[_('Client library')] := FHandle.Driver;
+    Result.Values[_('Client version')] := FHandle.GetConnectionInfo(citClientVersion);
+    Result.Values[_('Server version')] := FHandle.GetConnectionInfo(citServerVersionString);
+  end;
+end;
+
+
+function TOracleConnection.GetThreadId: Int64;
+begin
+  if FThreadId = 0 then begin
+    Ping(False);
+    if FActive then
+      FThreadID := StrToInt64Def(GetVar('SELECT SYS_CONTEXT(''USERENV'', ''SID'') FROM dual'), 0);
+  end;
+  Result := FThreadID;
+end;
+
+
+function TOracleConnection.GetAllDatabases: TStringList;
+begin
+  // Schemas are shown as databases. The "Databases" session setting holds the service name.
+  if not Assigned(FAllDatabases) then begin
+    try
+      // Hide the many schemas maintained by Oracle, except the ones users need now and then
+      FAllDatabases := GetCol('SELECT USERNAME FROM ALL_USERS'+
+        ' WHERE ORACLE_MAINTAINED = ''N'' OR USERNAME IN (''SYS'', ''SYSTEM'')'+
+        ' ORDER BY USERNAME');
+    except
+      on E:EDbError do try
+        // Oracle 11g and older have no ORACLE_MAINTAINED column
+        FAllDatabases := GetCol('SELECT USERNAME FROM ALL_USERS ORDER BY USERNAME');
+      except
+        on E:EDbError do
+          FAllDatabases := TStringList.Create;
+      end;
+    end;
+    ApplyIgnoreDatabasePattern(FAllDatabases);
+  end;
+  Result := FAllDatabases;
+end;
+
+
 
 {**
   Get version string as normalized integer
@@ -5370,7 +5996,7 @@ begin
   Result := 0;
   rx := TRegExpr.Create;
   case FParameters.NetTypeGroup of
-    ngMySQL, ngPgSQL, ngSQLite, ngInterbase, ngRedis: begin
+    ngMySQL, ngPgSQL, ngSQLite, ngInterbase, ngRedis, ngOracle, ngSnowflake: begin
       rx.Expression := '(\d+)\.(\d+)(\.(\d+))?';
       if rx.Exec(FServerVersionUntouched) then begin
         Result := StrToIntDef(rx.Match[1], 0) *10000 +
@@ -5412,7 +6038,7 @@ var
   major, minor, build: Integer;
 begin
   case FParameters.NetTypeGroup of
-    ngMySQL, ngPgSQL, ngSQLite, ngInterbase, ngRedis: begin
+    ngMySQL, ngPgSQL, ngSQLite, ngInterbase, ngRedis, ngOracle, ngSnowflake: begin
       v := IntToStr(ServerVersionInt);
       major := StrToIntDef(Copy(v, 1, Length(v)-4), 0);
       minor := StrToIntDef(Copy(v, Length(v)-3, 2), 0);
@@ -5831,6 +6457,10 @@ begin
     // so that the SQL file can be non-corruptedly loaded again.
     // TODO: SynEdit also chokes on Char($2028) and possibly Char($2029).
     BackslashChars := ['\', #13, #10, #0];
+  end else if FParameters.NetTypeGroup = ngSnowflake then begin
+    // Snowflake processes backslash escape sequences in single quoted strings
+    QuoteEscChar := '''';
+    BackslashChars := ['\'];
   end else begin
     QuoteEscChar := '''';
     BackslashChars := [];
@@ -5838,7 +6468,13 @@ begin
   // In a LIKE pattern, the joker chars % and _ need a preceding backslash, and so does
   // the backslash itself. Some servers only accept that with an ESCAPE clause, see qLikeCompare.
   // See http://www.heidisql.com/forum.php?t=12747
-  if ProcessJokerChars then begin
+  if ProcessJokerChars and (FParameters.NetTypeGroup = ngSnowflake) then begin
+    // The LIKE escape backslashes must survive the string literal, so they get doubled below
+    Text := StringReplace(Text, '\', '\\', [rfReplaceAll]);
+    Text := StringReplace(Text, '%', '\%', [rfReplaceAll]);
+    Text := StringReplace(Text, '_', '\_', [rfReplaceAll]);
+  end
+  else if ProcessJokerChars then begin
     // MySQL escapes the backslash a second time below, for the string literal
     if FParameters.NetTypeGroup = ngMySQL then
       Text := StringReplace(Text, '\', '\\', [rfReplaceAll]);
@@ -5846,6 +6482,7 @@ begin
   end;
 
   // Each character becomes two characters at most
+  Result := '';
   SetLength(Result, Length(Text) * 2);
   ResLen := 0;
   for i := 1 to Length(Text) do begin
@@ -6476,7 +7113,9 @@ begin
           end;
         end;
         dtcInteger: begin
-          if (not ColQuery.IsNull('NUMERIC_PRECISION')) and Has(frIntegerDisplayWidth) then begin
+          if (not ColQuery.IsNull('NUMERIC_PRECISION'))
+            and (FParameters.NetTypeGroup = ngMySQL)
+            and ((not FParameters.IsMySQL(True)) or (ServerVersionInt < 80017)) then begin
             // Integer display width is deprecated as of MySQL 8.0.17
             MaxLen := ColQuery.Col('NUMERIC_PRECISION');
           end;
@@ -6687,6 +7326,7 @@ function TSqlSrvConnection.GetTableColumns(Table: TDBObject): TTableColumnList;
 var
   Comments: TDBQuery;
   TableCol: TTableColumn;
+  Identities: TStringList;
 begin
   // Parent method is sufficient for most things
   Result := inherited;
@@ -6695,6 +7335,19 @@ begin
   for TableCol in Result do begin
     if not TableCol.DefaultText.IsEmpty then
       TableCol.DefaultText := RegExprGetMatch('^\((.*)\)$', TableCol.DefaultText, 1);
+  end;
+
+  // IDENTITY columns, not visible in IS.COLUMNS
+  if ServerVersionInt >= 900 then begin
+    Identities := GetCol('SELECT '+QuoteIdent('name')+' FROM sys.identity_columns'+
+      ' WHERE object_id=OBJECT_ID('+EscapeString(Table.QuotedName)+')');
+    for TableCol in Result do begin
+      if Identities.IndexOf(TableCol.Name) > -1 then begin
+        TableCol.DefaultType := cdtAutoInc;
+        TableCol.DefaultText := FSqlProvider.GetSql(qAutoInc);
+      end;
+    end;
+    Identities.Free;
   end;
 
   // Column comments in MSSQL. See http://www.heidisql.com/forum.php?t=19576
@@ -6728,11 +7381,16 @@ function TSQLiteConnection.GetTableColumns(Table: TDBObject): TTableColumnList;
 var
   ColQuery: TDBQuery;
   Col: TTableColumn;
+  HasAutoInc: Boolean;
 begin
   // SQLite has no IS.COLUMNS
   // Todo: include database name
   // Todo: default values
   Result := TTableColumnList.Create(True);
+  // AUTOINCREMENT is only allowed on an INTEGER PRIMARY KEY, so it belongs to the one primary key column
+  HasAutoInc := ExecRegExprI('\bAUTOINCREMENT\b', GetVar('SELECT '+QuoteIdent('sql')+
+    ' FROM '+QuoteIdent(Table.Database)+'.sqlite_master'+
+    ' WHERE '+QuoteIdent('type')+'='+EscapeString('table')+' AND name='+EscapeString(Table.Name)));
   ColQuery := GetResults(FSqlProvider.GetSql(qGetTableColumns, [EscapeString(Table.Name), EscapeString(Table.Database)]));
   while not ColQuery.Eof do begin
     Col := TTableColumn.Create(Self);
@@ -6746,6 +7404,10 @@ begin
     if not ColQuery.Col('dflt_value').IsEmpty then begin
       Col.DefaultType := cdtText;
       Col.DefaultText := ColQuery.Col('dflt_value').DeQuotedString(FStringQuoteChar);
+    end;
+    if HasAutoInc and (ColQuery.Col('pk') = '1') and SameText(ColQuery.Col('type'), 'INTEGER') then begin
+      Col.DefaultType := cdtAutoInc;
+      Col.DefaultText := FSqlProvider.GetSql(qAutoInc);
     end;
     Col.OnUpdateType := cdtNothing;
     Col.OnUpdateText := '';
@@ -6764,8 +7426,15 @@ function TInterbaseConnection.GetTableColumns(Table: TDBObject): TTableColumnLis
 var
   ColQuery: TDBQuery;
   Col: TTableColumn;
+  Identities: TStringList;
 begin
   Result := TTableColumnList.Create(True);
+  // Identity columns since Firebird 3
+  if FSqlProvider.Has(qAutoInc) then
+    Identities := GetCol('SELECT TRIM(RDB$FIELD_NAME) FROM RDB$RELATION_FIELDS'+
+      ' WHERE RDB$RELATION_NAME='+EscapeString(Table.Name)+' AND RDB$IDENTITY_TYPE IS NOT NULL')
+  else
+    Identities := TStringList.Create;
   ColQuery := GetResults(FSqlProvider.GetSql(qGetTableColumns, [EscapeString(Table.Name)]));
   while not ColQuery.Eof do begin
     Col := TTableColumn.Create(Self);
@@ -6777,11 +7446,16 @@ begin
     Col.AllowNull := ColQuery.IsNull('null_flag');
     Col.DefaultType := cdtNothing;
     Col.DefaultText := '';
+    if Identities.IndexOf(Col.Name) > -1 then begin
+      Col.DefaultType := cdtAutoInc;
+      Col.DefaultText := FSqlProvider.GetSql(qAutoInc);
+    end;
     Col.OnUpdateType := cdtNothing;
     Col.OnUpdateText := '';
     ColQuery.Next;
   end;
   ColQuery.Free;
+  Identities.Free;
 end;
 
 
@@ -7579,33 +8253,6 @@ begin
   end;
 end;
 
-function TDBConnection.Has(Item: TFeatureOrRequirement): Boolean;
-begin
-  if Item = frEditVariables then
-    Exit(Assigned(FSqlProvider) and (FSqlProvider.Has(qSetSessionVariable) or FSqlProvider.Has(qSetGlobalVariable)));
-  case FParameters.NetTypeGroup of
-    ngMySQL:
-      case Item of
-        frSrid: Result := FParameters.IsMySQL(True) and (ServerVersionInt >= 80000);
-        frTemporalTypesFraction: Result := (FParameters.IsMariaDB and (ServerVersionInt >= 50300)) or
-          (FParameters.IsMySQL(True) and (ServerVersionInt >= 50604));
-        frIntegerDisplayWidth: Result := (FParameters.IsMySQL(True) and (ServerVersionInt < 80017)) or
-          (not FParameters.IsMySQL(True));
-        frColumnDefaultParentheses: Result := FParameters.IsMySQL(True) and (ServerVersionInt >= 80013);
-        frCreateView: Result := ServerVersionInt >= 50001;
-        frCreateProcedure: Result := ServerVersionInt >= 50003;
-        frCreateFunction: Result := ServerVersionInt >= 50003;
-        frCreateTrigger: Result := ServerVersionInt >= 50002;
-        frCreateEvent: Result := ServerVersionInt >= 50100;
-        frInvisibleColumns: Result := (FParameters.IsMariaDB and (ServerVersionInt >= 100303)) or
-          (FParameters.IsMySQL(True) and (ServerVersionInt >= 80023));
-        frCompressedColumns: Result := (FParameters.IsMariaDB and (ServerVersionInt >= 100301));
-        else Result := False;
-      end;
-    else Result := False;
-  end;
-end;
-
 
 procedure TDBConnection.GetColumnDefaultExpressions(Items: TStrings);
 var
@@ -7613,6 +8260,308 @@ var
 begin
   for SQLFunc in SQLFunctions do begin
     Items.Add(SQLFunc.Name + SQLFunc.Declaration);
+  end;
+end;
+
+
+function TDBConnection.GetGridColumnExpression(Col: TTableColumn): String;
+begin
+  // Select column as is by default
+  Result := '';
+end;
+
+
+function TOracleConnection.GetGridColumnExpression(Col: TTableColumn): String;
+var
+  Ident, Fraction: String;
+begin
+  Result := '';
+  Ident := QuoteIdent(Col.Name);
+  case Col.DataType.Index of
+    dbdtNumeric, dbdtFloat: begin
+      // The ODBC driver rounds unconstrained NUMBER and FLOAT to double precision,
+      // also when fetched as text. Let the server convert them.
+      // TO_CHAR(0.5) returns ".5", so add the leading zero.
+      if (Col.DataType.Index = dbdtFloat) or Col.LengthSet.IsEmpty then
+        Result := 'REGEXP_REPLACE(TO_CHAR(' + Ident + ', ''TM9'', ''NLS_NUMERIC_CHARACTERS=''''.,''''''), ''^(-?)\.'', ''\10.'')';
+    end;
+    dbdtDatetimeOffset, dbdtDatetime2: begin
+      // The driver delivers TIMESTAMP WITH (LOCAL) TIME ZONE converted to the session
+      // time zone, without the offset
+      if Col.LengthSet = '0' then
+        Fraction := ''
+      else
+        Fraction := '.FF' + Col.LengthSet;
+      // TZH:TZM is invalid for WITH LOCAL TIME ZONE, which is in the session time zone
+      if Col.DataType.Index = dbdtDatetime2 then
+        Ident := 'CAST(' + Ident + ' AS TIMESTAMP WITH TIME ZONE)';
+      Result := 'TO_CHAR(' + Ident + ', ''YYYY-MM-DD HH24:MI:SS' + Fraction + ' TZH:TZM'')';
+    end;
+    dbdtInterval:
+      Result := 'TO_CHAR(' + Ident + ')';
+    dbdtXML:
+      Result := 'XMLSERIALIZE(CONTENT ' + Ident + ' AS CLOB)';
+    dbdtJson:
+      Result := 'JSON_SERIALIZE(' + Ident + ' RETURNING CLOB)';
+    dbdtGeometry:
+      Result := 'SDO_UTIL.TO_WKTGEOMETRY(' + Ident + ')';
+    dbdtUnknown:
+      // User defined object, VARRAY and nested table types fail in the driver with
+      // ORA-01024. JSON generation accepts them since Oracle 19c. JSON_ARRAY(col) would
+      // be ambiguous, as it does not nest a collection. CASE keeps NULL instead of "null".
+      Result := 'CASE WHEN ' + Ident + ' IS NULL THEN NULL'+
+        ' ELSE JSON_QUERY(JSON_OBJECT(''v'' VALUE ' + Ident + ' RETURNING CLOB), ''$.v'' RETURNING CLOB) END';
+  end;
+end;
+
+
+function TOracleConnection.GetCreateCode(Obj: TDBObject): String;
+var
+  ObjType: String;
+begin
+  case Obj.NodeType of
+    lntTable: ObjType := 'TABLE';
+    lntView: ObjType := IfThen(Obj.IsMaterialized, 'MATERIALIZED_VIEW', 'VIEW');
+    lntProcedure: ObjType := 'PROCEDURE';
+    lntFunction: ObjType := 'FUNCTION';
+    lntTrigger: ObjType := 'TRIGGER';
+    else raise EDbError.CreateFmt(_('Unhandled list node type in %s.%s'), [ClassName, 'GetCreateCode']);
+  end;
+  // Works for objects of the current user, and for others with SELECT_CATALOG_ROLE
+  Result := GetVar('SELECT DBMS_METADATA.GET_DDL('+EscapeString(ObjType)+', '+
+    EscapeString(Obj.Name)+', '+EscapeString(Obj.Database)+') FROM dual');
+  Result := Trim(Result);
+end;
+
+
+function TOracleConnection.GetTableColumns(Table: TDBObject): TTableColumnList;
+var
+  ColQuery: TDBQuery;
+  Col: TTableColumn;
+  TypeName, DefaultExpr: String;
+begin
+  Result := TTableColumnList.Create(True);
+  // ALL_TAB_COLS also has virtual columns, USER_GENERATED excludes hidden system columns
+  ColQuery := GetResults('SELECT c.COLUMN_NAME, c.DATA_TYPE, c.DATA_TYPE_OWNER, c.DATA_LENGTH, c.DATA_PRECISION,'+
+    ' c.DATA_SCALE, c.CHAR_LENGTH, c.CHAR_USED, c.NULLABLE, c.DATA_DEFAULT, c.VIRTUAL_COLUMN, c.IDENTITY_COLUMN,'+
+    ' c.HIDDEN_COLUMN, cc.COMMENTS'+
+    ' FROM ALL_TAB_COLS c'+
+    ' LEFT JOIN ALL_COL_COMMENTS cc ON cc.OWNER = c.OWNER AND cc.TABLE_NAME = c.TABLE_NAME AND cc.COLUMN_NAME = c.COLUMN_NAME'+
+    ' WHERE c.OWNER = '+EscapeString(Table.Database)+
+    ' AND c.TABLE_NAME = '+EscapeString(Table.Name)+
+    ' AND c.USER_GENERATED = ''YES'''+
+    ' ORDER BY c.COLUMN_ID');
+  try
+    while not ColQuery.Eof do begin
+      Col := TTableColumn.Create(Self);
+      Result.Add(Col);
+      Col.Name := ColQuery.Col('COLUMN_NAME');
+      Col.OldName := Col.Name;
+      // "TIMESTAMP(6) WITH TIME ZONE" => "TIMESTAMP WITH TIME ZONE"
+      TypeName := ReplaceRegExpr('\(\d+\)', ColQuery.Col('DATA_TYPE'), '', False);
+      if (not ColQuery.IsNull('DATA_TYPE_OWNER'))
+        and (not MatchText(ColQuery.Col('DATA_TYPE_OWNER'), ['SYS', 'MDSYS', 'PUBLIC'])) then begin
+        // User defined object or collection type, see GetGridColumnExpression
+        Col.DataType := Datatypes[0];
+        Col.DataType.Name := TypeName;
+      end else begin
+        Col.DataType := GetDatatypeByName(TypeName, False, Col.Name);
+        if Col.DataType.Index = dbdtUnknown then
+          Col.DataType.Name := TypeName;
+      end;
+      case Col.DataType.Index of
+        dbdtNumeric: begin
+          // Unconstrained NUMBER has neither precision nor scale. INTEGER is NUMBER(*,0).
+          if not ColQuery.IsNull('DATA_PRECISION') then begin
+            Col.LengthSet := ColQuery.Col('DATA_PRECISION');
+            if MakeInt(ColQuery.Col('DATA_SCALE')) <> 0 then
+              Col.LengthSet := Col.LengthSet + ',' + ColQuery.Col('DATA_SCALE');
+          end
+          else if not ColQuery.IsNull('DATA_SCALE') then
+            Col.LengthSet := '*,' + ColQuery.Col('DATA_SCALE');
+        end;
+        dbdtFloat:
+          Col.LengthSet := ColQuery.Col('DATA_PRECISION');
+        dbdtChar, dbdtVarchar: begin
+          // Keep character length semantics, otherwise ALTER TABLE would change it to the
+          // session's NLS_LENGTH_SEMANTICS, usually BYTE
+          Col.LengthSet := ColQuery.Col('CHAR_LENGTH');
+          if ColQuery.Col('CHAR_USED') = 'C' then
+            Col.LengthSet := Col.LengthSet + ' CHAR';
+        end;
+        dbdtNchar, dbdtNvarchar:
+          Col.LengthSet := ColQuery.Col('CHAR_LENGTH');
+        dbdtVarbinary:
+          Col.LengthSet := ColQuery.Col('DATA_LENGTH');
+        dbdtTimestamp, dbdtDatetimeOffset, dbdtDatetime2:
+          // Fractional seconds precision
+          Col.LengthSet := ColQuery.Col('DATA_SCALE');
+      end;
+      Col.AllowNull := ColQuery.Col('NULLABLE') = 'Y';
+      Col.Invisible := ColQuery.Col('HIDDEN_COLUMN') = 'YES';
+      // DATA_DEFAULT holds the expression, also for virtual columns
+      DefaultExpr := Trim(ColQuery.Col('DATA_DEFAULT'));
+      Col.DefaultType := cdtNothing;
+      Col.DefaultText := '';
+      if ColQuery.Col('VIRTUAL_COLUMN') = 'YES' then begin
+        Col.Virtuality := 'VIRTUAL';
+        Col.GenerationExpression := DefaultExpr;
+      end
+      else if ColQuery.Col('IDENTITY_COLUMN') = 'YES' then begin
+        Col.DefaultType := cdtAutoInc;
+        Col.DefaultText := FSqlProvider.GetSql(qAutoInc);
+      end
+      else if (not DefaultExpr.IsEmpty) and (not SameText(DefaultExpr, 'NULL')) then begin
+        if DefaultExpr.StartsWith(FStringQuoteChar) and DefaultExpr.EndsWith(FStringQuoteChar) then begin
+          Col.DefaultType := cdtText;
+          Col.DefaultText := DefaultExpr.DeQuotedString(FStringQuoteChar);
+        end else begin
+          Col.DefaultType := cdtExpression;
+          Col.DefaultText := DefaultExpr;
+        end;
+      end;
+      Col.OnUpdateType := cdtNothing;
+      Col.OnUpdateText := '';
+      Col.Comment := ColQuery.Col('COMMENTS');
+      ColQuery.Next;
+    end;
+  finally
+    ColQuery.Free;
+  end;
+end;
+
+
+function TOracleConnection.GetTableKeys(Table: TDBObject): TTableKeyList;
+var
+  KeyQuery: TDBQuery;
+  NewKey: TTableKey;
+  KeyName, Expression: String;
+begin
+  Result := TTableKeyList.Create(True);
+
+  // Primary key and unique constraints
+  KeyQuery := GetResults('SELECT c.CONSTRAINT_NAME, c.CONSTRAINT_TYPE, cc.COLUMN_NAME'+
+    ' FROM ALL_CONSTRAINTS c'+
+    ' JOIN ALL_CONS_COLUMNS cc ON cc.OWNER = c.OWNER AND cc.CONSTRAINT_NAME = c.CONSTRAINT_NAME AND cc.TABLE_NAME = c.TABLE_NAME'+
+    ' WHERE c.OWNER = '+EscapeString(Table.Database)+
+    ' AND c.TABLE_NAME = '+EscapeString(Table.Name)+
+    ' AND c.CONSTRAINT_TYPE IN (''P'', ''U'')'+
+    ' ORDER BY c.CONSTRAINT_TYPE, c.CONSTRAINT_NAME, cc.POSITION');
+  try
+    KeyName := '';
+    NewKey := nil;
+    while not KeyQuery.Eof do begin
+      if KeyQuery.Col('CONSTRAINT_NAME') <> KeyName then begin
+        KeyName := KeyQuery.Col('CONSTRAINT_NAME');
+        NewKey := TTableKey.Create(Self);
+        Result.Add(NewKey);
+        NewKey.Name := KeyName;
+        NewKey.OldName := NewKey.Name;
+        if KeyQuery.Col('CONSTRAINT_TYPE') = 'P' then
+          NewKey.IndexType := TTableKey.PRIMARY
+        else
+          NewKey.IndexType := TTableKey.UNIQUE;
+        NewKey.OldIndexType := NewKey.IndexType;
+        NewKey.IsConstraint := True;
+      end;
+      NewKey.Columns.Add(KeyQuery.Col('COLUMN_NAME'));
+      NewKey.SubParts.Add('');
+      NewKey.Collations.Add('A');
+      KeyQuery.Next;
+    end;
+  finally
+    KeyQuery.Free;
+  end;
+
+  // Indexes not backing a constraint. Function based index parts appear as hidden
+  // SYS_NC...$ columns, with the expression in ALL_IND_EXPRESSIONS.
+  KeyQuery := GetResults('SELECT i.INDEX_NAME, i.UNIQUENESS, ic.COLUMN_NAME, ic.DESCEND, ie.COLUMN_EXPRESSION'+
+    ' FROM ALL_INDEXES i'+
+    ' JOIN ALL_IND_COLUMNS ic ON ic.INDEX_OWNER = i.OWNER AND ic.INDEX_NAME = i.INDEX_NAME'+
+    ' LEFT JOIN ALL_IND_EXPRESSIONS ie ON ie.INDEX_OWNER = ic.INDEX_OWNER AND ie.INDEX_NAME = ic.INDEX_NAME'+
+    '   AND ie.COLUMN_POSITION = ic.COLUMN_POSITION'+
+    ' WHERE i.TABLE_OWNER = '+EscapeString(Table.Database)+
+    ' AND i.TABLE_NAME = '+EscapeString(Table.Name)+
+    ' AND i.INDEX_TYPE <> ''LOB'''+
+    ' AND NOT EXISTS (SELECT 1 FROM ALL_CONSTRAINTS c WHERE c.OWNER = i.TABLE_OWNER'+
+    '   AND c.TABLE_NAME = i.TABLE_NAME AND c.INDEX_NAME = i.INDEX_NAME AND c.CONSTRAINT_TYPE IN (''P'', ''U''))'+
+    ' ORDER BY i.INDEX_NAME, ic.COLUMN_POSITION');
+  try
+    KeyName := '';
+    NewKey := nil;
+    while not KeyQuery.Eof do begin
+      if KeyQuery.Col('INDEX_NAME') <> KeyName then begin
+        KeyName := KeyQuery.Col('INDEX_NAME');
+        NewKey := TTableKey.Create(Self);
+        Result.Add(NewKey);
+        NewKey.Name := KeyName;
+        NewKey.OldName := NewKey.Name;
+        if KeyQuery.Col('UNIQUENESS') = 'UNIQUE' then
+          NewKey.IndexType := TTableKey.UNIQUE
+        else
+          NewKey.IndexType := TTableKey.KEY;
+        NewKey.OldIndexType := NewKey.IndexType;
+      end;
+      Expression := Trim(KeyQuery.Col('COLUMN_EXPRESSION'));
+      if KeyQuery.IsNull('COLUMN_EXPRESSION') or Expression.IsEmpty then
+        NewKey.Columns.Add(KeyQuery.Col('COLUMN_NAME'))
+      // DESC index part: "COL". TIMESTAMP WITH TIME ZONE column: SYS_EXTRACT_UTC("COL"), added by
+      // Oracle itself on CREATE INDEX for such a column.
+      else if ExecRegExpr('^(SYS_EXTRACT_UTC\()?"[^"]+"\)?$', Expression) then
+        NewKey.Columns.Add(RegExprGetMatch('"([^"]+)"', Expression, 1))
+      else
+        // Real function based index part, see TTableKey.IsExpression
+        NewKey.Columns.Add('(' + Expression + ')');
+      NewKey.SubParts.Add('');
+      if KeyQuery.Col('DESCEND') = 'DESC' then
+        NewKey.Collations.Add('D')
+      else
+        NewKey.Collations.Add('A');
+      KeyQuery.Next;
+    end;
+  finally
+    KeyQuery.Free;
+  end;
+end;
+
+
+function TOracleConnection.GetTableForeignKeys(Table: TDBObject): TForeignKeyList;
+var
+  ForeignQuery: TDBQuery;
+  ForeignKey: TForeignKey;
+begin
+  Result := TForeignKeyList.Create(True);
+  ForeignQuery := GetResults('SELECT c.CONSTRAINT_NAME, c.DELETE_RULE, r.OWNER AS REF_OWNER,'+
+    ' r.TABLE_NAME AS REF_TABLE, cc.COLUMN_NAME, rc.COLUMN_NAME AS REF_COLUMN'+
+    ' FROM ALL_CONSTRAINTS c'+
+    ' JOIN ALL_CONSTRAINTS r ON r.OWNER = c.R_OWNER AND r.CONSTRAINT_NAME = c.R_CONSTRAINT_NAME'+
+    ' JOIN ALL_CONS_COLUMNS cc ON cc.OWNER = c.OWNER AND cc.CONSTRAINT_NAME = c.CONSTRAINT_NAME'+
+    ' JOIN ALL_CONS_COLUMNS rc ON rc.OWNER = r.OWNER AND rc.CONSTRAINT_NAME = r.CONSTRAINT_NAME AND rc.POSITION = cc.POSITION'+
+    ' WHERE c.OWNER = '+EscapeString(Table.Database)+
+    ' AND c.TABLE_NAME = '+EscapeString(Table.Name)+
+    ' AND c.CONSTRAINT_TYPE = ''R'''+
+    ' ORDER BY c.CONSTRAINT_NAME, cc.POSITION');
+  try
+    ForeignKey := nil;
+    while not ForeignQuery.Eof do begin
+      if (not Assigned(ForeignKey)) or (ForeignKey.KeyName <> ForeignQuery.Col('CONSTRAINT_NAME')) then begin
+        ForeignKey := TForeignKey.Create(Self);
+        Result.Add(ForeignKey);
+        ForeignKey.KeyName := ForeignQuery.Col('CONSTRAINT_NAME');
+        ForeignKey.OldKeyName := ForeignKey.KeyName;
+        ForeignKey.Db := Table.Database;
+        ForeignKey.ReferenceDb := ForeignQuery.Col('REF_OWNER');
+        ForeignKey.ReferenceTable := ForeignQuery.Col('REF_OWNER')+'.'+ForeignQuery.Col('REF_TABLE');
+        // Oracle has no ON UPDATE clause
+        ForeignKey.OnUpdate := 'NO ACTION';
+        ForeignKey.OnDelete := ForeignQuery.Col('DELETE_RULE');
+      end;
+      ForeignKey.Columns.Add(ForeignQuery.Col('COLUMN_NAME'));
+      ForeignKey.ForeignColumns.Add(ForeignQuery.Col('REF_COLUMN'));
+      ForeignQuery.Next;
+    end;
+  finally
+    ForeignQuery.Free;
   end;
 end;
 
@@ -7640,6 +8589,19 @@ end;
 procedure TDBConnection.Drop(Obj: TDBObject);
 begin
   Query('DROP '+UpperCase(Obj.ObjType)+' '+Obj.QuotedName);
+end;
+
+
+procedure TOracleConnection.Drop(Obj: TDBObject);
+var
+  ObjType: String;
+begin
+  // Schema qualified, and DROP MATERIALIZED VIEW for those. Dropped tables go to the recycle bin.
+  if (Obj.NodeType = lntView) and Obj.IsMaterialized then
+    ObjType := 'MATERIALIZED VIEW'
+  else
+    ObjType := UpperCase(Obj.ObjType);
+  Query('DROP '+ObjType+' '+Obj.QuotedDbAndTableName);
 end;
 
 
@@ -7685,6 +8647,8 @@ begin
       Result := TInterbaseConnection(Self).LastRawResults.Count;
     ngRedis:
       Result := TRedisConnection(Self).LastResultCount;
+    ngOracle, ngSnowflake:
+      Result := TOdbcConnection(Self).LastRawResults.Count;
     else
       raise Exception.CreateFmt(_(MsgUnhandledNetType), [Integer(Parameters.NetType)]);
   end;
@@ -8183,23 +9147,32 @@ procedure TSqlSrvConnection.FetchDbObjects(db: String; var Cache: TDBObjectList)
 var
   obj: TDBObject;
   Results: TDBQuery;
-  tp, SchemaSelect: String;
+  tp, SchemaSelect, CommentSelect, CommentJoin: String;
 begin
   // Tables, views and procedures
   Results := nil;
   // Schema support introduced in MSSQL 2005 (9.0). See issue #3212.
   // RowsInTable added in 12.16
   SchemaSelect := EscapeString('');
-  if ServerVersionInt >= 900 then
+  CommentSelect := '';
+  CommentJoin := '';
+  if ServerVersionInt >= 900 then begin
     SchemaSelect := 'SCHEMA_NAME('+QuoteIdent('schema_id')+')';
+    // Object comments are extended properties
+    CommentSelect := ', CAST(ep.value AS NVARCHAR(MAX)) AS '+QuoteIdent('Comment');
+    CommentJoin := ' LEFT JOIN '+QuoteIdent(db)+'.sys.extended_properties AS ep'+
+      ' ON ep.major_id = o.object_id AND ep.minor_id = 0 AND ep.class = 1'+
+      ' AND ep.name = '+EscapeString('MS_Description');
+  end;
   try
-    Results := GetResults('SELECT o.*, '+SchemaSelect+' AS '+EscapeString('schema')+', rc.RowsInTable'+
+    Results := GetResults('SELECT o.*, '+SchemaSelect+' AS '+EscapeString('schema')+', rc.RowsInTable'+CommentSelect+
       ' FROM '+QuoteIdent(db)+FSqlProvider.GetSql(qDbObjectsTable)+ ' AS o'+
       ' LEFT JOIN ('+
       '   SELECT object_id, SUM(rows) AS RowsInTable FROM '+QuoteIdent(db)+'.sys.partitions'+
       '   WHERE index_id IN (0,1)'+ // -- heap or clustered index
       '   GROUP BY object_id'+
       ' ) AS rc ON rc.object_id = o.object_id'+
+      CommentJoin+
       ' WHERE o.'+QuoteIdent('type')+' IN ('+EscapeString('P')+', '+EscapeString('U')+', '+EscapeString('V')+', '+EscapeString('TR')+', '+EscapeString('FN')+', '+EscapeString('TF')+', '+EscapeString('IF')+')');
   except
     on E:EDbError do;
@@ -8225,6 +9198,7 @@ begin
       else if (tp = 'FN') or (tp = 'TF') or (tp = 'IF') then
         obj.NodeType := lntFunction;
       obj.Rows := StrToInt64Def(Results.Col('RowsInTable'), -1);
+      obj.Comment := Results.Col('Comment', True);
       obj.RowsAreExact := False; // approximate, not guaranteed exact.
       // Set reasonable default value for calculation of export chunks. See #343
       // OFFSET..FETCH supported from v11.0/2012
@@ -8449,7 +9423,7 @@ begin
         end
         else begin
           // Firebird: SMALLINT, 0=persistent table, 1=view, 2=external table, 3=virtual
-          if MakeInt(ViewContext) in [0, 2] then
+          if (MakeInt(ViewContext) = 0) or (MakeInt(ViewContext) = 2) then
             obj.NodeType := lntTable
           else
             obj.NodeType := lntView;
@@ -8585,6 +9559,458 @@ begin
 end;
 
 
+procedure TOracleConnection.FetchDbObjects(db: String; var Cache: TDBObjectList);
+var
+  obj: TDBObject;
+  Results: TDBQuery;
+  ObjType: String;
+  fs: TFormatSettings;
+begin
+  fs := DefaultFormatSettings;
+  fs.DateSeparator := '-';
+  fs.TimeSeparator := ':';
+  fs.ShortDateFormat := 'yyyy-mm-dd';
+  fs.LongTimeFormat := 'hh:nn:ss';
+  // A materialized view has a container table with the same name, which is left out here.
+  // Recycle bin objects (BIN$...) are not shown either.
+  Results := GetResults('SELECT o.OBJECT_NAME, o.OBJECT_TYPE,'+
+    ' TO_CHAR(o.CREATED, ''YYYY-MM-DD HH24:MI:SS'') AS CREATED,'+
+    ' TO_CHAR(o.LAST_DDL_TIME, ''YYYY-MM-DD HH24:MI:SS'') AS LAST_DDL_TIME,'+
+    ' t.NUM_ROWS, t.AVG_ROW_LEN, c.COMMENTS'+
+    ' FROM ALL_OBJECTS o'+
+    ' LEFT JOIN ALL_TABLES t ON t.OWNER = o.OWNER AND t.TABLE_NAME = o.OBJECT_NAME AND o.OBJECT_TYPE = ''TABLE'''+
+    ' LEFT JOIN ALL_TAB_COMMENTS c ON c.OWNER = o.OWNER AND c.TABLE_NAME = o.OBJECT_NAME AND o.OBJECT_TYPE IN (''TABLE'', ''VIEW'')'+
+    ' WHERE o.OWNER = '+EscapeString(db)+
+    ' AND o.OBJECT_TYPE IN (''TABLE'', ''VIEW'', ''MATERIALIZED VIEW'', ''PROCEDURE'', ''FUNCTION'', ''TRIGGER'')'+
+    ' AND o.SUBOBJECT_NAME IS NULL'+
+    ' AND o.OBJECT_NAME NOT LIKE ''BIN$%'''+
+    ' AND (t.NESTED IS NULL OR t.NESTED = ''NO'')'+
+    ' AND NOT (o.OBJECT_TYPE = ''TABLE'' AND EXISTS (SELECT 1 FROM ALL_MVIEWS m WHERE m.OWNER = o.OWNER AND m.MVIEW_NAME = o.OBJECT_NAME))'+
+    ' ORDER BY o.OBJECT_NAME');
+  try
+    while not Results.Eof do begin
+      ObjType := Results.Col('OBJECT_TYPE');
+      obj := TDBObject.Create(Self);
+      Cache.Add(obj);
+      obj.Name := Results.Col('OBJECT_NAME');
+      obj.Database := db;
+      obj.Created := StrToDateTimeDef(Results.Col('CREATED'), 0, fs);
+      obj.Updated := StrToDateTimeDef(Results.Col('LAST_DDL_TIME'), 0, fs);
+      obj.Comment := Results.Col('COMMENTS');
+      if ObjType = 'TABLE' then begin
+        obj.NodeType := lntTable;
+        // Statistics from the last ANALYZE or DBMS_STATS run, if any
+        if not Results.IsNull('NUM_ROWS') then begin
+          obj.Rows := MakeInt(Results.Col('NUM_ROWS'));
+          if not Results.IsNull('AVG_ROW_LEN') then begin
+            obj.DataLen := obj.Rows * MakeInt(Results.Col('AVG_ROW_LEN'));
+            obj.Size := obj.DataLen;
+          end;
+        end;
+      end
+      else if ObjType = 'VIEW' then
+        obj.NodeType := lntView
+      else if ObjType = 'MATERIALIZED VIEW' then begin
+        obj.NodeType := lntView;
+        obj.IsMaterialized := True;
+      end
+      else if ObjType = 'PROCEDURE' then
+        obj.NodeType := lntProcedure
+      else if ObjType = 'FUNCTION' then
+        obj.NodeType := lntFunction
+      else
+        obj.NodeType := lntTrigger;
+      Results.Next;
+    end;
+  finally
+    Results.Free;
+  end;
+end;
+
+
+{ TSnowflakeConnection }
+
+constructor TSnowflakeConnection.Create(AOwner: TComponent);
+begin
+  inherited;
+  FDatatypes := Copy(SnowflakeDatatypes);
+  FInfSch := 'INFORMATION_SCHEMA';
+  // Unquoted identifiers are folded to uppercase
+  FIdentCharsNoQuote := ['A'..'Z', '0'..'9', '_', '$'];
+  FQuoteChars := '"';
+  // Binary literal x'...', lowercase so the "lowercase hex" option does not change the prefix
+  FHexPrefix := 'x''';
+  FHexPostfix := '''';
+end;
+
+
+procedure TSnowflakeConnection.PrepareHandle(FinalHost: String; FinalPort: Integer);
+var
+  Database: String;
+begin
+  // Account URL, e.g. xy12345.eu-central-1.snowflakecomputing.com
+  FHandle.Params.Add('Server=' + FinalHost);
+  if (FinalPort > 0) and (FinalPort <> 443) then
+    FHandle.Params.Add('Port=' + IntToStr(FinalPort));
+  // One database per session, its schemas are the tree's databases
+  Database := Trim(Parameters.AllDatabasesStr);
+  if not Database.IsEmpty then
+    FHandle.Params.Add('Database=' + Database);
+  if not Parameters.SnowflakeWarehouse.Trim.IsEmpty then
+    FHandle.Params.Add('Warehouse=' + Parameters.SnowflakeWarehouse.Trim);
+  if not Parameters.SnowflakeRole.Trim.IsEmpty then
+    FHandle.Params.Add('Role=' + Parameters.SnowflakeRole.Trim);
+  FHandle.Float38AsDecimal := False;
+end;
+
+
+procedure TSnowflakeConnection.AfterHandleOpened;
+begin
+  // CURRENT_VERSION() returns "9.39.1"
+  FServerVersionUntouched := 'Snowflake ' + GetVar('SELECT CURRENT_VERSION()');
+  FServerDateTimeOnStartup := GetVar('SELECT ' + FSqlProvider.GetSql(qFuncNow));
+end;
+
+
+function TSnowflakeConnection.PingSQL: String;
+begin
+  Result := 'SELECT 1';
+end;
+
+
+procedure TSnowflakeConnection.DoAfterConnect;
+var
+  TimeZone: String;
+begin
+  if GetVar('SELECT CURRENT_DATABASE()').IsEmpty then begin
+    raise EDbError.Create(_('No database selected. Please enter the name of a database in your session settings.'));
+  end;
+  if Parameters.LocalTimeZone then begin
+    // Snowflake accepts IANA names only, no offsets like "+01:00". The session time zone is used for
+    // TIMESTAMP_LTZ values and TO_VARCHAR(). Unchecked: account default, often America/Los_Angeles.
+    TimeZone := GetLocalIanaTimeZone;
+    if TimeZone.IsEmpty then
+      Log(lcError, _('Could not detect the name of your time zone, keeping the default session time zone.'))
+    else try
+      Query('ALTER SESSION SET TIMEZONE = ' + EscapeString(TimeZone));
+    except
+      on E:EDbError do; // Logged already
+    end;
+  end;
+  // Runs the startup script
+  inherited;
+end;
+
+
+function TSnowflakeConnection.GetThreadId: Int64;
+begin
+  if FThreadId = 0 then begin
+    Ping(False);
+    if FActive then
+      FThreadID := StrToInt64Def(GetVar('SELECT CURRENT_SESSION()'), 0);
+  end;
+  Result := FThreadID;
+end;
+
+
+function TSnowflakeConnection.GetAllDatabases: TStringList;
+begin
+  // Schemas of the session's database are shown as databases
+  if not Assigned(FAllDatabases) then begin
+    try
+      FAllDatabases := GetCol('SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA ORDER BY SCHEMA_NAME');
+    except
+      on E:EDbError do
+        FAllDatabases := TStringList.Create;
+    end;
+    ApplyIgnoreDatabasePattern(FAllDatabases);
+  end;
+  Result := FAllDatabases;
+end;
+
+
+procedure TSnowflakeConnection.FetchDbObjects(db: String; var Cache: TDBObjectList);
+var
+  obj: TDBObject;
+  Results: TDBQuery;
+  ObjType: String;
+  fs: TFormatSettings;
+begin
+  fs := DefaultFormatSettings;
+  fs.DateSeparator := '-';
+  fs.TimeSeparator := ':';
+  fs.ShortDateFormat := 'yyyy-mm-dd';
+  fs.LongTimeFormat := 'hh:nn:ss';
+  // TABLE_TYPE: BASE TABLE, TEMPORARY TABLE, EXTERNAL TABLE, EVENT TABLE, VIEW, MATERIALIZED VIEW
+  Results := GetResults('SELECT TABLE_NAME, TABLE_TYPE, ROW_COUNT, BYTES, COMMENT,'+
+    ' TO_VARCHAR(CREATED, ''YYYY-MM-DD HH24:MI:SS'') AS CREATED,'+
+    ' TO_VARCHAR(LAST_ALTERED, ''YYYY-MM-DD HH24:MI:SS'') AS LAST_ALTERED'+
+    ' FROM INFORMATION_SCHEMA.TABLES'+
+    ' WHERE TABLE_SCHEMA = '+EscapeString(db)+
+    ' ORDER BY TABLE_NAME');
+  try
+    while not Results.Eof do begin
+      ObjType := Results.Col('TABLE_TYPE');
+      obj := TDBObject.Create(Self);
+      Cache.Add(obj);
+      obj.Name := Results.Col('TABLE_NAME');
+      obj.Database := db;
+      obj.Created := StrToDateTimeDef(Results.Col('CREATED'), 0, fs);
+      obj.Updated := StrToDateTimeDef(Results.Col('LAST_ALTERED'), 0, fs);
+      obj.Comment := Results.Col('COMMENT');
+      if ObjType = 'VIEW' then
+        obj.NodeType := lntView
+      else if ObjType = 'MATERIALIZED VIEW' then begin
+        obj.NodeType := lntView;
+        obj.IsMaterialized := True;
+      end
+      else begin
+        obj.NodeType := lntTable;
+        // Exact numbers from the metadata, not estimated
+        if not Results.IsNull('ROW_COUNT') then begin
+          obj.Rows := MakeInt(Results.Col('ROW_COUNT'));
+          obj.RowsAreExact := True;
+        end;
+        if not Results.IsNull('BYTES') then begin
+          obj.DataLen := MakeInt(Results.Col('BYTES'));
+          obj.Size := obj.DataLen;
+        end;
+      end;
+      Results.Next;
+    end;
+  finally
+    Results.Free;
+  end;
+end;
+
+
+function TSnowflakeConnection.GetCreateCode(Obj: TDBObject): String;
+var
+  ObjType: String;
+begin
+  case Obj.NodeType of
+    lntTable: ObjType := 'TABLE';
+    lntView: ObjType := 'VIEW';
+    else raise EDbError.CreateFmt(_('Unhandled list node type in %s.%s'), [ClassName, 'GetCreateCode']);
+  end;
+  // Views: the original CREATE statement, tables: generated by the server
+  Result := GetVar('SELECT GET_DDL('+EscapeString(ObjType)+', '+EscapeString(Obj.QuotedDbAndTableName)+')');
+  Result := Trim(Result);
+  if Result.EndsWith(';') then
+    Delete(Result, Length(Result), 1);
+end;
+
+
+function TSnowflakeConnection.GetTableColumns(Table: TDBObject): TTableColumnList;
+var
+  ColQuery: TDBQuery;
+  Col: TTableColumn;
+  TypeName, DefaultExpr, Precision: String;
+begin
+  Result := TTableColumnList.Create(True);
+  ColQuery := GetResults('SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION,'+
+    ' NUMERIC_SCALE, DATETIME_PRECISION, IS_NULLABLE, COLUMN_DEFAULT, IS_IDENTITY, COLLATION_NAME, COMMENT'+
+    ' FROM INFORMATION_SCHEMA.COLUMNS'+
+    ' WHERE TABLE_SCHEMA = '+EscapeString(Table.Database)+
+    ' AND TABLE_NAME = '+EscapeString(Table.Name)+
+    ' ORDER BY ORDINAL_POSITION');
+  try
+    while not ColQuery.Eof do begin
+      Col := TTableColumn.Create(Self);
+      Result.Add(Col);
+      Col.Name := ColQuery.Col('COLUMN_NAME');
+      Col.OldName := Col.Name;
+      // VARCHAR is reported as TEXT, VECTOR possibly with its element type and dimension
+      TypeName := ColQuery.Col('DATA_TYPE');
+      if Pos('(', TypeName) > 0 then begin
+        Col.LengthSet := Trim(RegExprGetMatch('\((.*)\)', TypeName, 1));
+        TypeName := Trim(Copy(TypeName, 1, Pos('(', TypeName)-1));
+      end;
+      Col.DataType := GetDatatypeByName(TypeName, False, Col.Name);
+      if Col.DataType.Index = dbdtUnknown then
+        Col.DataType.Name := TypeName;
+      case Col.DataType.Index of
+        dbdtNumeric: begin
+          if not ColQuery.IsNull('NUMERIC_PRECISION') then begin
+            Col.LengthSet := ColQuery.Col('NUMERIC_PRECISION');
+            if not ColQuery.IsNull('NUMERIC_SCALE') then
+              Col.LengthSet := Col.LengthSet + ',' + ColQuery.Col('NUMERIC_SCALE');
+          end;
+        end;
+        dbdtVarchar, dbdtVarbinary:
+          Col.LengthSet := ColQuery.Col('CHARACTER_MAXIMUM_LENGTH');
+        dbdtTime, dbdtDatetime, dbdtDatetime2, dbdtDatetimeOffset, dbdtTimestamp: begin
+          // Fractional seconds precision
+          if not ColQuery.IsNull('DATETIME_PRECISION') then
+            Precision := ColQuery.Col('DATETIME_PRECISION')
+          else
+            Precision := ColQuery.Col('NUMERIC_SCALE');
+          Col.LengthSet := Precision;
+        end;
+      end;
+      Col.AllowNull := ColQuery.Col('IS_NULLABLE') = 'YES';
+      Col.Collation := ColQuery.Col('COLLATION_NAME');
+      DefaultExpr := Trim(ColQuery.Col('COLUMN_DEFAULT'));
+      Col.DefaultType := cdtNothing;
+      Col.DefaultText := '';
+      if ColQuery.Col('IS_IDENTITY') = 'YES' then begin
+        Col.DefaultType := cdtAutoInc;
+        Col.DefaultText := FSqlProvider.GetSql(qAutoInc);
+      end
+      else if (not DefaultExpr.IsEmpty) and (not SameText(DefaultExpr, 'NULL')) then begin
+        if DefaultExpr.StartsWith(FStringQuoteChar) and DefaultExpr.EndsWith(FStringQuoteChar) then begin
+          Col.DefaultType := cdtText;
+          Col.DefaultText := DefaultExpr.DeQuotedString(FStringQuoteChar);
+        end else begin
+          Col.DefaultType := cdtExpression;
+          Col.DefaultText := DefaultExpr;
+        end;
+      end;
+      Col.OnUpdateType := cdtNothing;
+      Col.OnUpdateText := '';
+      Col.Comment := ColQuery.Col('COMMENT');
+      ColQuery.Next;
+    end;
+  finally
+    ColQuery.Free;
+  end;
+end;
+
+
+function TSnowflakeConnection.GetTableKeys(Table: TDBObject): TTableKeyList;
+var
+  KeyQuery: TDBQuery;
+  NewKey: TTableKey;
+  KeyType: String;
+  i, KeyTypeIdx: Integer;
+begin
+  // Snowflake has no indexes on standard tables. Primary and unique keys are constraints,
+  // which are not enforced, except NOT NULL. INFORMATION_SCHEMA has no KEY_COLUMN_USAGE.
+  Result := TTableKeyList.Create(True);
+  for KeyTypeIdx:=0 to 1 do begin
+    KeyType := IfThen(KeyTypeIdx = 0, TTableKey.PRIMARY, TTableKey.UNIQUE);
+    try
+      if KeyType = TTableKey.PRIMARY then
+        KeyQuery := GetResults('SHOW PRIMARY KEYS IN TABLE '+Table.QuotedDbAndTableName)
+      else
+        KeyQuery := GetResults('SHOW UNIQUE KEYS IN TABLE '+Table.QuotedDbAndTableName);
+    except
+      on E:EDbError do
+        Continue;
+    end;
+    try
+      while not KeyQuery.Eof do begin
+        NewKey := nil;
+        for i:=0 to Result.Count-1 do begin
+          if (Result[i].Name = KeyQuery.Col('constraint_name')) and (Result[i].IndexType = KeyType) then begin
+            NewKey := Result[i];
+            Break;
+          end;
+        end;
+        if not Assigned(NewKey) then begin
+          NewKey := TTableKey.Create(Self);
+          Result.Add(NewKey);
+          NewKey.Name := KeyQuery.Col('constraint_name');
+          NewKey.OldName := NewKey.Name;
+          NewKey.IndexType := KeyType;
+          NewKey.OldIndexType := NewKey.IndexType;
+          NewKey.IsConstraint := True;
+        end;
+        // Rows are ordered by key_sequence
+        NewKey.Columns.Add(KeyQuery.Col('column_name'));
+        NewKey.SubParts.Add('');
+        NewKey.Collations.Add('A');
+        KeyQuery.Next;
+      end;
+    finally
+      KeyQuery.Free;
+    end;
+  end;
+end;
+
+
+function TSnowflakeConnection.GetTableForeignKeys(Table: TDBObject): TForeignKeyList;
+var
+  ForeignQuery: TDBQuery;
+  ForeignKey: TForeignKey;
+begin
+  Result := TForeignKeyList.Create(True);
+  try
+    ForeignQuery := GetResults('SHOW IMPORTED KEYS IN TABLE '+Table.QuotedDbAndTableName);
+  except
+    on E:EDbError do
+      Exit;
+  end;
+  try
+    ForeignKey := nil;
+    while not ForeignQuery.Eof do begin
+      if (not Assigned(ForeignKey)) or (ForeignKey.KeyName <> ForeignQuery.Col('fk_name')) then begin
+        ForeignKey := TForeignKey.Create(Self);
+        Result.Add(ForeignKey);
+        ForeignKey.KeyName := ForeignQuery.Col('fk_name');
+        ForeignKey.OldKeyName := ForeignKey.KeyName;
+        ForeignKey.Db := Table.Database;
+        ForeignKey.ReferenceDb := ForeignQuery.Col('pk_schema_name');
+        ForeignKey.ReferenceTable := ForeignQuery.Col('pk_schema_name')+'.'+ForeignQuery.Col('pk_table_name');
+        ForeignKey.OnUpdate := ForeignQuery.Col('update_rule');
+        ForeignKey.OnDelete := ForeignQuery.Col('delete_rule');
+      end;
+      ForeignKey.Columns.Add(ForeignQuery.Col('fk_column_name'));
+      ForeignKey.ForeignColumns.Add(ForeignQuery.Col('pk_column_name'));
+      ForeignQuery.Next;
+    end;
+  finally
+    ForeignQuery.Free;
+  end;
+end;
+
+
+function TSnowflakeConnection.GetTableCheckConstraints(Table: TDBObject): TCheckConstraintList;
+begin
+  // Snowflake has no CHECK constraints
+  Result := TCheckConstraintList.Create(True);
+end;
+
+
+function TSnowflakeConnection.GetGridColumnExpression(Col: TTableColumn): String;
+var
+  Ident, Fraction: String;
+begin
+  Result := '';
+  Ident := QuoteIdent(Col.Name);
+  // Fractional seconds, 9 digits by default
+  if Col.LengthSet = '0' then
+    Fraction := ''
+  else if Col.LengthSet.IsEmpty then
+    Fraction := '.FF9'
+  else
+    Fraction := '.FF' + Col.LengthSet;
+  case Col.DataType.Index of
+    // The driver delivers TIMESTAMP_TZ and TIMESTAMP_LTZ in UTC, without the offset.
+    // TO_VARCHAR keeps the offset, and shows LTZ in the session time zone.
+    dbdtDatetimeOffset, dbdtDatetime2:
+      Result := 'TO_VARCHAR(' + Ident + ', ''YYYY-MM-DD HH24:MI:SS' + Fraction + ' TZH:TZM'')';
+    // Fractional seconds get lost in TDateTimeField otherwise
+    dbdtDatetime, dbdtTimestamp:
+      Result := 'TO_VARCHAR(' + Ident + ', ''YYYY-MM-DD HH24:MI:SS' + Fraction + ''')';
+    dbdtTime:
+      Result := 'TO_VARCHAR(' + Ident + ', ''HH24:MI:SS' + Fraction + ''')';
+  end;
+end;
+
+
+procedure TSnowflakeConnection.Drop(Obj: TDBObject);
+var
+  ObjType: String;
+begin
+  if (Obj.NodeType = lntView) and Obj.IsMaterialized then
+    ObjType := 'MATERIALIZED VIEW'
+  else
+    ObjType := UpperCase(Obj.ObjType);
+  Query('DROP '+ObjType+' '+Obj.QuotedDbAndTableName);
+end;
+
+
 function TDBConnection.DecodeAPIString(a: AnsiString): String;
 begin
   if IsUnicode then
@@ -8682,7 +10108,32 @@ var
   rx: TRegExpr;
   EscQuote: String;
 begin
-  if CreateCode <> '' then begin
+  if (CreateCode <> '') and FParameters.IsAnyOracle then begin
+    // DBMS_METADATA.GET_DDL: CREATE OR REPLACE FORCE EDITIONABLE VIEW "SCHEMA"."NAME" ("A", "B") AS SELECT ... [WITH READ ONLY]
+    // Return everything after the name, as the column list may differ from the names in the SELECT,
+    // and WITH READ ONLY / CHECK OPTION must not get lost. See TfrmView.ComposeCreateStatement
+    rx := TRegExpr.Create;
+    rx.ModifierI := True;
+    rx.Expression := '\bVIEW\s+(?:"[^"]+"\s*\.\s*)?"[^"]+"\s+(.+)$';
+    if rx.Exec(CreateCode) then
+      SelectCode := Trim(rx.Match[1])
+    else
+      Log(lcError, f_('Regular expression did not match the VIEW code in %s: %s', ['ParseViewStructure()', sLineBreak+sLineBreak+CreateCode]));
+    rx.Free;
+  end
+  else if (CreateCode <> '') and FParameters.IsAnySnowflake then begin
+    // GET_DDL: create or replace [secure] [materialized] view DB.SCHEMA.NAME(\n\tA,\n\tB\n) [comment='...'] as select ...
+    // Return everything after the name, see TfrmView.ComposeCreateStatement
+    rx := TRegExpr.Create;
+    rx.ModifierI := True;
+    rx.Expression := '\bVIEW\s+(IF\s+NOT\s+EXISTS\s+)?("[^"]+"|[\w$]+)(\s*\.\s*("[^"]+"|[\w$]+)){0,2}\s*(.+)$';
+    if rx.Exec(CreateCode) then
+      SelectCode := Trim(rx.Match[5])
+    else
+      Log(lcError, f_('Regular expression did not match the VIEW code in %s: %s', ['ParseViewStructure()', sLineBreak+sLineBreak+CreateCode]));
+    rx.Free;
+  end
+  else if CreateCode <> '' then begin
     // CREATE
     //   [OR REPLACE]
     //   [ALGORITHM = {UNDEFINED | MERGE | TEMPTABLE}]
@@ -8923,6 +10374,23 @@ begin
       // 让 TRedisQuery.Execute 能识别并提取 key 名）
       Result := QueryType + ' ' + QueryBody;
     end;
+    ngOracle: begin
+      // Row limiting clause, Oracle 12c+
+      Result := Result + QueryBody;
+      if QueryType = 'SELECT' then begin
+        if Offset > 0 then
+          Result := Result + ' OFFSET ' + IntToStr(Offset) + ' ROWS';
+        Result := Result + ' FETCH NEXT ' + IntToStr(Limit) + ' ROWS ONLY';
+      end;
+    end;
+    ngSnowflake: begin
+      Result := Result + QueryBody;
+      if QueryType = 'SELECT' then begin
+        Result := Result + ' LIMIT ' + IntToStr(Limit);
+        if Offset > 0 then
+          Result := Result + ' OFFSET ' + IntToStr(Offset);
+      end;
+    end;
   end;
 end;
 
@@ -9087,7 +10555,8 @@ end;
 
 procedure TMySQLQuery.Execute(AddResult: Boolean=False; UseRawResult: Integer=-1);
 var
-  i, j, NumFields, NumResults: Integer;
+  i, NumFields, NumResults: Integer;
+  DT: TDBDatatype;
   Field: PMYSQL_FIELD;
   IsBinary: Boolean;
   LastResult: PMYSQL_RES;
@@ -9143,23 +10612,23 @@ begin
         FColumnTypes[i] := FConnection.Datatypes[0];
         if (Field.flags and AUTO_INCREMENT_FLAG) = AUTO_INCREMENT_FLAG then
           FAutoIncrementColumn := i;
-        for j:=0 to High(FConnection.Datatypes) do begin
-          if (Field.flags and ENUM_FLAG) = ENUM_FLAG then begin
-            if FConnection.Datatypes[j].Index = dbdtEnum then
-              FColumnTypes[i] := FConnection.Datatypes[j];
-          end else if (Field.flags and SET_FLAG) = SET_FLAG then begin
-            if FConnection.Datatypes[j].Index = dbdtSet then
-              FColumnTypes[i] := FConnection.Datatypes[j];
-          end else if Field._type = Cardinal(FConnection.Datatypes[j].NativeType) then begin
-            // Text and Blob types share the same constants (see FIELD_TYPEs)
-            // See http://dev.mysql.com/doc/refman/5.7/en/c-api-data-structures.html
-            if Connection.IsUnicode then
-              IsBinary := Field.charsetnr = COLLATION_BINARY
-            else
-              IsBinary := (Field.flags and BINARY_FLAG) = BINARY_FLAG;
-            if IsBinary and (FConnection.Datatypes[j].Category = dtcText) then
-              continue;
-            FColumnTypes[i] := FConnection.Datatypes[j];
+        if (Field.flags and ENUM_FLAG) = ENUM_FLAG then
+          FColumnTypes[i] := FConnection.GetDatatypeByIndex(dbdtEnum)
+        else if (Field.flags and SET_FLAG) = SET_FLAG then
+          FColumnTypes[i] := FConnection.GetDatatypeByIndex(dbdtSet)
+        else begin
+          // Text and Blob types share the same constants (see FIELD_TYPEs)
+          // See http://dev.mysql.com/doc/refman/5.7/en/c-api-data-structures.html
+          if Connection.IsUnicode then
+            IsBinary := Field.charsetnr = COLLATION_BINARY
+          else
+            IsBinary := (Field.flags and BINARY_FLAG) = BINARY_FLAG;
+          for DT in FConnection.Datatypes do begin
+            if Field._type <> Cardinal(DT.NativeType) then
+              Continue;
+            if IsBinary and (DT.Category = dtcText) then
+              Continue;
+            FColumnTypes[i] := DT;
             Break;
           end;
         end;
@@ -10674,8 +12143,9 @@ end;
 function TDBQuery.EnsureFullRow(Refresh: Boolean): Boolean;
 var
   i: Integer;
-  sql: String;
+  sql, ColExpression: String;
   Data: TDBQuery;
+  ColAttr: TTableColumn;
 begin
   // Load full column values
   Result := True;
@@ -10685,7 +12155,14 @@ begin
     for i:=0 to FColumnOrgNames.Count-1 do begin
       if sql <> '' then
         sql := sql + ', ';
-      sql := sql + Connection.QuoteIdent(FColumnOrgNames[i]);
+      // Same as in the data grid SELECT, for column types which cannot be selected as is
+      ColExpression := '';
+      ColAttr := ColAttributes(i);
+      if Assigned(ColAttr) then
+        ColExpression := Connection.GetGridColumnExpression(ColAttr);
+      if ColExpression.IsEmpty then
+        ColExpression := Connection.QuoteIdent(FColumnOrgNames[i]);
+      sql := sql + ColExpression;
     end;
     sql := sql + ' FROM '+QuotedDbAndTableName+' WHERE '+GetWhereClause;
     sql := GridQuery('SELECT', sql);
@@ -11075,6 +12552,343 @@ begin
 end;
 
 
+{ TOdbcQuery }
+
+constructor TOdbcQuery.Create(AOwner: TComponent);
+begin
+  inherited Create(AOwner);
+  FConnection := AOwner as TOdbcConnection;
+  FResultList := TOdbcRawResults.Create(False);
+  // Numbers are passed to the grid with "." as decimal separator, as with all other server types
+  FFormatSettings.DecimalSeparator := '.';
+  FFormatSettings.ThousandSeparator := #0;
+end;
+
+
+destructor TOdbcQuery.Destroy;
+var
+  i: Integer;
+begin
+  // Results are not owned by the connection, see TOdbcConnection.Query
+  for i:=0 to FResultList.Count-1 do
+    FResultList[i].Free;
+  FResultList.Clear;
+  FreeAndNil(FResultList);
+  inherited;
+end;
+
+
+procedure TOdbcQuery.Execute(AddResult: Boolean=False; UseRawResult: Integer=-1);
+var
+  i, NumFields, NumResults: Integer;
+  TypeIndex: TDBDatatypeIndex;
+  LastResult: TSQLQuery;
+begin
+  if UseRawResult = -1 then begin
+    Connection.Query(FSQL, FStoreResult);
+    UseRawResult := 0;
+  end;
+  LastResult := nil;
+  if Connection.ResultCount > UseRawResult then begin
+    // Take over the result, so the next query on the connection does not free it
+    LastResult := FConnection.LastRawResults[UseRawResult];
+    FConnection.LastRawResults[UseRawResult] := nil;
+  end;
+  if AddResult and (FResultList.Count = 0) then
+    AddResult := False;
+  if AddResult then
+    NumResults := FResultList.Count+1
+  else begin
+    for i:=0 to FResultList.Count-1 do
+      FResultList[i].Free;
+    FResultList.Clear;
+    NumResults := 1;
+    FRecordCount := 0;
+    FAutoIncrementColumn := -1;
+    FEditingPrepared := False;
+  end;
+  if LastResult <> nil then begin
+    LogMetaInfo(NumResults);
+    FResultList.Add(LastResult);
+    FRecordCount := FRecordCount + LastResult.RecordCount;
+  end;
+
+  // Set up columns and data types
+  if not AddResult then begin
+    if HasResult then begin
+      FCurrentResults := LastResult;
+      NumFields := LastResult.FieldCount;
+      SetLength(FColumnTypes, NumFields);
+      SetLength(FColumnLengths, NumFields);
+      SetLength(FColumnFlags, NumFields);
+      FColumnNames.Clear;
+      FColumnOrgNames.Clear;
+      for i:=0 to NumFields-1 do begin
+        FColumnNames.Add(LastResult.Fields[i].FieldName);
+        FColumnOrgNames.Add(FColumnNames[i]);
+        case LastResult.Fields[i].DataType of
+          ftSmallint, ftWord, ftInteger, ftLargeint, ftAutoInc, ftBCD, ftFMTBcd, ftCurrency:
+            TypeIndex := dbdtNumeric;
+          ftBoolean:
+            TypeIndex := dbdtBool;
+          ftFloat:
+            TypeIndex := dbdtDouble;
+          ftFixedChar, ftFixedWideChar:
+            TypeIndex := dbdtChar;
+          ftString, ftWideString, ftGuid:
+            TypeIndex := dbdtVarchar;
+          ftMemo, ftWideMemo:
+            TypeIndex := dbdtText;
+          ftBytes, ftVarBytes:
+            TypeIndex := dbdtVarbinary;
+          ftBlob:
+            TypeIndex := dbdtBlob;
+          ftDate, ftDateTime:
+            TypeIndex := dbdtDatetime;
+          ftTimeStamp:
+            TypeIndex := dbdtTimestamp;
+          else
+            TypeIndex := dbdtUnknown;
+        end;
+        FColumnTypes[i] := FConnection.GetDatatypeByIndex(TypeIndex);
+      end;
+      FRecNo := -1;
+      First;
+    end else begin
+      SetLength(FColumnTypes, 0);
+      SetLength(FColumnLengths, 0);
+      SetLength(FColumnFlags, 0);
+    end;
+  end;
+end;
+
+
+procedure TOdbcQuery.SetRecNo(Value: Int64);
+var
+  i, j: Integer;
+  RowFound: Boolean;
+  Row: TGridRow;
+  NumRows, WantedLocalRecNo: Int64;
+begin
+  if Value = FRecNo then
+    Exit;
+  if (not FEditingPrepared) and (Value >= RecordCount) then begin
+    FRecNo := RecordCount;
+    FEof := True;
+    if Assigned(FCurrentResults) then
+      FCurrentResults.Last;
+  end else begin
+
+    // Find row in edited data
+    RowFound := False;
+    if FEditingPrepared then begin
+      for Row in FUpdateData do begin
+        if Row.RecNo = Value then begin
+          FCurrentUpdateRow := Row;
+          for i:=Low(FColumnLengths) to High(FColumnLengths) do
+            FColumnLengths[i] := Length(FCurrentUpdateRow[i].NewText);
+          RowFound := True;
+          break;
+        end;
+      end;
+    end;
+
+    // Row not edited data - find it in normal result
+    if not RowFound then begin
+      NumRows := 0;
+      for i:=0 to FResultList.Count-1 do begin
+        Inc(NumRows, FResultList[i].RecordCount);
+        if NumRows > Value then begin
+          FCurrentResults := FResultList[i];
+          WantedLocalRecNo := FCurrentResults.RecordCount-(NumRows-Value);
+          FCurrentResults.RecNo := WantedLocalRecNo+1;
+          FCurrentUpdateRow := nil;
+          for j:=Low(FColumnLengths) to High(FColumnLengths) do
+            FColumnLengths[j] := FCurrentResults.Fields[j].DataSize;
+          break;
+        end;
+      end;
+    end;
+
+    FRecNo := Value;
+    FEof := False;
+  end;
+end;
+
+
+function TOdbcQuery.GetColBinData(Column: Integer; var baData: TBytes): Boolean;
+var
+  Stream: TMemoryStream;
+  Field: TField;
+  RawText: AnsiString;
+begin
+  Result := False;
+  if ColumnExists(Column) and FEditingPrepared and Assigned(FCurrentUpdateRow) then begin
+    // Row was loaded fully or edited, values only valid in the update row. Col() returns raw bytes.
+    RawText := AnsiString(FCurrentUpdateRow[Column].NewText);
+    SetLength(baData, Length(RawText));
+    if Length(RawText) > 0 then
+      Move(RawText[1], baData[0], Length(RawText));
+    Result := True;
+  end
+  else if ColumnExists(Column) and (not IsNull(Column)) then begin
+    Field := FCurrentResults.Fields[Column];
+    if Field is TBlobField then begin
+      Stream := TMemoryStream.Create;
+      try
+        TBlobField(Field).SaveToStream(Stream);
+        SetLength(baData, Stream.Size);
+        if Stream.Size > 0 then
+          Move((Stream.Memory)^, baData[0], Stream.Size);
+        Result := True;
+      finally
+        Stream.Free;
+      end;
+    end
+    else if Field.DataType in [ftBytes, ftVarBytes] then begin
+      baData := Field.AsBytes;
+      Result := True;
+    end
+    else
+      Raise EDbError.Create(SNotImplemented);
+  end;
+end;
+
+
+function TOdbcQuery.Col(Column: Integer; IgnoreErrors: Boolean=False): String;
+var
+  Field: TField;
+  DateFormat: String;
+  Value: TDateTime;
+  Scale, DotPos: Integer;
+  BinData: TBytes;
+begin
+  if ColumnExists(Column) then begin
+    if FEditingPrepared and Assigned(FCurrentUpdateRow) then begin
+      Result := FCurrentUpdateRow[Column].NewText;
+    end else begin
+      Field := FCurrentResults.Fields[Column];
+      try
+        case Field.DataType of
+          ftFMTBcd, ftBCD: begin
+            // Exact decimal. AsFloat would lose digits.
+            if Field.IsNull then
+              Result := ''
+            else begin
+              Result := BCDToStr(Field.AsBCD, FFormatSettings);
+              // BCDToStr drops trailing zeros: keep the column's scale
+              Scale := FCurrentResults.FieldDefs[Column].Size;
+              if (Field.DataType = ftFMTBcd) and (Scale > 0) then begin
+                DotPos := Pos('.', Result);
+                if DotPos = 0 then begin
+                  Result := Result + '.';
+                  DotPos := Length(Result);
+                end;
+                Result := Result + StringOfChar('0', Scale - (Length(Result) - DotPos));
+              end;
+            end;
+          end;
+          ftFloat, ftCurrency:
+            Result := FloatToStr(Field.AsFloat, FFormatSettings);
+          ftBlob, ftBytes, ftVarBytes: begin
+            // Raw bytes, without any codepage conversion, see GetColBinData and EscapeBin
+            Result := '';
+            BinData := nil;
+            if (not Field.IsNull) and GetColBinData(Column, BinData) and (Length(BinData) > 0) then
+              SetString(Result, PAnsiChar(@BinData[0]), Length(BinData));
+          end;
+          ftDate, ftTime, ftDateTime, ftTimeStamp: begin
+            if Field.IsNull then
+              Result := ''
+            else begin
+              Value := Field.AsDateTime;
+              case Field.DataType of
+                ftDate: DateFormat := 'yyyy-mm-dd';
+                ftTime: DateFormat := 'hh:nn:ss';
+                else begin
+                  DateFormat := Datatype(Column).Format;
+                  if DateFormat.IsEmpty then
+                    DateFormat := 'yyyy-mm-dd hh:nn:ss';
+                  // Query results cannot tell DATE from TIMESTAMP
+                  if (Pos('zzz', DateFormat) = 0) and (MilliSecondOf(Value) <> 0) then
+                    DateFormat := DateFormat + '.zzz';
+                end;
+              end;
+              Result := FormatDateTime(DateFormat, Value, FFormatSettings);
+            end;
+          end;
+          else
+            Result := Field.AsString;
+        end;
+      except
+        on E:Exception do begin
+          if IgnoreErrors then
+            Result := ''
+          else
+            Result := String(Field.AsAnsiString);
+        end;
+      end;
+    end;
+  end
+  else
+    Result := TextInvalidColumn;
+end;
+
+
+function TOdbcQuery.ColIsPrimaryKeyPart(Column: Integer): Boolean;
+begin
+  Result := False;
+end;
+
+
+function TOdbcQuery.ColIsUniqueKeyPart(Column: Integer): Boolean;
+begin
+  Result := False;
+end;
+
+
+function TOdbcQuery.ColIsKeyPart(Column: Integer): Boolean;
+begin
+  Result := False;
+end;
+
+
+function TOdbcQuery.IsNull(Column: Integer): Boolean;
+begin
+  if FEditingPrepared and Assigned(FCurrentUpdateRow) then
+    Result := FCurrentUpdateRow[Column].NewIsNull
+  else
+    Result := FCurrentResults.Fields[Column].IsNull;
+end;
+
+
+function TOdbcQuery.HasResult: Boolean;
+begin
+  Result := FResultList.Count > 0;
+end;
+
+
+function TOdbcQuery.IsResultAlive: Boolean;
+begin
+  // Results are kept open on commit, see sqoKeepOpenOnCommit in TOdbcConnection.Query.
+  // A reconnect closes them, though.
+  Result := (FResultList.Count > 0) and FResultList[0].Active;
+end;
+
+
+function TOdbcQuery.DatabaseName: String;
+begin
+  Result := Connection.Database;
+end;
+
+
+function TOdbcQuery.TableName(Column: Integer): String;
+begin
+  // Not provided by the driver. TDBQuery.TableName parses the SQL then.
+  Result := '';
+end;
+
+
 function TDBQuery.QuotedDbAndTableName: String;
 begin
   // Prefer TDBObject when quoting as it knows its schema
@@ -11112,6 +12926,8 @@ var
   i: Integer;
   KeyCols: TTableColumnList;
 begin
+  if FConnection.Parameters.IsAnyOdbc then
+    raise EDbError.Create(f_('Grid editing is not yet supported on %s.', [FConnection.Parameters.NetTypeName(False)]));
   KeyCols := GetKeyColumns;
   if KeyCols.Count = 0 then
     raise EDbError.Create(_(MSG_NOGRIDEDITING));
@@ -11698,7 +13514,6 @@ constructor TTableColumn.Create(AOwner: TDBConnection; Serialized: String='');
 var
   Attributes: TStringList;
   DataTypeIdx, OldDataTypeIdx: TDBDatatypeIndex;
-  i: Integer;
   NumVal: String;
 
   function FromSerialized(Name, Default: String): String;
@@ -11724,12 +13539,8 @@ begin
   DataTypeIdx := TDBDatatypeIndex(NumVal.ToInteger);
   NumVal := FromSerialized('OldDataType', Integer(dbdtUnknown).ToString);
   OldDataTypeIdx := TDBDatatypeIndex(NumVal.ToInteger);
-  for i:=Low(Connection.Datatypes) to High(Connection.Datatypes) do begin
-    if Connection.Datatypes[i].Index = DataTypeIdx then
-      DataType := Connection.Datatypes[i];
-    if Connection.Datatypes[i].Index = OldDataTypeIdx then
-      OldDataType := Connection.Datatypes[i];
-  end;
+  DataType := Connection.GetDatatypeByIndex(DataTypeIdx);
+  OldDataType := Connection.GetDatatypeByIndex(OldDataTypeIdx);
   LengthSet := FromSerialized('LengthSet', '');
   Unsigned := FromSerialized('Unsigned', '0').ToInteger.ToBoolean;
   AllowNull := FromSerialized('AllowNull', '1').ToInteger.ToBoolean;
@@ -11842,9 +13653,8 @@ end;
 
 function TTableColumn.SQLCode(OverrideCollation: String=''; Parts: TColumnParts=[cpAll]): String;
 var
-  IsVirtual: Boolean;
-  QuoteCollation: Boolean;
-  NullClause, DefaultClause: String;
+  IsVirtual, IsMSSQL: Boolean;
+  NullClause, DefaultClause, CollationClause: String;
 
   function InParts(Part: TColumnPart): Boolean;
   begin
@@ -11853,6 +13663,7 @@ var
 begin
   Result := '';
   IsVirtual := (GenerationExpression <> '') and (Virtuality <> '');
+  IsMSSQL := FConnection.Parameters.IsAnyMSSQL;
 
   if InParts(cpName) then begin
     Result := Result + FConnection.QuoteIdent(Name) + ' ';
@@ -11863,10 +13674,19 @@ begin
     if FConnection.Parameters.IsAnyPostgreSQL and (DefaultType = cdtAutoInc) then begin
       Result := Result + 'SERIAL';
     end
+    else if FConnection.Parameters.IsAnySQLite and (DefaultType = cdtAutoInc) then begin
+      // AUTOINCREMENT is only allowed on an INTEGER PRIMARY KEY, not on INT or BIGINT
+      Result := Result + 'INTEGER';
+    end
     else begin
 
       if (DataType.Index = dbdtEnum) and (FConnection.NamedEnums.IndexOfName(LengthSet) > -1) then begin
         Result := Result + LengthSet;
+      end
+      else if FConnection.Parameters.IsAnyOracle and (LengthSet <> '') and DataType.HasLength
+        and ContainsText(DataType.Name, ' WITH ') then begin
+        // Oracle: TIMESTAMP(6) WITH TIME ZONE
+        Result := Result + StringReplace(DataType.Name, ' WITH ', '(' + LengthSet + ') WITH ', [rfIgnoreCase]);
       end
       else begin
         Result := Result + DataType.Name;
@@ -11889,10 +13709,10 @@ begin
   // most other servers accept both orders. Collect the clauses first and
   // append them in the order the server expects.
   NullClause := '';
-  if InParts(cpAllowNull) and (not IsVirtual) and (not FConnection.Parameters.IsAnyMSSQL) then begin
+  if InParts(cpAllowNull) and (not IsVirtual) then begin
     if not AllowNull then
       NullClause := 'NOT NULL '
-    else if not FConnection.Parameters.IsAnyInterbase then
+    else if not (FConnection.Parameters.NetTypeGroup in [ngInterbase, ngSnowflake]) then
       NullClause := 'NULL ';
   end;
 
@@ -11906,14 +13726,13 @@ begin
         cdtAutoInc: begin
           case FConnection.Parameters.NetTypeGroup of
             ngPgSQL:;
+            // Requires a column constraint, see TTableKey.InlinedInColumn
+            ngSQLite: DefaultClause := 'PRIMARY KEY ' + FConnection.SqlProvider.GetSql(qAutoInc);
             else DefaultClause := FConnection.SqlProvider.GetSql(qAutoInc);
           end;
         end;
         cdtExpression: begin
-          if FConnection.Has(frColumnDefaultParentheses) then
-            DefaultClause := 'DEFAULT ('+DefaultText+')'
-          else
-            DefaultClause := 'DEFAULT '+DefaultText;
+          DefaultClause := FConnection.SqlProvider.GetSql(qDefaultExpression, [DefaultText]);
         end;
       end;
       case OnUpdateType of
@@ -11929,15 +13748,34 @@ begin
     end;
   end;
 
-  if FConnection.Parameters.IsAnyInterbase then begin
+  CollationClause := '';
+  if InParts(cpCollation) and (not IsVirtual) and (DataType.Index <> dbdtJson) and (Collation <> '') then begin
+    if OverrideCollation <> '' then
+      CollationClause := OverrideCollation
+    else
+      CollationClause := Collation;
+    // MSSQL expects an unquoted collation name
+    if not IsMSSQL then
+      CollationClause := FConnection.EscapeString(CollationClause);
+    CollationClause := 'COLLATE ' + CollationClause + ' ';
+  end;
+
+  if IsMSSQL then begin
+    // MSSQL requires COLLATE directly after the data type
+    Result := Result + CollationClause + NullClause + DefaultClause;
+    CollationClause := '';
+  end
+  else if FConnection.Parameters.NetTypeGroup in [ngInterbase, ngOracle, ngSnowflake] then begin
+    // Oracle also requires DEFAULT and GENERATED ... AS IDENTITY before NOT NULL. Snowflake documents
+    // DEFAULT and AUTOINCREMENT before NOT NULL.
     Result := Result + DefaultClause + NullClause;
   end
   else begin
     Result := Result + NullClause;
 
     // SRID for spatial columns supported since MySQL 8.0
-    if InParts(cpSRID) and (DataType.Category = dtcSpatial) and FConnection.Has(frSrid) then begin
-      Result := Result + 'SRID ' + SRID.ToString + ' ';
+    if InParts(cpSRID) and (DataType.Category = dtcSpatial) and FConnection.SqlProvider.Has(qColumnSrid) then begin
+      Result := Result + FConnection.SqlProvider.GetSql(qColumnSrid, [SRID]) + ' ';
     end;
 
     Result := Result + DefaultClause;
@@ -11947,25 +13785,16 @@ begin
     Result := Result + 'AS ('+GenerationExpression+') ' + Virtuality + ' ';
   end;
 
-  if InParts(cpInvisible) and Invisible and FConnection.Has(frInvisibleColumns) then begin
-    Result := Result + 'INVISIBLE ';
+  if InParts(cpInvisible) and Invisible and FConnection.SqlProvider.Has(qColumnInvisible) then begin
+    Result := Result + FConnection.SqlProvider.GetSql(qColumnInvisible) + ' ';
   end;
 
   if InParts(cpComment) then begin
-    if (Comment <> '') and FConnection.Parameters.IsAnyMySQL then
+    if (Comment <> '') and (FConnection.Parameters.NetTypeGroup in [ngMySQL, ngSnowflake]) then
       Result := Result + 'COMMENT ' + FConnection.EscapeString(Comment) + ' ';
   end;
 
-  if InParts(cpCollation) and (not IsVirtual) and (DataType.Index <> dbdtJson) then begin
-    if Collation <> '' then begin
-      Result := Result + 'COLLATE ';
-      QuoteCollation := not FConnection.Parameters.IsAnyMSSQL;
-      if OverrideCollation <> '' then
-        Result := Result + IfThen(QuoteCollation, FConnection.EscapeString(OverrideCollation), OverrideCollation) + ' '
-      else
-        Result := Result + IfThen(QuoteCollation, FConnection.EscapeString(Collation), Collation) + ' ';
-    end;
-  end;
+  Result := Result + CollationClause;
 
   Result := Trim(Result);
 end;
@@ -12122,6 +13951,7 @@ begin
   Subparts.OnChange := Modification;
   Collations.OnChange := Modification;
   Visible := True;
+  IsConstraint := False;
   Size := -1
 end;
 
@@ -12146,6 +13976,7 @@ begin
     Algorithm := s.Algorithm;
     Comment := s.Comment;
     Definition := s.Definition;
+    IsConstraint := s.IsConstraint;
     Visible := s.Visible;
     Size := s.Size;
     Columns.Assign(s.Columns);
@@ -12160,6 +13991,19 @@ end;
 function TTableKey.IsPrimary: Boolean;
 begin
   Result := IndexType = PRIMARY;
+end;
+
+function TTableKey.InlinedInColumn(TableColumns: TTableColumnList): Boolean;
+var
+  Col: TTableColumn;
+begin
+  // SQLite: an AUTOINCREMENT column carries its own PRIMARY KEY constraint, so the
+  // table must not get a second one. See TTableColumn.SQLCode
+  Result := False;
+  if FConnection.Parameters.IsAnySQLite and IsPrimary and (Columns.Count = 1) and Assigned(TableColumns) then begin
+    Col := TableColumns.FindByName(Columns[0]);
+    Result := Assigned(Col) and (Col.DefaultType = cdtAutoInc);
+  end;
 end;
 
 function TTableKey.IsIndex: Boolean;
@@ -12217,6 +14061,10 @@ begin
     ngMySQL: Result := True;
     ngSQLite: Result := IsPrimary;
     ngPgSQL: Result := IsPrimary or IsUnique;
+    // Constraints. Normal indexes need CREATE INDEX.
+    ngOracle: Result := IsPrimary or IsUnique;
+    // No indexes on standard tables, only (not enforced) constraints
+    ngSnowflake: Result := True;
     else Result := True;
   end;
 end;
@@ -12235,6 +14083,9 @@ begin
     else begin
       if FConnection.Parameters.IsAnyPostgreSQL then begin
         Result := Result + IndexType + ' ';
+      end
+      else if FConnection.Parameters.IsAnyOdbc then begin
+        Result := Result + 'CONSTRAINT ' + FConnection.QuoteIdent(Name) + ' ' + IndexType + ' ';
       end
       else begin
         if not IsIndex then
@@ -12260,10 +14111,11 @@ begin
 
     Result := Result + ')';
 
-    if Algorithm <> '' then
+    // MySQL only. Oracle has neither USING nor COMMENT for indexes.
+    if (Algorithm <> '') and (not FConnection.Parameters.IsAnyOdbc) then
       Result := Result + ' USING ' + Algorithm;
 
-    if not Comment.IsEmpty then
+    if (not Comment.IsEmpty) and (not FConnection.Parameters.IsAnyOdbc) then
       Result := Result + ' COMMENT ' + FConnection.EscapeString(Comment);
 
   end
@@ -12281,7 +14133,12 @@ begin
       Result := Result + IndexType + ' ';
     Result := Result + 'INDEX '+FConnection.QuoteIdent(Name)+' ON ' + FConnection.QuoteIdent(TableName) + ' (';
     for i:=0 to Columns.Count-1 do begin
-      Result := Result + FConnection.QuoteIdent(Columns[i]);
+      if FConnection.Parameters.IsAnyOracle and IsExpression(i) then
+        Result := Result + Columns[i] // Don't quote functional key part
+      else
+        Result := Result + FConnection.QuoteIdent(Columns[i]);
+      if FConnection.Parameters.IsAnyOracle and (Collations.Count > i) and (Collations[i].ToLower = 'd') then
+        Result := Result + ' DESC';
       Result := Result + ', ';
     end;
     if Columns.Count > 0 then
@@ -12399,6 +14256,12 @@ begin
     Result := Result + FConnection.QuoteIdent(ForeignColumns[i]) + ', ';
   if ForeignColumns.Count > 0 then Delete(Result, Length(Result)-1, 2);
   Result := Result + ')';
+  if FConnection.Parameters.IsAnyOracle then begin
+    // No ON UPDATE clause, and ON DELETE only knows CASCADE and SET NULL
+    if MatchText(OnDelete, ['CASCADE', 'SET NULL']) then
+      Result := Result + ' ON DELETE ' + OnDelete;
+    Exit;
+  end;
   if OnUpdate <> '' then
     Result := Result + ' ON UPDATE ' + OnUpdate;
   if OnDelete <> '' then

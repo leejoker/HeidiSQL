@@ -46,8 +46,8 @@ type
 const InvalidOid: POid = 0;
 
 var
-  PostgreSQLDatatypes: Array[0..39] of TDBDatatype =
-  (
+  PostgreSQLDatatypes: TDBDataTypeArray =
+  [
     (
       Index:           dbdtUnknown;
       NativeTypes:     '99999';
@@ -350,19 +350,6 @@ var
       Category:        dtcTemporal;
     ),
     (
-      Index:           dbdtDate;
-      NativeTypes:     '1082';
-      Name:            'DATE';
-      Description:     'Calendar date (year, month, day).';
-      HasLength:       False;
-      RequiresLength:  False;
-      HasBinary:       False;
-      HasDefault:      False;
-      LoadPart:        False;
-      Format:          'yyyy-mm-dd';
-      Category:        dtcTemporal;
-    ),
-    (
       Index:           dbdtInterval;
       NativeTypes:     '1186';
       Name:            'INTERVAL';
@@ -564,7 +551,7 @@ var
       ValueMustMatch:  '^\{?[a-f0-9]{8}-?[a-f0-9]{4}-?[a-f0-9]{4}-?[a-f0-9]{4}-?[a-f0-9]{12}\}?$';
       Category:        dtcText;
     )
-  );
+  ];
 
 implementation
 

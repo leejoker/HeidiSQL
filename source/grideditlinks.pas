@@ -453,18 +453,42 @@ begin
 end;
 
 procedure TBaseGridEditorLink.ReleaseEditorControl(AControl: TWinControl);
-var
-  NullMethod: TMethod;
+
+  procedure DetachHandlers(Control: TControl);
+  var
+    PropList: PPropList;
+    PropCount, i: Integer;
+    Method: TMethod;
+  begin
+    PropCount := GetPropList(Control, PropList);
+    try
+      for i:=0 to PropCount-1 do begin
+        if PropList^[i]^.PropType^.Kind <> tkMethod then
+          Continue;
+        Method := GetMethodProp(Control, PropList^[i]);
+        if Method.Data = Pointer(Self) then
+          SetMethodProp(Control, PropList^[i], Default(TMethod));
+      end;
+    finally
+      FreeMem(PropList);
+    end;
+    if Control is TWinControl then begin
+      for i:=0 to TWinControl(Control).ControlCount-1 do
+        DetachHandlers(TWinControl(Control).Controls[i]);
+    end;
+  end;
+
 begin
   if (csDestroying in AControl.ComponentState) or (csCreating in AControl.ControlState) then
     Exit;
-  // Prevent the deferred control from calling back into this destroyed editor
-  // link. Most importantly, the OnExit event fires on the focus change when
-  // another editor link takes over the focus. Without this, the stale handler
-  // would queue an EndEditNode which ends the *new* edit immediately after it
-  // was started, and also run on freed memory.
-  NullMethod := Default(TMethod);
-  SetMethodProp(AControl, 'OnExit', NullMethod);
+  // Prevent the deferred control and its children from calling back into this
+  // destroyed editor link. Most importantly, the OnExit event fires on the
+  // focus change when another editor link takes over the focus. Without this,
+  // the stale handler would queue an EndEditNode which ends the *new* edit
+  // immediately after it was started, and also run on freed memory. Same for
+  // OnSelect, OnKeyDown, OnClick etc., which may still arrive on Qt and GTK
+  // while the control waits for being freed. See issue #2663.
+  DetachHandlers(AControl);
   if FParentForm is TExtForm then
     TExtForm(FParentForm).DeferFreeControl(AControl)
   else
@@ -1571,7 +1595,9 @@ begin
   FOnUpdateEdit.Text := OnUpdateText;
 
   // Disable non working default options per data type
-  FRadioAutoInc.Enabled := FRadioAutoInc.Checked or (FTableColumn.DataType.Category = dtcInteger);
+  // InterBase and Firebird before v3 have no auto increment columns
+  FRadioAutoInc.Enabled := FRadioAutoInc.Checked
+    or ((FTableColumn.DataType.Category = dtcInteger) and FTableColumn.Connection.SqlProvider.Has(qAutoInc));
 
   // Provide items with a check mark for ENUM and SET columns
   if FTableColumn.DataType.Index in [dbdtEnum, dbdtSet] then begin
@@ -1899,12 +1925,12 @@ end;
 procedure TDataTypeEditorLink.DoTreeSelectInitChildren(Sender: TBaseVirtualTree;
   Node: PVirtualNode; var ChildCount: Cardinal);
 var
-  i: Integer;
+  DT: TDBDatatype;
 begin
   // Tell number of datatypes per category
   ChildCount := 0;
-  if Sender.GetNodeLevel(Node) = 0 then for i:=0 to High(FTableColumn.Connection.Datatypes) do begin
-    if FTableColumn.Connection.Datatypes[i].Category = TDBDatatypeCategoryIndex(Node.Index) then
+  if Sender.GetNodeLevel(Node) = 0 then for DT in FTableColumn.Connection.Datatypes do begin
+    if DT.Category = TDBDatatypeCategoryIndex(Node.Index) then
       Inc(ChildCount);
   end;
 end;
@@ -1913,7 +1939,7 @@ end;
 procedure TDataTypeEditorLink.DoTreeSelectGetText(Sender: TBaseVirtualTree; Node: PVirtualNode;
   Column: TColumnIndex; TextType: TVSTTextType; var CellText: String);
 var
-  i: Integer;
+  DT: TDBDatatype;
   Counter: Cardinal;
 begin
   // Get cell text
@@ -1921,11 +1947,11 @@ begin
     0: CellText := DatatypeCategories[TDBDatatypeCategoryIndex(Node.Index)].Name;
     1: begin
          Counter := 0;
-         for i:=0 to High(FTableColumn.Connection.Datatypes) do begin
-           if FTableColumn.Connection.Datatypes[i].Category = TDBDatatypeCategoryIndex(Node.Parent.Index) then begin
+         for DT in FTableColumn.Connection.Datatypes do begin
+           if DT.Category = TDBDatatypeCategoryIndex(Node.Parent.Index) then begin
              Inc(Counter);
              if Counter = Node.Index+1 then begin
-               CellText := FTableColumn.Connection.Datatypes[i].Name;
+               CellText := DT.Name;
                break;
              end;
            end;

@@ -163,8 +163,8 @@ type
 
 var
 
-  SQLiteDatatypes: Array[0..15] of TDBDatatype =
-  (
+  SQLiteDatatypes: TDBDataTypeArray =
+  [
     (
       Index:           dbdtUnknown;
       Name:            'UNKNOWN';
@@ -338,7 +338,7 @@ var
       DefLengthSet:    '''Value A'',''Value B''';
       Category:        dtcOther;
     )
-  );
+  ];
 
 
 implementation
@@ -412,6 +412,8 @@ begin
     qAddColumn: Result := 'ADD COLUMN %s';
     qChangeColumn: Result := ''; // SQLite only supports renaming
     qRenameColumn: Result := 'RENAME COLUMN %s TO %s';
+    // Only valid as column constraint on an INTEGER PRIMARY KEY, see TTableColumn.SQLCode
+    qAutoInc: Result := 'AUTOINCREMENT';
     qSessionVariables: Result := 'SELECT null, null'; // Todo: combine "PRAGMA pragma_list" + "PRAGMA a; PRAGMY b; ..."?
     qGlobalVariables: Result := 'SHOW GLOBAL VARIABLES';
     qISSchemaCol: Result := '%s_SCHEMA';

@@ -1943,6 +1943,7 @@ var
   CopyAsMenu, CommandMenu, ColorSchemeItem: TMenuItem;
   dti: TDBDatatypeCategoryIndex;
   EditorCommand: TSynEditorCommand;
+  CmdValue: Longint;
   CmdCap: String;
 begin
   {***
@@ -2015,8 +2016,12 @@ begin
   FEditorCommandStrings := TStringList.Create;
   SynEditKeyCmds.GetEditorCommandValues(AddEditorCommandMenu);
   for i:=0 to FEditorCommandStrings.Count-1 do begin
-    EditorCommand := SynMemoQuery.ConvertCodeStringToCommand(FEditorCommandStrings[i]);
+    CmdValue := ecNone;
+    if not IdentToEditorCommand(FEditorCommandStrings[i], CmdValue) then
+      CmdValue := ecNone;
+    EditorCommand := CmdValue;
     CommandMenu := TMenuItem.Create(MainMenu1);
+    CommandMenu.Tag := EditorCommand;
     CmdCap := FEditorCommandStrings[i];
     CmdCap := Copy(CmdCap, 3, Length(CmdCap)-2);
     // Insert spaces before uppercase chars
@@ -3004,7 +3009,7 @@ var
 begin
   Editor := ActiveSynMemo(False);
   if Assigned(Editor) then begin
-    EditorCommand := Editor.IndexToEditorCommand(TMenuItem(Sender).MenuIndex);
+    EditorCommand := TSynEditorCommand(TMenuItem(Sender).Tag);
     Editor.ExecuteCommand(EditorCommand, #0, nil);
   end;
 end;
@@ -4076,6 +4081,11 @@ begin
     // focused node; object drop honours the (possibly multi) selection.
     DBObject := ActiveDBObj;
     if DBObject.NodeType = lntDb then begin
+      // Oracle: a schema is a user, dropping it is left to the DBA
+      if not Conn.SqlProvider.Has(qDatabaseDrop) then begin
+        ErrorDialog(f_('Dropping a database is not supported on %s.', [Conn.Parameters.NetTypeName(False)]));
+        Exit;
+      end;
       if MessageDialog(f_('Drop Database "%s"?', [DBObject.Database]), f_('WARNING: You will lose all objects in database %s!', [DBObject.Database]), mtCriticalConfirmation, [mbok,mbcancel]) <> mrok then
         Abort;
       try
@@ -5257,6 +5267,7 @@ var
   keyword: String;
   Tree: TLazVirtualStringTree;
   SynMemo: TSynEdit;
+  FocusedCol: TTableColumn;
 begin
   // Call SQL Help from various places
   keyword := '';
@@ -5273,7 +5284,9 @@ begin
   // Data-Tab
   else if (PageControlMain.ActivePage = tabData)
     and Assigned(DataGrid.FocusedNode) then begin
-    keyword := SelectedTableFocusedColumn.DataType.Name;
+    FocusedCol := SelectedTableFocusedColumn;
+    if Assigned(FocusedCol) then
+      keyword := FocusedCol.DataType.Name;
 
   end else if ActiveControl = QueryTabs.ActiveHelpersTree then begin
     // Makes only sense if one of the nodes "SQL fn" or "SQL kw" was selected
@@ -5876,7 +5889,9 @@ begin
     if (Sender = actDataDuplicateRowWithoutKeys) or (Sender = actDataDuplicateRowWithKeys) then
       DupeNode := Grid.FocusedNode;
     RowNum := Results.InsertRow;
-    NewNode := Grid.InsertNode(Grid.FocusedNode, amInsertAfter, {%H-}PInt64(RowNum));
+    NewNode := Grid.InsertNode(Grid.FocusedNode, amInsertAfter);
+    // GetNodeData flags the node as having data, so AnyGridInitNode keeps the row number
+    PInt64(Grid.GetNodeData(NewNode))^ := RowNum;
     SelectNode(Grid, NewNode);
     if Assigned(DupeNode) then begin
       // Copy values from source row, ensure we have whole cell data
@@ -6491,6 +6506,9 @@ begin
             Select := Select + ' CAST(' + DBObj.Connection.QuoteIdent(c.Name) + ' AS INT), ';
           end else if DBObj.Connection.Parameters.IsAnyMSSQL and (c.DataType.Index=dbdtHierarchyid) then begin
             Select := Select + ' CAST(' + DBObj.Connection.QuoteIdent(c.Name) + ' AS NVARCHAR('+IntToStr(GRIDMAXDATA)+')), ';
+          end else if not DBObj.Connection.GetGridColumnExpression(c).IsEmpty then begin
+            // Column types which the driver cannot fetch, or not exactly
+            Select := Select + ' ' + DBObj.Connection.GetGridColumnExpression(c) + ', ';
           end else begin
             Select := Select + ' ' + DBObj.Connection.QuoteIdent(c.Name) + ', ';
             Inc(FullColumnCount);
@@ -6544,7 +6562,7 @@ begin
     if RefreshingData and (vt.Tag <> VTREE_NOTLOADED_PURGECACHE) then begin
       case DBObj.Connection.Parameters.NetTypeGroup of
         ngMSSQL: Offset := 0; // Does not support offset in all server versions
-        ngMySQL, ngPgSQL, ngSQLite: Offset := DataGridResult.RecordCount;
+        ngMySQL, ngPgSQL, ngSQLite, ngOracle, ngSnowflake: Offset := DataGridResult.RecordCount;
         ngRedis: Offset := 0; // Redis 不支持 SQL OFFSET
         else raise Exception.CreateFmt(_(MsgUnhandledNetType), [Integer(DBObj.Connection.Parameters.NetType)]);
       end;
@@ -7812,10 +7830,11 @@ var
   TokenType, TokenStart: Integer;
   RowColPos: TPoint;
   SQLFunc: TSQLFunction;
+  DT: TDBDatatype;
   Conn: TDBConnection;
   AllObjects: TDBObjectList;
   Obj: TDBObject;
-  i, ColumnNameChars: Integer;
+  ColumnNameChars: Integer;
   Column: TTableColumn;
   LineText, Signatures, FuncDescription: String;
   NextCharPos: Integer;
@@ -7913,9 +7932,9 @@ begin
     end;}
 
     SynHighlighterSQL.tkDatatype: begin
-      for i:=Low(Conn.Datatypes) to High(Conn.Datatypes) do begin
-        if Conn.Datatypes[i].Name.ToLower = Token.ToLower then begin
-          HintInfo.HintStr := WrapText(Conn.Datatypes[i].Description, 100);
+      for DT in Conn.Datatypes do begin
+        if DT.Name.ToLower = Token.ToLower then begin
+          HintInfo.HintStr := WrapText(DT.Description, 100);
           Break;
         end;
       end;
@@ -8351,7 +8370,7 @@ begin
   menuFetchDBitems.Enabled := (PageControlHost.ActivePage = tabDatabases) and (ListDatabases.SelectedCount > 0);
   Kill1.Enabled := (PageControlHost.ActivePage = tabProcessList) and (ListProcessList.SelectedCount > 0);
   menuEditVariable.Enabled := False;
-  if ActiveConnection.Has(frEditVariables) then
+  if ActiveConnection.SqlProvider.Has(qSetSessionVariable) or ActiveConnection.SqlProvider.Has(qSetGlobalVariable) then
     menuEditVariable.Enabled := (PageControlHost.ActivePage = tabVariables) and Assigned(ListVariables.FocusedNode)
   else
     menuEditVariable.Hint := _(SUnsupported);
@@ -8445,11 +8464,11 @@ begin
   end;
   Conn := ActiveConnection;
   if (Conn <> nil) and (Conn.Parameters.IsAnyMySQL) then begin
-    actCreateView.Enabled := actCreateView.Enabled and Conn.Has(frCreateView);
-    actCreateProcedure.Enabled := actCreateProcedure.Enabled and Conn.Has(frCreateProcedure);
-    actCreateFunction.Enabled := actCreateFunction.Enabled and Conn.Has(frCreateFunction);
-    actCreateTrigger.Enabled := actCreateTrigger.Enabled and Conn.Has(frCreateTrigger);
-    actCreateEvent.Enabled := actCreateEvent.Enabled and Conn.Has(frCreateEvent);
+    actCreateView.Enabled := actCreateView.Enabled and Conn.SqlProvider.Has(qCreateView);
+    actCreateProcedure.Enabled := actCreateProcedure.Enabled and Conn.SqlProvider.Has(qShowProcedureStatus);
+    actCreateFunction.Enabled := actCreateFunction.Enabled and Conn.SqlProvider.Has(qShowFunctionStatus);
+    actCreateTrigger.Enabled := actCreateTrigger.Enabled and Conn.SqlProvider.Has(qShowTriggers);
+    actCreateEvent.Enabled := actCreateEvent.Enabled and Conn.SqlProvider.Has(qShowEvents);
   end;
 end;
 
@@ -10332,7 +10351,8 @@ var
   Dialog: TfrmEditVariable;
   VarName, VarValue: String;
 begin
-  if (not ActiveConnection.Has(frEditVariables)) or (not Assigned(ListVariables.FocusedNode)) then
+  if (not (ActiveConnection.SqlProvider.Has(qSetSessionVariable) or ActiveConnection.SqlProvider.Has(qSetGlobalVariable)))
+    or (not Assigned(ListVariables.FocusedNode)) then
     Exit;
   Dialog := TfrmEditVariable.Create(Self);
   try
@@ -10874,6 +10894,10 @@ begin
           SynSQLSynUsed.SQLDialect := sqlStandard;
         ngInterbase:
           SynSQLSynUsed.SQLDialect := sqlInterbase6;
+        ngOracle:
+          SynSQLSynUsed.SQLDialect := sqlOracle;
+        ngSnowflake:
+          SynSQLSynUsed.SQLDialect := sqlStandard;
         ngRedis:
           SynSQLSynUsed.SQLDialect := sqlStandard;
         else
@@ -12604,7 +12628,8 @@ begin
   // Exit early for non-result-grids like ListTables
   if Grid <> ActiveGrid  then
     Exit;
-  Grid.GetHitTestInfoAt(X, Y, True, {%H-}Hit);
+  Hit := Default(THitInfo);
+  Grid.GetHitTestInfoAt(X, Y, True, Hit);
   if (Hit.HitNode = nil) or (Hit.HitColumn = NoColumn) or (Hit.HitColumn = InvalidColumn) then begin
     Results := GridResult(Grid);
     if Results.Modified then begin
@@ -12778,7 +12803,7 @@ begin
     if vt = ListDatabases then
       LeaveEnabled := True
     else if vt = ListVariables then
-      LeaveEnabled := Conn.Parameters.NetTypeGroup in [ngMySQL, ngMSSQL, ngPgSQL]
+      LeaveEnabled := Conn.Parameters.NetTypeGroup in [ngMySQL, ngMSSQL, ngPgSQL, ngSnowflake]
     else if vt = ListStatus then
       LeaveEnabled := Conn.Parameters.NetTypeGroup in [ngMySQL]
     else if vt = ListProcessList then

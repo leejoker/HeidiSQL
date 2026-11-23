@@ -34,9 +34,12 @@ type
     ntRedis_TLS,
     ntRedis_Sentinel,
     ntRedis_Cluster,
-    ntMySQL_ClickHouse
+    ntMySQL_ClickHouse,
+    ntOracle_ODBC,
+    ntSnowflake_ODBC
     );
-  TNetTypeGroup = (ngMySQL, ngMSSQL, ngPgSQL, ngSQLite, ngInterbase, ngRedis);
+  // Ordinals of TNetType are stored in session settings: append new items at the end only
+  TNetTypeGroup = (ngMySQL, ngMSSQL, ngPgSQL, ngSQLite, ngInterbase, ngRedis, ngOracle, ngSnowflake);
   TNetTypeLibs = TDictionary<Integer, TStringList>; // Key = Ord(TNetType), see issue #2640
 
   // SQL query ids and provider
@@ -44,7 +47,7 @@ type
   TQueryId = (qDatabaseTable, qDatabaseTableId, qDatabaseDrop,
     qDbObjectsTable, qDbObjectsCreateCol, qDbObjectsUpdateCol, qDbObjectsTypeCol,
     qEmptyTable, qRenameTable, qRenameView, qCurrentUserHost, qLikeCompare,
-    qAddColumn, qChangeColumn, qRenameColumn, qSetColumnComment, qForeignKeyEventAction,
+    qAddColumn, qChangeColumn, qRenameColumn, qSetColumnComment, qSetTableComment, qForeignKeyEventAction,
     qGlobalStatus, qCommandsCounters, qSessionVariables, qGlobalVariables,
     qSetSessionVariable, qSetGlobalVariable, qApplyGlobalVariables,
     qProcessList, qProcessListProgram,
@@ -98,12 +101,15 @@ type
     qMssqlLoginDrop,
     qMssqlRoleMembershipGrant,
     qMssqlRoleMembershipRevoke,
-    qListDatabases // implemented by TPostgreSQLProvider only, so far
+    qListDatabases, // implemented by TPostgreSQLProvider only, so far
+    qDefaultExpression, qColumnSrid, qColumnInvisible, qColumnCompressed, qCreateView
     );
   TSqlProvider = class
     strict protected
       FNetType: TNetType;
       FServerVersion: Integer;
+      FServerIsMariaDB: Boolean;
+      FServerIsMySQL: Boolean;
     public
       constructor Create(ANetType: TNetType);
       function Has(AId: TQueryId): Boolean;
@@ -114,6 +120,9 @@ type
       // Version for named parameters
       function GetSql(AId: TQueryId; NamedParameters: TStringMap): string; overload;
       property ServerVersion: Integer read FServerVersion write FServerVersion;
+      // Server flavor as detected from the version string, see TConnectionParameters.IsMariaDB/IsMySQL(True)
+      property ServerIsMariaDB: Boolean read FServerIsMariaDB write FServerIsMariaDB;
+      property ServerIsMySQL: Boolean read FServerIsMySQL write FServerIsMySQL;
   end;
 
   // Column types
@@ -153,6 +162,7 @@ type
     Category:        TDBDatatypeCategoryIndex;
     MinVersion:      Integer;
   end;
+  TDBDataTypeArray = Array of TDBDataType;
 
   // Column type category structure
   TDBDatatypeCategory = record
@@ -236,6 +246,8 @@ constructor TSqlProvider.Create(ANetType: TNetType);
 begin
   FNetType := ANetType;
   FServerVersion := 0;
+  FServerIsMariaDB := False;
+  FServerIsMySQL := False;
 end;
 
 function TSqlProvider.Has(AId: TQueryId): Boolean;
@@ -253,6 +265,7 @@ begin
     qOrderDesc: Result := 'DESC';
     qGetRowCountExact: Result := 'SELECT COUNT(*) FROM :QuotedDbAndTableName';
     qAutoInc: Result := 'AUTO_INCREMENT';
+    qDefaultExpression: Result := 'DEFAULT %s';
     else Result := '';
   end;
 end;
