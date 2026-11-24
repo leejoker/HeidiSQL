@@ -340,6 +340,7 @@ type
       function IsAnySnowflake: Boolean;
       // Connected through an ODBC driver, see TOdbcConnection
       function IsAnyOdbc: Boolean;
+      function OdbcDriverHint: String;
       function IsMariaDB: Boolean;
       function IsMySQL(StrictDetect: Boolean): Boolean;
       function IsPercona: Boolean;
@@ -530,6 +531,7 @@ type
       constructor Create(AOwner: TComponent); override;
       destructor Destroy; override;
       procedure Query(SQL: String; DoStoreResult: Boolean=False; LogCategory: TDBLogCategory=lcSQL); overload; virtual;
+      function CancelQuery: Boolean; virtual;
       procedure Query(QueryId: TQueryId); overload;
       procedure Query(QueryId: TQueryId; const Args: array of const); overload;
       procedure Log(Category: TDBLogCategory; Msg: String);
@@ -861,10 +863,15 @@ type
       FLastError: String;
       FLastErrorCode: Integer;
       FLastRawResults: TOdbcRawResults;
+      // Statement handle of the running query, for SQLCancel from the main thread
+      FRunningStmt: TOdbcStmt;
+      FRunningStmtLock: TRTLCriticalSection;
       procedure SetActive(Value: Boolean); override;
       function GetLastErrorCode: Cardinal; override;
       function GetLastErrorMsg: String; override;
       procedure SetLastError(E: Exception);
+      procedure SetRunningStmt(Stmt: TOdbcStmt);
+      procedure FreeHandles;
     protected
       // Set driver specific connection string parameters
       procedure PrepareHandle(FinalHost: String; FinalPort: Integer); virtual; abstract;
@@ -875,6 +882,7 @@ type
       constructor Create(AOwner: TComponent); override;
       destructor Destroy; override;
       procedure Query(SQL: String; DoStoreResult: Boolean=False; LogCategory: TDBLogCategory=lcSQL); override;
+      function CancelQuery: Boolean; override;
       function Ping(Reconnect: Boolean): Boolean; override;
       function ConnectionInfo: TStringList; override;
       function GetLastResults: TDBQueryList; override;
@@ -1887,6 +1895,22 @@ begin
 end;
 
 
+function TConnectionParameters.OdbcDriverHint: String;
+begin
+  // Where to get the ODBC driver, which is installed by the user, not shipped with HeidiSQL
+  case NetTypeGroup of
+    ngOracle:
+      Result := f_('Install the Oracle Instant Client packages "Basic" and "ODBC" from %s, and register the ODBC driver as described in its installation notes.',
+        ['https://www.oracle.com/database/technologies/instant-client/downloads.html']);
+    ngSnowflake:
+      Result := f_('Install the Snowflake ODBC driver from %s.',
+        ['https://developers.snowflake.com/odbc/']);
+    else
+      Result := '';
+  end;
+end;
+
+
 function TConnectionParameters.IsMariaDB: Boolean;
 begin
   Result := IsAnyMySQL and (Pos('-mariadb', LowerCase(ServerVersion)) > 0);
@@ -2445,6 +2469,8 @@ begin
   inherited;
   FLastRawResults := TOdbcRawResults.Create(False);
   FLastErrorCode := 0;
+  FRunningStmt := OdbcNullStmt;
+  InitCriticalSection(FRunningStmtLock);
 end;
 
 
@@ -2545,9 +2571,75 @@ destructor TOdbcConnection.Destroy;
 begin
   if Active then Active := False;
   FreeAndNil(FLastRawResults);
-  FreeAndNil(FTransaction);
-  FreeAndNil(FHandle);
+  FreeHandles;
+  DoneCriticalSection(FRunningStmtLock);
   inherited;
+end;
+
+
+type
+  // Grants access to the protected CloseTrans of TDBTransaction
+  TSQLTransactionAccess = class(TSQLTransaction);
+
+procedure TOdbcConnection.FreeHandles;
+var
+  Obj: TObject;
+begin
+  // After a network failure, the transaction is still active, and its destructor fails on
+  // the rollback with "ORA-03114: not connected". Nothing left to roll back on the server.
+  if Assigned(FTransaction) and FTransaction.Active then try
+    FTransaction.Rollback;
+  except
+    on E:Exception do begin
+      Log(lcDebug, 'Rollback on dead connection: '+E.Message);
+      // Mark as inactive, so the destructor does not try again
+      TSQLTransactionAccess(FTransaction).CloseTrans;
+    end;
+  end;
+  Obj := FTransaction;
+  FTransaction := nil;
+  try
+    Obj.Free;
+  except
+    on E:Exception do
+      Log(lcDebug, 'Freeing transaction: '+E.Message);
+  end;
+  Obj := FHandle;
+  FHandle := nil;
+  try
+    Obj.Free;
+  except
+    on E:Exception do
+      Log(lcDebug, 'Freeing ODBC handle: '+E.Message);
+  end;
+end;
+
+
+procedure TOdbcConnection.SetRunningStmt(Stmt: TOdbcStmt);
+begin
+  // Must be reset before the statement handle gets freed
+  EnterCriticalSection(FRunningStmtLock);
+  try
+    FRunningStmt := Stmt;
+  finally
+    LeaveCriticalSection(FRunningStmtLock);
+  end;
+end;
+
+
+function TOdbcConnection.CancelQuery: Boolean;
+begin
+  // Called from the main thread while Query() runs in a query tab's thread. SQLCancel is
+  // the ODBC way of stopping a statement on another thread, no helper connection needed.
+  // Always True: there is no KILL fallback via a helper connection on ODBC.
+  Result := True;
+  EnterCriticalSection(FRunningStmtLock);
+  try
+    if (FRunningStmt <> OdbcNullStmt) and (not OdbcCancel(FRunningStmt)) then
+      Log(lcError, _('The ODBC driver could not cancel the running query.'));
+  finally
+    LeaveCriticalSection(FRunningStmtLock);
+  end;
 end;
 
 
@@ -3554,7 +3646,8 @@ end;
 
 procedure TOdbcConnection.SetActive(Value: Boolean);
 var
-  Error: String;
+  Error, ErrorHint: String;
+  InstalledDrivers: TStringList;
   FinalHost: String;
   FinalPort, i: Integer;
   AdditionalParams: TStringList;
@@ -3563,7 +3656,8 @@ begin
     DoBeforeConnect;
 
     if Parameters.LibraryOrProvider.Trim.IsEmpty then
-      raise EDbError.Create(_('No ODBC driver selected. Please install the ODBC driver for your database server, and select it in your session settings.'));
+      raise EDbError.Create(_('No ODBC driver selected. Please install the ODBC driver for your database server, and select it in your session settings.'),
+        0, Parameters.OdbcDriverHint);
 
     FinalHost := Parameters.Hostname;
     FinalPort := Parameters.Port;
@@ -3571,8 +3665,7 @@ begin
 
     // Results of a previous connection are owned by their TDBQuery objects, see TOdbcQuery.Destroy
     FLastRawResults.Clear;
-    FreeAndNil(FTransaction);
-    FreeAndNil(FHandle);
+    FreeHandles;
     FHandle := TFixedODBCConnection.Create(nil);
     FTransaction := TSQLTransaction.Create(nil);
     FTransaction.Database := FHandle;
@@ -3617,7 +3710,17 @@ begin
         FActive := False;
         FConnectionStarted := 0;
         EndSSHTunnel;
-        raise EDbError.Create(Error, LastErrorCode);
+        // Session copied from another computer, or driver uninstalled.
+        // Without a driver manager, the driver list is empty, and the error already says what is missing.
+        ErrorHint := '';
+        if OdbcDriverManagerAvailable then begin
+          InstalledDrivers := GetOdbcDriverNames('');
+          if InstalledDrivers.IndexOf(Parameters.LibraryOrProvider) = -1 then
+            ErrorHint := f_('The ODBC driver "%s" is not installed.', [Parameters.LibraryOrProvider])
+              + ' ' + Parameters.OdbcDriverHint;
+          InstalledDrivers.Free;
+        end;
+        raise EDbError.Create(Error, LastErrorCode, ErrorHint);
       end;
     end;
   end else begin
@@ -3832,6 +3935,16 @@ begin
     on E:EDbError do
       FServerVersionUntouched := 'Oracle ' + FHandle.GetConnectionInfo(citServerVersionString);
   end;
+  // ISO formats for implicit conversion of strings in grid editing and generated data,
+  // matching the TO_CHAR format of time zone columns in GetGridColumnExpression.
+  // The default NLS_DATE_FORMAT depends on the client's territory, e.g. DD-MON-RR.
+  // CURSOR_SHARING=FORCE: dictionary queries on ALL_* views contain the table name as a
+  // literal, and their hard parse takes 1-3 seconds each on XE. With FORCE, Oracle replaces
+  // literals by binds, so the parsed cursors are shared between tables.
+  Query('ALTER SESSION SET NLS_DATE_FORMAT = ''YYYY-MM-DD HH24:MI:SS'''
+    + ' NLS_TIMESTAMP_FORMAT = ''YYYY-MM-DD HH24:MI:SS.FF'''
+    + ' NLS_TIMESTAMP_TZ_FORMAT = ''YYYY-MM-DD HH24:MI:SS.FF TZH:TZM'''
+    + ' CURSOR_SHARING = FORCE');
   FServerDateTimeOnStartup := GetVar('SELECT ' + FSqlProvider.GetSql(qFuncNow));
 end;
 
@@ -4247,6 +4360,13 @@ begin
 end;
 
 
+function TDBConnection.CancelQuery: Boolean;
+begin
+  // False: caller has to fire a KILL query from a helper connection
+  Result := False;
+end;
+
+
 procedure TDBConnection.Query(QueryId: TQueryId);
 begin
   Query(FSqlProvider.GetSql(QueryId));
@@ -4598,6 +4718,10 @@ begin
   for i:=0 to FLastRawResults.Count-1 do
     FLastRawResults[i].Free;
   FLastRawResults.Clear;
+  // Comment-only statements, e.g. MySQL's /*!40101 SET ... */ sent by the SQL export:
+  // Oracle and Snowflake reject them as empty statements, other servers ignore them.
+  if TSQLBatch.GetSQLWithoutComments(SQL).Trim.IsEmpty then
+    Exit;
   QueryResult := nil;
   try
     // No owner: the TDBQuery taking over this result frees it, also after a reconnect
@@ -4613,13 +4737,20 @@ begin
     QueryResult.Prepare;
     // Ask the driver for result columns, so a SELECT is executed only once, by Open
     ColCount := OdbcPreparedColumnCount(TSQLQueryAccess(QueryResult).Cursor);
+    // Snowflake describes DML with a result column like "number of rows updated", which
+    // would take the SELECT path and lose the affected rows from SQLRowCount
+    if (ColCount > 0) and ExecRegExprI('^\s*(INSERT|UPDATE|DELETE|MERGE)\b', TSQLBatch.GetSQLWithoutComments(SQL)) then
+      ColCount := 0;
+    SetRunningStmt(OdbcCursorStmt(TSQLQueryAccess(QueryResult).Cursor));
     if ColCount > 0 then begin
       try
         QueryResult.Open;
+        SetRunningStmt(OdbcNullStmt);
         HasRows := True;
         Inc(FRowsFound, QueryResult.RecordCount);
       except
         on E:EDatabaseError do begin
+          SetRunningStmt(OdbcNullStmt);
           // Snowflake describes USE and other commands with a status column on SQLPrepare, but
           // returns no result set after SQLExecute. SQLDB then raises "Cannot open a non-select
           // statement", after the statement was executed successfully.
@@ -4634,12 +4765,14 @@ begin
     end else if ColCount = 0 then begin
       // Execute without SQLPrepare, which takes :NEW in trigger bodies for a bind variable
       HasRows := False;
+      SetRunningStmt(OdbcNullStmt);
       QueryResult.UnPrepare;
-      Inc(FRowsAffected, Max(OdbcExecDirect(FHandle, SQL), 0));
+      Inc(FRowsAffected, Max(OdbcExecDirect(FHandle, SQL, SetRunningStmt), 0));
       if FTransaction.Active then
         FTransaction.Commit;
     end else begin
       QueryResult.ExecSQL;
+      SetRunningStmt(OdbcNullStmt);
       Inc(FRowsAffected, Max(QueryResult.RowsAffected, 0));
       HasRows := (ColCount < 0) and TSQLQueryAccess(QueryResult).Cursor.FSelectable;
       QueryResult.UnPrepare;
@@ -4659,6 +4792,7 @@ begin
     DetectUSEQuery(SQL);
   except
     on E:Exception do begin
+      SetRunningStmt(OdbcNullStmt);
       SetLastError(E);
       QueryResult.Free;
       Log(lcError, GetLastErrorMsg);
@@ -7158,8 +7292,8 @@ begin
 
     DefText := ColQuery.Col('COLUMN_DEFAULT');
     Col.OnUpdateType := cdtNothing;
-    if DefText.StartsWith('nextval(', True) then begin
-      // PG auto increment
+    if FParameters.IsAnyPostgreSQL and DefText.StartsWith('nextval(', True) then begin
+      // PG auto increment. MariaDB also has nextval(), which is a normal default expression there.
       Col.DefaultType := cdtAutoInc;
       Col.DefaultText := DefText;
     end
@@ -12241,6 +12375,67 @@ var
   sqlUpdate, sqlInsertColumns, sqlInsertValues, Val: String;
   RowModified: Boolean;
   ColAttr: TTableColumn;
+const
+  // Oracle string literals hold 4000 bytes, i.e. 1000 characters in AL32UTF8
+  OracleMaxLiteral = 1000;
+
+  function SnowflakeJsonValue(const Text, TypeName: String): String;
+  begin
+    // Semi-structured types take JSON text, which must be parsed
+    Result := 'PARSE_JSON(' + Connection.EscapeString(Text) + ')';
+    if TypeName = 'OBJECT' then
+      Result := 'TO_OBJECT(' + Result + ')'
+    else if TypeName = 'ARRAY' then
+      Result := 'TO_ARRAY(' + Result + ')';
+  end;
+
+  function OracleClobValue(const Text: String): String;
+  var
+    p, ChunkLen: Integer;
+  begin
+    // Longer text for CLOB columns: concatenated TO_CLOB() chunks, avoids ORA-01704
+    Result := '';
+    p := 1;
+    while p <= Length(Text) do begin
+      ChunkLen := Min(OracleMaxLiteral, Length(Text) - p + 1);
+      // Do not split UTF-8 sequences: move back before continuation bytes
+      while (p + ChunkLen <= Length(Text)) and (ChunkLen > 1)
+        and ((Ord(Text[p + ChunkLen]) and $C0) = $80) do
+        Dec(ChunkLen);
+      if Result <> '' then
+        Result := Result + ' || ';
+      Result := Result + 'TO_CLOB(' + Connection.EscapeString(Copy(Text, p, ChunkLen)) + ')';
+      Inc(p, ChunkLen);
+    end;
+  end;
+
+  function OracleIdentityValue(const ColName: String): String;
+  var
+    Owner, Table, SeqName: String;
+  begin
+    Result := '';
+    if Assigned(FDBObject) then begin
+      Owner := FDBObject.Database;
+      Table := FDBObject.Name;
+    end else begin
+      Owner := DatabaseName;
+      Table := TableName;
+    end;
+    try
+      SeqName := Connection.GetVar('SELECT SEQUENCE_NAME FROM ALL_TAB_IDENTITY_COLS'
+        + ' WHERE OWNER=' + Connection.EscapeString(Owner)
+        + ' AND TABLE_NAME=' + Connection.EscapeString(Table)
+        + ' AND COLUMN_NAME=' + Connection.EscapeString(ColName));
+      if not SeqName.IsEmpty then
+        Result := Connection.GetVar('SELECT ' + Connection.QuoteIdent(Owner) + '.'
+          + Connection.QuoteIdent(SeqName) + '.CURRVAL FROM dual');
+    except
+      // No identity column, but e.g. a trigger filling the value
+      on E:EDbError do
+        Result := '';
+    end;
+  end;
+
 begin
   Result := True;
   if not FEditingPrepared then
@@ -12274,8 +12469,14 @@ begin
           Val := FConnection.EscapeBin(Cell.NewText);
         dtcTemporal:
           Val := Connection.EscapeString(Connection.GetDateTimeValue(Cell.NewText, Datatype(i).Index))
-        else
-          Val := Connection.EscapeString(Cell.NewText, Datatype(i));
+        else begin
+          if Connection.Parameters.IsAnySnowflake and (Datatype(i).Index = dbdtJson) then
+            Val := SnowflakeJsonValue(Cell.NewText, Datatype(i).Name)
+          else if Connection.Parameters.IsAnyOracle and (Length(Cell.NewText) > OracleMaxLiteral) then
+            Val := OracleClobValue(Cell.NewText)
+          else
+            Val := Connection.EscapeString(Cell.NewText, Datatype(i));
+        end;
       end;
       sqlUpdate := sqlUpdate + Connection.QuoteIdent(FColumnOrgNames[i]) + '=' + Val;
       sqlInsertColumns := sqlInsertColumns + Connection.QuoteIdent(FColumnOrgNames[i]);
@@ -12285,14 +12486,32 @@ begin
     // Post query and fetch just inserted auto-increment id if applicable
     if RowModified then try
       if Row.Inserted then begin
-        Connection.Query('INSERT INTO '+QuotedDbAndTableName+' ('+sqlInsertColumns+') VALUES ('+sqlInsertValues+')');
+        if Connection.Parameters.IsAnySnowflake then
+          // VALUES accepts only constants on Snowflake, no PARSE_JSON()
+          Connection.Query('INSERT INTO '+QuotedDbAndTableName+' ('+sqlInsertColumns+') SELECT '+sqlInsertValues)
+        else
+          Connection.Query('INSERT INTO '+QuotedDbAndTableName+' ('+sqlInsertColumns+') VALUES ('+sqlInsertValues+')');
         Connection.ShowWarnings;
         for i:=0 to ColumnCount-1 do begin
           ColAttr := ColAttributes(i);
           if Assigned(ColAttr) and (ColAttr.DefaultType = cdtAutoInc) then begin
             Row[i].NewText := UnformatNumber(Row[i].NewText);
-            if Row[i].NewText = '0' then
-              Row[i].NewText := Connection.GetVar('SELECT ' + Connection.SqlProvider.GetSql(qFuncLastAutoIncNumber));
+            if Row[i].NewText = '0' then begin
+              if Connection.SqlProvider.Has(qFuncLastAutoIncNumber) then
+                Row[i].NewText := Connection.GetVar('SELECT ' + Connection.SqlProvider.GetSql(qFuncLastAutoIncNumber))
+              else if Connection.Parameters.IsAnyOracle then begin
+                // Identity column: CURRVAL of its sequence holds the value generated in this session
+                Row[i].NewText := OracleIdentityValue(ColAttr.Name);
+                Row[i].NewIsNull := Row[i].NewText.IsEmpty;
+                break;
+              end else begin
+                // Snowflake has no session function for the generated value.
+                // The row shows NULL there until the grid is refreshed.
+                Row[i].NewText := '';
+                Row[i].NewIsNull := True;
+                break;
+              end;
+            end;
             Row[i].NewIsNull := False;
             break;
           end;
@@ -12926,8 +13145,15 @@ var
   i: Integer;
   KeyCols: TTableColumnList;
 begin
-  if FConnection.Parameters.IsAnyOdbc then
-    raise EDbError.Create(f_('Grid editing is not yet supported on %s.', [FConnection.Parameters.NetTypeName(False)]));
+  // No row matching on all columns: CLOB/BLOB cannot be compared on Oracle, Snowflake has no
+  // UPDATE ... LIMIT 1
+  if FConnection.Parameters.IsAnyOdbc then begin
+    PrepareEditing;
+    // Owning list of the cached table columns, like in GridQuery: must not be freed
+    KeyCols := Connection.GetKeyColumns(FColumns, FKeys);
+    if KeyCols.Count = 0 then
+      raise EDbError.Create(f_('Grid editing on %s needs a primary key or a unique key on NOT NULL columns.', [FConnection.Parameters.NetTypeName(False)]));
+  end;
   KeyCols := GetKeyColumns;
   if KeyCols.Count = 0 then
     raise EDbError.Create(_(MSG_NOGRIDEDITING));
@@ -12974,8 +13200,12 @@ begin
         raise EDbError.CreateFmt(_('Cannot compose WHERE clause - column missing: %s'), [NeededCols[i].Name]);
       if Result <> '' then
         Result := Result + ' AND';
-      // See issue #769 and #2031 for why we need CastAsText
-      Result := Result + ' ' + NeededCols[i].CastAsText;
+      // See issue #769 and #2031 for why we need CastAsText.
+      // Not on ODBC, where only key columns are used: Snowflake's TO_VARCHAR(id)=5 compares texts.
+      if Connection.Parameters.IsAnyOdbc then
+        Result := Result + ' ' + Connection.QuoteIdent(NeededCols[i].Name)
+      else
+        Result := Result + ' ' + NeededCols[i].CastAsText;
 
       if Modified(j) then begin
         ColVal := FCurrentUpdateRow[j].OldText;

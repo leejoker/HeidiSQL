@@ -12,6 +12,9 @@ uses
 
 type
 
+  // For units which do not use odbcsqldyn
+  TOdbcStmt = SQLHSTMT;
+
   { TFixedODBCConnection }
 
   TFixedODBCConnection = class(TODBCConnection)
@@ -24,16 +27,25 @@ type
     procedure LoadBlobIntoBuffer(FieldDef: TFieldDef; ABlobBuf: PBufBlobField;
       cursor: TSQLCursor; ATransaction: TSQLTransaction); override;
   public
+    constructor Create(AOwner: TComponent); override;
     // Oracle: unconstrained NUMBER and FLOAT(n) are reported as SQL_FLOAT with 38 digits
     property Float38AsDecimal: Boolean read FFloat38AsDecimal write FFloat38AsDecimal;
   end;
 
+const
+  OdbcNullStmt = SQL_NULL_HSTMT;
+
 // Number of result columns of a prepared, not yet executed statement. -1 if the driver cannot tell.
 function OdbcPreparedColumnCount(Cursor: TSQLCursor): Integer;
+// Statement handle of a prepared cursor, SQL_NULL_HSTMT if none
+function OdbcCursorStmt(Cursor: TSQLCursor): SQLHSTMT;
 // Execute a statement without result set via SQLExecDirect, without preparing it before.
 // Oracle's driver takes :NEW in trigger bodies for a bind variable on SQLPrepare, and fails.
-// Returns the number of affected rows, or -1.
-function OdbcExecDirect(Conn: TODBCConnection; const SQL: String): Int64;
+// Returns the number of affected rows, or -1. OnStmt gets the statement handle while it is
+// executed, and SQL_NULL_HSTMT before it is freed.
+type
+  TOdbcStmtEvent = procedure(Stmt: SQLHSTMT) of object;
+function OdbcExecDirect(Conn: TODBCConnection; const SQL: String; OnStmt: TOdbcStmtEvent=nil): Int64;
 // Readable message from an EODBCException: only the driver messages, without the
 // connection string, which contains the password
 function OdbcErrorText(const Msg: String): String;
@@ -44,11 +56,15 @@ function PrepareOracleClientEnvironment: String;
 // Load the ODBC driver manager before odbcconn does it. On Linux and macOS, FPC loads the
 // unversioned libodbc.so / libodbc.dylib, which only exists with the unixODBC -dev package.
 procedure LoadOdbcDriverManager;
+// True if LoadOdbcDriverManager succeeds, without raising
+function OdbcDriverManagerAvailable: Boolean;
+// SQLCancel on a statement running in another thread. Not declared by FPC's odbcsql.inc.
+function OdbcCancel(Stmt: SQLHSTMT): Boolean;
 
 implementation
 
 uses
-  {$IFDEF WINDOWS}Windows,{$ENDIF} RegExpr;
+  {$IFDEF WINDOWS}Windows,{$ENDIF} RegExpr, dynlibs, TypInfo;
 
 {$IFNDEF WINDOWS}
 function libc_setenv(name, value: PChar; overwrite: LongInt): LongInt; cdecl; external 'c' name 'setenv';
@@ -63,6 +79,25 @@ type
 var
   ODBCFormatSettings: TFormatSettings;
   OdbcDriverManagerLoaded: Boolean = False;
+
+
+constructor TFixedODBCConnection.Create(AOwner: TComponent);
+var
+  Opt: TConnOption;
+  OptName: String;
+begin
+  inherited Create(AOwner);
+  // FPC 3.2.4 sets sqCommitEndsPrepared and sqRollbackEndsPrepared for all connections, so
+  // a commit unprepares all prepared queries of the transaction. On a query which is still
+  // open, e.g. the data grid's result, UnPrepare raises "Operation cannot be performed on an
+  // active dataset". Results are fully fetched (PacketRecords = -1) and ODBC statements
+  // survive a commit. By name, as FPC 3.2.2 does not know these options.
+  for Opt:=Low(TConnOption) to High(TConnOption) do begin
+    OptName := GetEnumName(TypeInfo(TConnOption), Ord(Opt));
+    if SameText(OptName, 'sqCommitEndsPrepared') or SameText(OptName, 'sqRollbackEndsPrepared') then
+      Exclude(FConnOptions, Opt);
+  end;
+end;
 
 
 procedure TFixedODBCConnection.AddFieldDefs(cursor: TSQLCursor; FieldDefs: TFieldDefs);
@@ -208,6 +243,15 @@ begin
 end;
 
 
+function OdbcCursorStmt(Cursor: TSQLCursor): SQLHSTMT;
+begin
+  if Cursor is TODBCCursor then
+    Result := TODBCCursorAccess(Cursor).FSTMTHandle
+  else
+    Result := SQL_NULL_HSTMT;
+end;
+
+
 function OdbcPreparedColumnCount(Cursor: TSQLCursor): Integer;
 var
   ColCount: SQLSMALLINT;
@@ -260,7 +304,7 @@ begin
 end;
 
 
-function OdbcExecDirect(Conn: TODBCConnection; const SQL: String): Int64;
+function OdbcExecDirect(Conn: TODBCConnection; const SQL: String; OnStmt: TOdbcStmtEvent=nil): Int64;
 var
   Dbc: SQLHDBC;
   Stmt: SQLHSTMT;
@@ -275,6 +319,8 @@ begin
   CheckOdbcResult(SQLAllocHandle(SQL_HANDLE_STMT, Dbc, Stmt),
     SQL_HANDLE_DBC, Dbc, 'Could not allocate ODBC Statement handle.');
   try
+    if Assigned(OnStmt) then
+      OnStmt(Stmt);
     WSQL := UnicodeString(SQL);
     Res := SQLExecDirectW(Stmt, PWideChar(WSQL), Length(WSQL));
     // SQL_NO_DATA: searched UPDATE or DELETE without affected rows
@@ -285,6 +331,8 @@ begin
     else if SQLRowCount(Stmt, RowCount) in [SQL_SUCCESS, SQL_SUCCESS_WITH_INFO] then
       Result := RowCount;
   finally
+    if Assigned(OnStmt) then
+      OnStmt(SQL_NULL_HSTMT);
     SQLFreeHandle(SQL_HANDLE_STMT, Stmt);
   end;
 end;
@@ -441,6 +489,34 @@ begin
     raise EInOutError.Create('Can not load the ODBC driver manager. Please install unixODBC (tried '
       + Tried + 'libodbc.' + SharedSuffix + ').');
   {$ENDIF}
+end;
+
+
+function OdbcDriverManagerAvailable: Boolean;
+begin
+  try
+    LoadOdbcDriverManager;
+    Result := True;
+  except
+    on E:EInOutError do
+      Result := False;
+  end;
+end;
+
+
+type
+  TSQLCancel = function(StatementHandle: SQLHSTMT): SQLRETURN; {$IFDEF WINDOWS}stdcall{$ELSE}cdecl{$ENDIF};
+
+function OdbcCancel(Stmt: SQLHSTMT): Boolean;
+var
+  CancelFunc: TSQLCancel;
+begin
+  Result := False;
+  if ODBCLibraryHandle = NilHandle then
+    Exit;
+  CancelFunc := TSQLCancel(GetProcedureAddress(ODBCLibraryHandle, 'SQLCancel'));
+  if Assigned(CancelFunc) then
+    Result := CancelFunc(Stmt) in [SQL_SUCCESS, SQL_SUCCESS_WITH_INFO];
 end;
 
 

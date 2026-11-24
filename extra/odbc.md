@@ -196,19 +196,36 @@ hardcoded in FPC's `odbcsql.inc`), and the drivers are installed by the user
   "Oracle in instantclient_23" or "SnowflakeDSIIDriver".
 - `GetLibraries` fills the list by enumerating `SQLDrivers` instead of
   scanning the lib dir, filtered by regex `oracle` / `snowflake`.
+- No matching driver installed (empty list): the session manager shows the
+  text hint "No ODBC driver found" in the dropdown, its tooltip says where to
+  get the driver (`TConnectionParameters.OdbcDriverHint`: Oracle Instant
+  Client "Basic" + "ODBC" download page, Snowflake ODBC download page).
+  Connecting with an empty driver name raises "No ODBC driver selected" with
+  that hint. If connecting fails and the selected driver is not among the
+  installed ones (session copied from another computer, driver uninstalled),
+  the error gets the hint "The ODBC driver "…" is not installed." plus the
+  download hint.
 
 ## Packaging
 
-- Windows: nothing to add.
+- Windows (checked): nothing to add. `odbc32.dll` is part of Windows. The
+  installer copies `extra\ini\functions-*.ini` by wildcard, which includes
+  `functions-oracle.ini`. There is no `functions-snowflake.ini` yet; once
+  added, the wildcard covers it, as do the Makefile (`extra/ini/*.ini` for
+  deb, rpm, tar) and `create-macos-app.sh`. The server icons
+  (`res/icons/server-oracle.png`, `server-snowflake.png`) are compiled into
+  the exe, no files to ship.
 - Linux (done):
   - deb: `libodbc2 | libodbc1` in `Depends` (`deb-control.txt`). `libodbc2`
     since unixODBC 2.3.7 (Debian 12, Ubuntu 22.04+), `libodbc1` before
     (Debian 11, Ubuntu 20.04).
   - rpm: `--depends "libodbc.so.2()(64bit)"` in the Makefile (Fedora/RHEL
     package `unixODBC`).
-  - snap: `libodbc2` in `stage-packages`. Strict confinement hides
-    `/opt/oracle` and the host's `/etc/odbcinst.ini`, so Oracle will most
-    likely not work in the snap (not tested).
+  - tar packages: no dependency metadata; users install unixODBC themselves.
+  - No snap, AppImage or Flatpak definition in this repository (checked
+    2026-11-23). A snap would need `libodbc2` in `stage-packages`; strict
+    confinement hides `/opt/oracle` and the host's `/etc/odbcinst.ini`, so
+    Oracle would most likely not work there anyway.
   - FPC loads `libodbc.so`, which only exists with the `-dev` package.
     `LoadOdbcDriverManager` in `odbcfixed.pas` calls `InitialiseODBC` with
     `libodbc.so.2`, `libodbc.so.1`, `libodbc.2.dylib` and finally the FPC
@@ -252,9 +269,16 @@ hardcoded in FPC's `odbcsql.inc`), and the drivers are installed by the user
     `<DM home>/etc/odbcinst.ini` and writes `libsqora.so.23.1`. A manual entry
     is enough:
     `[Oracle 23 ODBC driver]` / `Driver = <dir>/libsqora.dylib.23.1`.
-  - Snowflake has a macOS driver. Its `simba.snowflake.ini` defaults to
-    iODBC (`ODBCInstLib`, not verified), which must be switched to unixODBC's
-    `libodbcinst.2.dylib`.
+  - Snowflake: driver 4.2.0 (`.pkg`, universal, installs to
+    `/opt/snowflake/snowflakeodbc/lib/libsfodbc.dylib`, signed by Snowflake)
+    has no `simba.snowflake.ini` and no `libodbcinst` dependency anymore. Its
+    shipped `sf.odbc.ini` sets `DriverManagerEncoding=UTF-32` for iODBC; with
+    unixODBC every wide string would be mis-decoded. Users override it in
+    `~/Library/Application Support/snowflake/sf.odbc.ini` (or `SF_ODBC_INI`)
+    with `DriverManagerEncoding=UTF-16`, and register the driver in
+    `~/.odbcinst.ini`:
+    `[SnowflakeDSIIDriver]` / `Driver = /opt/snowflake/snowflakeodbc/lib/libsfodbc.dylib`.
+    Tested 2026-11-23, see "macOS test".
   - What a user installs: Instant Client Basic + ODBC, and a driver entry in
     `~/.odbcinst.ini`. No Homebrew, no unixODBC.
 
@@ -322,9 +346,9 @@ the experimental InterBase support (`dbstructures.interbase.pas` ~300 lines,
    database, `GET_DDL`, `TO_VARCHAR()` wrapping of TZ/LTZ, time zone checkbox
    with IANA name.
 4. Packaging (deb `libodbc2`, macOS unixODBC bundle), new strings in
-   `heidisql.po`.
+   `heidisql.po`. Done, see "Implementation status (phase 4)".
 
-Later: grid editing, table editor, generic read-only "ODBC" net type.
+Later: generic read-only "ODBC" net type. Grid editing and table editor: done.
 
 ## Implementation status (phases 1 and 2)
 
@@ -341,7 +365,7 @@ Code:
   (`ORACLE_MAINTAINED = 'N'` plus SYS and SYSTEM) are the tree's databases.
   Library dropdown = installed drivers matching `oracle`, label "ODBC driver:".
   SSH tunnel allowed, SSL tab disabled, "Use own client time zone" enabled.
-- Grid editing is blocked with a message (`TDBQuery.CheckEditable`).
+- Grid editing: see "Grid editing" below.
 - Icon: `server-oracle.png` (commit "feat: add Oracle connection icon").
 
 Learned while implementing:
@@ -473,7 +497,7 @@ Code:
   splitter.
 - Grid: `TIMESTAMP_TZ`/`_LTZ` via `TO_VARCHAR(col, 'YYYY-MM-DD
   HH24:MI:SS.FFn TZH:TZM')`, `TIMESTAMP_NTZ` and `TIME` via `TO_VARCHAR`
-  with fractional seconds. Grid editing is blocked as on Oracle.
+  with fractional seconds. Grid editing: see "Grid editing" below.
 - "Use own client time zone": `ALTER SESSION SET TIMEZONE = '<IANA name>'`
   after connect. `GetLocalIanaTimeZone` in `apphelpers.pas`: Windows maps the
   time zone key name via `ucal_getTimeZoneIDForWindowsID` from `icu.dll`
@@ -510,7 +534,171 @@ grid with VARCHAR (70000 characters), NUMBER(20,4) with trailing zeros,
 NUMBER(38,0) exact, VARIANT, TIMESTAMP_TZ with offset, TIMESTAMP_LTZ in the
 session time zone (Europe/Berlin with the option, -08:00 without), column
 changes incl. NOT NULL in the table editor, view editing, renaming tables and
-views. Binary display after the `x'...'` change not yet confirmed.
+views. Binary display after the `x'...'` change confirmed on macOS 2026-11-23.
+
+## Implementation status (phase 4, packaging and localization)
+
+- Packaging: Linux (deb, rpm) and macOS were done with phase 2, see
+  "Packaging". Windows installer checked, nothing missing. No snap,
+  AppImage or Flatpak in the repository.
+- Missing driver: text hint, tooltip and connect error hints, see
+  "Library field".
+- Localization: all `_()`/`f_()` literals in `source/*.pas` and the new
+  `connections.lfm` captions/hints (Warehouse, Role, connection parameters)
+  are in `extra/locale/heidisql.po`, `heidisql.en.mo` rebuilt. Checked with a
+  script comparing all literals against the msgids.
+- Tested: Windows clean build and start. Not testable locally: the macOS
+  bundle (unchanged in this phase). deb/rpm and the driver hints: see below.
+
+### Linux package test (2026-11-23)
+
+Qt6 build of this branch, `make deb-package rpm-package` (12.22), installed
+in fresh LXD containers without any ODBC or Oracle packages:
+
+| System | Install | unixODBC pulled in | Runtime |
+|---|---|---|---|
+| Debian 12 | `apt install ./heidisql_*.deb` ok | `libodbc2` 2.3.11 | ok |
+| Ubuntu 22.04 | ok | `libodbc2` 2.3.9 | ok |
+| Ubuntu 24.04 | ok | `libodbc2` 2.3.12 | ok |
+| Fedora 43 | `dnf install ./heidisql-*.rpm` ok | `unixODBC` 2.3.14 | ok |
+
+- Runtime check: started under Xvfb with
+  `heidisql --nettype=19 --host=localhost --port=1521 --user=system
+  --password=xx --library=NoSuchDriver`. All four show unixODBC's own error
+  "Can't open lib 'NoSuchDriver' : file not found", so `libodbc.so.2` from
+  the package was loaded, plus the hint "The ODBC driver ... is not
+  installed".
+- Without `libodbc2` (removed with `--force-depends` on Ubuntu 24.04): "Can
+  not load the ODBC driver manager. Please install unixODBC (tried
+  libodbc.so.2, ...)" as intended.
+- Debian 11 not tested (no LXD image anymore, and no Qt6 there anyway), so
+  the `libodbc1` alternative is untested.
+- Not ODBC related, found on the way:
+  - `libqt6pas6` is in none of these distributions' repositories (installed
+    here from a manually downloaded .deb), so neither package installs on a
+    stock system without it. For the test it was repackaged from the host.
+  - Fixed: the rpm had no Firebird dependency, the deb has `libfbclient2`.
+    Now `libfbclient.so.2()(64bit)`, Fedora package `libfbclient2`
+    (Firebird 4). Tested on Fedora 43: fbclient's own network error
+    appears.
+  - Command line connect with `--nettype` but without `--library` uses the
+    MySQL default library (`libmariadb.so.3` for Firebird), not checked
+    further.
+  - Fixed: the hint said "The ODBC driver ... is not installed" also when
+    the driver manager itself was missing. Now only added when
+    `OdbcDriverManagerAvailable`, the error already says "Please install
+    unixODBC".
+  - Fixed: LCL's emulated task dialog (Linux, macOS) showed the "Find some
+    help on this error" link and URLs in the text as raw `<a href=...>`
+    HTML. `MessageDialog` adds links on Windows only now.
+  - Fixed: the search URL ended in `...founduery`, because the
+    `WebSearchBaseUrl` presets contain `%query`, but `%q` was replaced
+    (also on Windows). Windows retested 2026-11-23, see "macOS test".
+
+### macOS test (2026-11-23)
+
+Notarized CI bundle of 1b9e42e5 (12.22, run 45206980312) against 21c XE
+in the LAN, Instant Client 23.26 registered in `~/.odbcinst.ini`:
+- Connect, error dialog (no raw `<a href>`, search URL ok) and query
+  cancelling work.
+- "Use own client time zone": `SESSIONTIMEZONE` is `+01:00`, as intended
+  (offset on Oracle, IANA name only on Snowflake).
+- Missing driver hint: not testable in the GUI, the library field is a
+  dropdown of installed drivers. Covered by the `--library` test on Linux.
+- Fixed: grid editing failed on every UPDATE/INSERT/DELETE with "Operation
+  cannot be performed on an active dataset". FPC 3.2.4 sets
+  `sqCommitEndsPrepared`/`sqRollbackEndsPrepared` for all SQLDB connections
+  (3.2.2 has neither), so the commit after the statement unprepared all
+  prepared queries of the transaction, including the open grid result.
+  `TFixedODBCConnection.Create` removes both options (by name via RTTI, so
+  it compiles with 3.2.2). Affects the macOS build (FPC 3.2.4) and probably
+  Linux ARM64 (3.2.3), not Windows (3.2.2). Tested with a locally built
+  executable in the CI bundle: UPDATE, INSERT and DELETE work. Windows
+  retested 2026-11-23 (clean build, FPC 3.2.2): grid UPDATE/INSERT/DELETE
+  on Oracle and Snowflake, Snowflake BINARY, error dialog link and search
+  URL work.
+- Snowflake (driver 4.2.0, set up as in "Packaging", trial account), with
+  the fixed executable: connect, tree, umlauts, long VARCHAR, TIMESTAMP_TZ/LTZ
+  and grid UPDATE/INSERT/DELETE work. "Use own client time zone" gives
+  `TIMEZONE = Europe/Berlin` at SESSION level (`SHOW PARAMETERS`), so the
+  `/etc/localtime` symlink detection works on macOS. `NUMBER(38,0)` exact,
+  BINARY shown and edited via `x'...'` (also kept when only another column
+  of the row is edited), confirming the binary display change.
+- Oracle reconnect after a network interruption: no crash, grid editing
+  works afterwards.
+
+## Crash pass before release (2026-11-23)
+
+All menus, dialogs and tabs tested with Oracle 21c XE and Snowflake. No crash
+except the reconnect below; fixed:
+- Reconnect after a network failure crashed: freeing the old
+  `TSQLTransaction` rolled back on the dead connection (ORA-03114).
+  `TOdbcConnection.FreeHandles` rolls back in try/except and marks the
+  transaction inactive (`CloseTrans`).
+- Cancelling a query: `CancelQuery` calls `SQLCancel` (not declared by FPC,
+  loaded in `OdbcCancel`) on the running statement handle, which `Query`
+  publishes via `SetRunningStmt` under a critical section. Oracle answers
+  ORA-01013, Snowflake "Operation was cancelled". No helper connection.
+- `Query` skips comment-only statements, e.g. `/*!40101 ... */` from the SQL
+  export, which Oracle and Snowflake reject as empty statements. The export's
+  status SELECT gets `FROM dual` on Oracle.
+- Find text: Oracle (`LIKE`, `LOWER`, `REGEXP_LIKE`, BLOB/spatial columns
+  skipped) and Snowflake (`TO_VARCHAR() LIKE/ILIKE`, `REGEXP_INSTR`). Routines
+  skipped with a note.
+- Maintenance and bulk table edit: skipped with a note per object (MySQL
+  commands only).
+- Generate data on Snowflake: `INSERT ... SELECT` instead of `VALUES` (only
+  constants allowed there), `PARSE_JSON` / `TO_OBJECT` / `TO_ARRAY` for
+  VARIANT/OBJECT/ARRAY, values for TIMESTAMP_TZ/LTZ (`dbdtDatetimeOffset`,
+  before an empty string, also on MSSQL).
+
+Left as is: empty host tabs (variables, status, processes), user manager and
+create/alter/drop database disabled or "not supported", virtual columns not
+in grid export INSERTs (as on MySQL).
+
+Later: test "Generate data" with all data types on Oracle and Snowflake.
+Text values must fit the column length, and generated rows must not violate
+foreign keys or unique keys. On Oracle, date strings rely on implicit
+conversion via `NLS_DATE_FORMAT`.
+
+## Oracle: slow dictionary queries
+
+Measured 2026-11-23 on 21c XE (LAN, idle server): the key, index and foreign
+key queries on `ALL_CONSTRAINTS`/`ALL_INDEXES`/`ALL_CONS_COLUMNS` took 1-3 s
+each, together 4.6-6.2 s per newly selected table. Nearly all of it is the hard
+parse, as the table name is a literal: the same text again took 0.01-0.9 s.
+`DBMS_METADATA.GET_DDL` itself takes about 0.2 s per table (13 s for the first
+call on a cold server).
+
+Fix: `ALTER SESSION SET CURSOR_SHARING = FORCE` after connect. Then only the
+first table pays the parse, the next ones took 0.02 s for all three queries.
+Side effects on user queries: literals become binds, so plans for skewed data
+may be worse, and literals in the select list get bind-sized types.
+Alternative for later: real bind variables in the internal dictionary
+queries (needs `SQLBindParameter` support in `TOdbcConnection.Query`).
+
+Server side, `DBMS_STATS.GATHER_DICTIONARY_STATS` and
+`GATHER_FIXED_OBJECTS_STATS` (as SYS) brought `GET_DDL` over 18 tables from
+15.5 s to 2.6 s.
+
+## Grid editing
+
+Uses the generic `TDBQuery` code (`SaveModifications`, `DeleteRow`,
+`GetWhereClause`), with these ODBC specifics:
+- Only tables with a primary key, or a unique key on NOT NULL columns
+  (`CheckEditable`). No fallback to matching all columns: Oracle cannot compare
+  CLOB/BLOB in WHERE, Snowflake has no `UPDATE ... LIMIT 1`. Oracle ROWID as
+  a key for tables without one: later, it needs an extra column in the grid
+  SELECT.
+- WHERE uses the plain key columns, without `CastAsText` (Snowflake's
+  `TO_VARCHAR`).
+- Oracle: `ALTER SESSION SET NLS_DATE_FORMAT`, `NLS_TIMESTAMP_FORMAT` and
+  `NLS_TIMESTAMP_TZ_FORMAT` to ISO formats after connect, so date strings in
+  UPDATE/INSERT convert implicitly. Text longer than 1000 bytes is sent as
+  concatenated `TO_CLOB('...')` chunks (string literals hold 4000 bytes).
+  Binary via `HEXTORAW('...')`, limited to RAW's 2000 bytes.
+- Snowflake: VARIANT/OBJECT/ARRAY via `PARSE_JSON` / `TO_OBJECT` / `TO_ARRAY`.
+  INSERT uses `INSERT ... SELECT`, as `VALUES` takes only constants.
 
 ## Help page: Oracle setup for users
 
@@ -525,8 +713,12 @@ How to explain it, learned from testing on macOS:
 - Then one section for the session settings, which are the same everywhere.
 - End with a troubleshooting table: error text as the user sees it, cause,
   fix. Users search for the error text.
-- Mark the whole thing experimental, and list what does not work yet (grid
-  editing, routine editor, copy table, SQL export), see "Not done / open".
+- Mark the whole thing experimental, and list what does not work yet
+  (routine editor, copy table), see "Not done / open". Grid editing works
+  since 2026-11-23.
+- Snowflake needs its own section: macOS setup (driver `.pkg`, `sf.odbc.ini`
+  with UTF-16, `~/.odbcinst.ini` entry) is in "Packaging"; Windows uses the
+  official `.msi`, which registers the driver.
 
 Draft:
 

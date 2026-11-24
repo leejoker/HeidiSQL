@@ -2731,9 +2731,16 @@ var
   Connection: TDBConnection;
   Node: PVirtualNode;
   DlgResult: Integer;
+  Tab: TQueryTab;
 begin
   // Disconnect active connection. If it's the last, exit application
   Connection := ActiveConnection;
+  for Tab in QueryTabs do begin
+    if Tab.QueryRunning and (Tab.ExecutionThread.Connection = Connection) then begin
+      LogSQL(_('Cannot disconnect session with running query. Please wait until query has finished.'));
+      Exit;
+    end;
+  end;
   // Find and remove connection node from tree
   Node := GetRootNode(DBtree, Connection);
   DBTree.DeleteNode(Node);
@@ -11724,6 +11731,12 @@ begin
           CellText := CellText + ' [...]';
       end;
     end;
+    // Painting huge text or binary values makes the grid unresponsive. Shorten them for display only,
+    // callers of Grid.Text[] outside of painting (copy, filter, editors) still get the full value.
+    if (tsPainting in Sender.TreeStates)
+      and (Length(CellText) > GRIDMAXDISPLAY)
+      and (UTF8Length(CellText) > GRIDMAXDISPLAY) then
+      CellText := UTF8Copy(CellText, 1, GRIDMAXDISPLAY) + ' [...]';
   end;
 end;
 
@@ -15067,7 +15080,7 @@ end;
 
 procedure TMainForm.actCancelOperationExecute(Sender: TObject);
 var
-  Killer: TDBConnection;
+  Killer, Conn: TDBConnection;
   KillCommand: String;
   Tab: TQueryTab;
 begin
@@ -15079,14 +15092,17 @@ begin
   for Tab in QueryTabs do begin
     if Tab.QueryRunning then begin
       Tab.ExecutionThread.Aborted := True;
-      Killer := ActiveConnection.Parameters.CreateConnection(Self);
-      Killer.Parameters := ActiveConnection.Parameters;
+      Conn := Tab.ExecutionThread.Connection;
+      if Conn.CancelQuery then
+        Continue;
+      Killer := Conn.Parameters.CreateConnection(Self);
+      Killer.Parameters := Conn.Parameters;
       Killer.OwnsParameters := False;
       Killer.LogPrefix := _('Helper connection');
       Killer.OnLog := LogSQL;
       try
         Killer.Active := True;
-        KillCommand := Killer.SqlProvider.GetSql(qKillQuery, [ActiveConnection.ThreadId]);
+        KillCommand := Killer.SqlProvider.GetSql(qKillQuery, [Conn.ThreadId]);
         Killer.Query(KillCommand);
       except
         on E:EDbError do begin
@@ -15101,7 +15117,12 @@ end;
 
 
 procedure TMainForm.OperationRunning(Runs: Boolean);
+var
+  Tab: TQueryTab;
 begin
+  // Keep cancel button enabled while some query tab is still running, e.g. after a grid sort finished
+  for Tab in QueryTabs do
+    Runs := Runs or Tab.QueryRunning;
   if actCancelOperation.Enabled <> Runs then begin
     actCancelOperation.ImageIndex := 159;
     actCancelOperation.Enabled := Runs;
