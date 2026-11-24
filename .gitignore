@@ -63,3 +63,6 @@ desktop.ini
 # Others, IntelliJ IDEA, etc.
 .idea
 .junie
+
+# Cindy schedule pre-run checks (machine-local automation config)
+/scripts/schedule-checks/
