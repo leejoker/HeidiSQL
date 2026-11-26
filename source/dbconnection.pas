@@ -9,7 +9,7 @@ uses
   DateUtils, Types, Math, Dialogs, Graphics, ExtCtrls, StrUtils,
   Controls, Forms, IniFiles, Variants, FileUtil,
   RegExpr, process, Pipes, SQLDB, LConvEncoding,
-  MSSQLConn, IBConnection, ibase60dyn, SQLDBLib, DB, FmtBCD, odbcconn, odbcfixed,
+  MSSQLConn, mssqlfixed, IBConnection, ibase60dyn, SQLDBLib, DB, FmtBCD, odbcconn, odbcfixed,
   generic_types, lazaruscompat,
   dbstructures, dbstructures.mysql, dbstructures.mssql, dbstructures.postgresql, dbstructures.sqlite, dbstructures.interbase,
   dbstructures.redis, redisclient, dbstructures.oracle, dbstructures.snowflake;
@@ -696,11 +696,13 @@ type
   TSqlSrvResults = TObjectList<TSQLQuery>;
   TSqlSrvConnection = class(TDBConnection)
     private
-      FHandle: TMSSQLConnection;
+      FHandle: TFixedMSSQLConnection;
       FLib: TSQLDBLibraryLoader;
       FTransaction: TSQLTransaction;
       FLastRawResults: TSqlSrvResults;
       FLastError: String;
+      FLastErrorCode: Integer;
+      procedure SetLastError(E: Exception);
       procedure SetActive(Value: Boolean); override;
       procedure DoAfterConnect; override;
       function GetThreadId: Int64; override;
@@ -1567,7 +1569,12 @@ begin
     FCompressed := AppSettings.ReadBool(asCompressed);
     FAllDatabases := AppSettings.ReadString(asDatabases);
     FLibraryOrProvider := AppSettings.ReadString(asLibrary);
-    if not FileExists(GetLibDir + FLibraryOrProvider) then
+    if NetTypeGroup in [ngOracle, ngSnowflake] then begin
+      // ODBC driver name, not a file: validate against installed drivers
+      if FLibraryOrProvider.IsEmpty or (GetLibraries.IndexOf(FLibraryOrProvider) = -1) then
+        FLibraryOrProvider := DefaultLibrary;
+    end
+    else if not FileExists(GetLibDir + FLibraryOrProvider) then
       FLibraryOrProvider := DefaultLibrary; // Catches empty string and any non-existant file
     FComment := AppSettings.ReadString(asComment);
 
@@ -3139,7 +3146,7 @@ begin
     FinalPort := Parameters.Port;
     StartSSHTunnel(FinalHost, FinalPort);
 
-    FHandle := TMSSQLConnection.Create(nil);
+    FHandle := TFixedMSSQLConnection.Create(nil);
 
     FLib := TSQLDBLibraryLoader.Create(nil);
     FLib.ConnectionType := 'MSSQLServer';
@@ -3214,7 +3221,7 @@ begin
 
     except
       on E:Exception do begin
-        FLastError := E.Message;
+        SetLastError(E);
         Error := LastErrorMsg;
         Log(lcError, Error);
         FConnectionStarted := 0;
@@ -4216,7 +4223,7 @@ begin
     FHandle.ExecuteDirect('SELECT 1');
   except
     on E:Exception do begin
-      FLastError := E.Message;
+      SetLastError(E);
       Log(lcError, E.Message);
       Active := False;
       if Reconnect then
@@ -4464,7 +4471,7 @@ type
 procedure TSqlSrvConnection.Query(SQL: String; DoStoreResult: Boolean=False; LogCategory: TDBLogCategory=lcSQL);
 var
   TimerStart: QWord;
-  QueryResult: TSQLQuery;
+  QueryResult, StoredResult: TSQLQuery;
   HasRows: Boolean;
 begin
   inherited;
@@ -4472,25 +4479,46 @@ begin
   TimerStart := GetTickCount64;
   FLastRawResults.Clear;
   QueryResult := nil;
+  FHandle.BeginResults;
   try
-    QueryResult := TSQLQuery.Create(FHandle);
-    FLastRawResults.Add(QueryResult);
-    QueryResult.DataBase := FHandle;
-    QueryResult.Transaction := FTransaction;
-    QueryResult.SQL.Text := SQL;
-    QueryResult.Options := [sqoAutoApplyUpdates, sqoAutoCommit, sqoCancelUpdatesOnRefresh];
-    QueryResult.PacketRecords := 10000;
-    // Prepare explicitly, so the cursor survives ExecSQL and tells us whether a result set came back
-    QueryResult.Prepare;
-    QueryResult.ExecSQL;
-    Inc(FRowsAffected, QueryResult.RowsAffected);
-    HasRows := TSQLQueryAccess(QueryResult).Cursor.FSelectable;
-    QueryResult.UnPrepare;
-    if not HasRows then begin
-      // Opening a statement without result set would execute it a second time, and then raise
-      // "Cannot open a non-select statement". See issue #2392
-      FLastRawResults.Remove(QueryResult);
+    try
+      // Execute the batch once, without fetching. Prepare explicitly, so the cursor survives
+      // ExecSQL and tells us whether a result set came back. See issue #2392
+      QueryResult := TSQLQuery.Create(FHandle);
+      QueryResult.DataBase := FHandle;
+      QueryResult.Transaction := FTransaction;
+      QueryResult.SQL.Text := SQL;
+      QueryResult.Options := [sqoAutoApplyUpdates, sqoAutoCommit, sqoCancelUpdatesOnRefresh];
+      QueryResult.Prepare;
+      QueryResult.ExecSQL;
+      Inc(FRowsAffected, Max(QueryResult.RowsAffected, 0));
+      HasRows := TSQLQueryAccess(QueryResult).Cursor.FSelectable;
+      QueryResult.UnPrepare;
       FreeAndNil(QueryResult);
+
+      // One dataset per result set, each taking over the pending result from the connection.
+      // All rows must be fetched before the next result set is available.
+      while HasRows do begin
+        QueryResult := TSQLQuery.Create(FHandle);
+        QueryResult.DataBase := FHandle;
+        QueryResult.Transaction := FTransaction;
+        QueryResult.ParseSQL := False;
+        QueryResult.SQL.Text := SQL;
+        QueryResult.Options := [sqoAutoApplyUpdates, sqoAutoCommit, sqoCancelUpdatesOnRefresh];
+        // Would send a query for index definitions while the result is pending
+        QueryResult.UsePrimaryKeyAsKey := False;
+        QueryResult.PacketRecords := -1;
+        QueryResult.Open;
+        Inc(FRowsFound, QueryResult.RecordCount);
+        if DoStoreResult then
+          FLastRawResults.Add(QueryResult)
+        else
+          FreeAndNil(QueryResult);
+        QueryResult := nil;
+        HasRows := FHandle.NextResult(FRowsAffected);
+      end;
+    finally
+      FHandle.EndResults;
     end;
     FLastQueryDuration := GetTickCount64 - TimerStart;
     FLastQueryNetworkDuration := 0;
@@ -4498,9 +4526,11 @@ begin
     DetectUSEQuery(SQL);
   except
     on E:Exception do begin
-      FLastError := E.Message;
-      FLastRawResults.Clear;
+      SetLastError(E);
       QueryResult.Free;
+      for StoredResult in FLastRawResults do
+        StoredResult.Free;
+      FLastRawResults.Clear;
       Log(lcError, GetLastErrorMsg);
       raise EDbError.Create(GetLastErrorMsg);
     end;
@@ -5968,7 +5998,23 @@ end;
 
 function TSqlSrvConnection.GetLastErrorCode: Cardinal;
 begin
-  Result := 0;
+  Result := Abs(FLastErrorCode);
+end;
+
+procedure TSqlSrvConnection.SetLastError(E: Exception);
+begin
+  // Prefer the server's error number and text over DB-Library's generic
+  // "Error 20018 : General SQL Server error: Check messages from the SQL Server"
+  if Assigned(FHandle) and (FHandle.ServerErrorText <> '') then begin
+    FLastError := FHandle.ServerErrorText;
+    FLastErrorCode := FHandle.ServerErrorNo;
+  end else begin
+    FLastError := E.Message;
+    if E is ESQLDatabaseError then
+      FLastErrorCode := ESQLDatabaseError(E).ErrorCode
+    else
+      FLastErrorCode := 0;
+  end;
 end;
 
 function TPgConnection.GetLastErrorCode: Cardinal;
@@ -10784,14 +10830,13 @@ var
   TypeIndex: TDBDatatypeIndex;
   LastResult: TSQLQuery;
 begin
-  // TODO: Handle multiple results
   if UseRawResult = -1 then begin
     Connection.Query(FSQL, FStoreResult);
     UseRawResult := 0;
   end;
   if Connection.ResultCount > UseRawResult then begin
+    // Opened and fetched in TSqlSrvConnection.Query
     LastResult := TSqlSrvConnection(Connection).LastRawResults[UseRawResult];
-    LastResult.Open;
   end else begin
     LastResult := nil;
   end;
@@ -11563,13 +11608,26 @@ end;
 function TSqlSrvQuery.GetColBinData(Column: Integer; var baData: TBytes): Boolean;
 var
   Stream: TMemoryStream;
+  Field: TField;
+  RawText: AnsiString;
 begin
   Result := False;
-  if ColumnExists(Column) and (not IsNull(Column)) then begin
-    if FCurrentResults.Fields[Column] is TBlobField then begin
+  if not ColumnExists(Column) then
+    Exit;
+  if FEditingPrepared and Assigned(FCurrentUpdateRow) then begin
+    // Row was loaded fully or edited, values only valid in the update row. Col() returns raw bytes.
+    RawText := AnsiString(FCurrentUpdateRow[Column].NewText);
+    SetLength(baData, Length(RawText));
+    if Length(RawText) > 0 then
+      Move(RawText[1], baData[0], Length(RawText));
+    Result := True;
+  end
+  else if not IsNull(Column) then begin
+    Field := FCurrentResults.Fields[Column];
+    if Field is TBlobField then begin
       Stream := TMemoryStream.Create;
       try
-        TBlobField(FCurrentResults.Fields[Column]).SaveToStream(Stream);
+        TBlobField(Field).SaveToStream(Stream);
         SetLength(baData, Stream.Size);
         if Stream.Size > 0 then
           Move((Stream.Memory)^, baData[0], Stream.Size);
@@ -11577,12 +11635,20 @@ begin
       finally
         Stream.Free;
       end;
-    end else
+    end
+    else if Field.DataType in [ftBytes, ftVarBytes] then begin
+      // BINARY(n) and VARBINARY(n), see #938
+      baData := Field.AsBytes;
+      Result := True;
+    end
+    else
       Raise EDbError.Create(SNotImplemented);
   end;
 end;
 
 function TSqlSrvQuery.Col(Column: Integer; IgnoreErrors: Boolean=False): String;
+var
+  BinData: TBytes;
 begin
   if ColumnExists(Column) then begin
     if FEditingPrepared and Assigned(FCurrentUpdateRow) then begin
@@ -11594,6 +11660,13 @@ begin
             Result := FloatToStr(FCurrentResults.Fields[Column].AsFloat, FFormatSettings);
           dtcTemporal:
             Result := FormatDateTime(Datatype(Column).Format, FCurrentResults.Fields[Column].AsFloat);
+          dtcBinary, dtcSpatial: begin
+            // Raw bytes, without any codepage conversion, see GetColBinData and EscapeBin
+            Result := '';
+            BinData := nil;
+            if GetColBinData(Column, BinData) and (Length(BinData) > 0) then
+              SetString(Result, PAnsiChar(@BinData[0]), Length(BinData));
+          end;
           else
             Result := FCurrentResults.Fields[Column].AsString;
         end;

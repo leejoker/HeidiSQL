@@ -72,6 +72,29 @@ type
       const AnRtlInfo: TLazSynDisplayRtlInfo): TSynSelectedColor; override;
   end;
 
+  // Subtle close button, shown on the query tab below the mouse cursor
+  TTabCloseButton = class(TCustomControl)
+    private
+      FHot: Boolean;
+      FPressed: Boolean;
+      FTabSelected: Boolean;
+      FTabRect: TRect;
+      FTabUid: String;
+      FOnCloseClick: TNotifyEvent;
+    protected
+      procedure Paint; override;
+      procedure MouseEnter; override;
+      procedure MouseLeave; override;
+      procedure MouseDown(Button: TMouseButton; Shift: TShiftState; X, Y: Integer); override;
+      procedure MouseUp(Button: TMouseButton; Shift: TShiftState; X, Y: Integer); override;
+    public
+      constructor Create(AOwner: TComponent); override;
+      procedure SetTab(const Uid: String; const ATabRect: TRect; Selected: Boolean);
+      procedure HideButton;
+      property TabUid: String read FTabUid;
+      property OnCloseClick: TNotifyEvent read FOnCloseClick write FOnCloseClick;
+  end;
+
   // Query tabs and contained components
   TQueryTab = class;
   TResultTab = class(TObject)
@@ -122,7 +145,6 @@ type
       Number: Integer;
       Uid: String;
       ExecutionThread: TQueryThread;
-      //CloseButton: TSpeedButton;
       pnlMemo: TPanel;
       Memo: TSynEdit;
       pnlHelpers: TPanel;
@@ -229,6 +251,14 @@ type
     function SetThumbnailClip(hwnd: HWND; var prcClip: TRect): LongInt; stdcall;
   end;
   {$ENDIF}
+
+  // Interposer for SynSQLSynUsed: lets each line in the given editor start with a reset highlighter
+  // state, so a snipped, unterminated string or comment does not spill over into the next log lines
+  TSynSQLSyn = class(SynHighlighterSQL.TSynSQLSyn)
+  public
+    SingleLineEditor: TSynEdit;
+    procedure SetRange(Value: Pointer); override;
+  end;
 
   { TMainForm }
 
@@ -899,7 +929,6 @@ type
     procedure actTableToolsExecute(Sender: TObject);
     procedure actPrintListExecute(Sender: TObject);
     procedure actCopyTableExecute(Sender: TObject);
-    procedure PageControlMainCloseTabClicked(Sender: TObject);
     procedure popupListHeaderPopup(Sender: TObject);
     procedure ShowStatusMsg(Msg: String=''; PanelNr: Integer=6);
     procedure actExecuteQueryExecute(Sender: TObject);
@@ -1095,10 +1124,10 @@ type
     procedure actCloseQueryTabExecute(Sender: TObject);
     procedure menuCloseQueryTabClick(Sender: TObject);
     procedure CloseQueryTab(PageIndex: Integer);
-    procedure CloseButtonOnMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
-    procedure CloseButtonOnMouseUp(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+    procedure TabCloseButtonClick(Sender: TObject);
+    procedure TabCloseHoverTimerTimer(Sender: TObject);
     function GetMainTabAt(X, Y: Integer): Integer;
-    procedure FixQueryTabCloseButtons;
+    procedure UpdateTabCloseButton;
     function GetOrCreateEmptyQueryTab(DoFocus: Boolean): TQueryTab;
     function ActiveSynMemo(AcceptReadOnlyMemo: Boolean): TSynEdit;
     function IsQueryTab(PageIndex: Integer; IncludeFixed: Boolean): Boolean;
@@ -1292,11 +1321,13 @@ type
   private
     FDelimiter: String;
     FLogToFile: Boolean;
+    FLogLineNumberOffset: Integer;
     FFileNameSessionLog: String;
     FFileHandleSessionLog: Textfile;
     FLastMouseUpOnPageControl: Cardinal;
     FLastTabNumberOnMouseUp: Integer;
-    FLastMouseDownCloseButton: TObject;
+    FTabCloseButton: TTabCloseButton;
+    FTabCloseHoverTimer: TTimer;
     FLastMouseButtonUpOnGrid: TMouseButton;
     //FJumpList: TJumpList;
     // Filter text per tab for filter panel
@@ -1389,6 +1420,9 @@ type
     function RunQueryFile(Filename: String; Encoding: TEncoding; Conn: TDBConnection;
       ProgressDialog: TfrmProgress; FilesizeSum: Int64; var CurrentPosition: Int64): Boolean;
     procedure SetLogToFile(Value: Boolean);
+    procedure AddLogLine(Line, SessionPath: String);
+    procedure SynMemoSQLLogFormatLineNumber(Sender: TSynGutterLineNumber; ALine: Integer; out AText: String;
+      const ALineInfo: TSynEditGutterLineInfo);
     procedure StoreLastSessions;
     function HandleUnixTimestampColumn(Sender: TBaseVirtualTree; Column: TColumnIndex): Boolean;
     function InitTabsIniFile: TIniFile;
@@ -1487,7 +1521,8 @@ var
   SysLanguage: String;
   MainFormCreated: Boolean = False;
   MainFormAfterCreateDone: Boolean = False;
-  PostponedLogItems: TDBLogItems;
+  // Log lines from before the main form was created, shown at the end of FormCreate
+  PostponedLogLines: TStringList;
 
 const
   CheckedStates = [csCheckedNormal, csCheckedPressed, csMixedNormal, csMixedPressed];
@@ -1501,7 +1536,7 @@ uses
   About, data_sorting, column_selection, loaddata, editvar,
   copytable, csv_detector, exportgrid, usermanager, rolemanagerpg, rolemanagermssql, reformatter, connections, sqlhelp, updatecheck,
   insertfiles, texteditor, preferences, table_editor, view, routine_editor, trigger_editor, event_editor, grideditlinks,
-  selectdbobject, redis_newkey, redisclient, dbeaver_import_dlg
+  selectdbobject, redis_newkey, redisclient, dbeaver_import_dlg, Themes
 {$IFDEF LCLQt6}
   , qt6, qtint, qtwidgets
 {$ENDIF}
@@ -1511,6 +1546,18 @@ uses
   ;
 
 {$R *.lfm}
+
+type
+  TSynEditAccess = class(TSynEdit);
+
+procedure TSynSQLSyn.SetRange(Value: Pointer);
+begin
+  if Assigned(SingleLineEditor)
+    and ((CurrentLines = TSynEditAccess(SingleLineEditor).TextBuffer)
+      or (CurrentLines = TSynEditAccess(SingleLineEditor).ViewedTextBuffer)) then
+    Value := nil;
+  inherited SetRange(Value);
+end;
 
 { TMainForm }
 
@@ -2220,6 +2267,10 @@ begin
   SetupSynEditors;
 
   PageControlMain.MultiLine := AppSettings.ReadBool(asTabsInMultipleLines);
+  {$IFNDEF WINDOWS}
+  // MultiLine is only implemented in the Win32 widgetset
+  menuTabsInMultipleLines.Visible := False;
+  {$ENDIF}
   SetMainTab(tabHost);
 
   // Filter panel
@@ -2272,6 +2323,9 @@ begin
 
   // Now we are free to use certain methods, which are otherwise fired too early
   MainFormCreated := True;
+  for i:=0 to PostponedLogLines.Count-1 do
+    AddLogLine(PostponedLogLines[i], '');
+  FreeAndNil(PostponedLogLines);
 
   // Log some application details - useful when analyzing session logs
   LogSQL(f_('App path: "%s"', [Application.ExeName]), lcDebug);
@@ -2279,6 +2333,17 @@ begin
   LogSQL(f_('Version: "%s"', [AppVersion]), lcDebug);
   LogSQL(f_('Pixels per inch on current monitor: %d', [Monitor.PixelsPerInch]), lcDebug);
   LogSQL(f_('Timezone offset: %d', [FTimeZoneOffset]), lcDebug);
+
+  // Close button on query tabs, shown only while the mouse hovers a closable tab
+  FTabCloseButton := TTabCloseButton.Create(Self);
+  FTabCloseButton.Visible := False;
+  FTabCloseButton.Parent := PageControlMain.Parent;
+  FTabCloseButton.Hint := actCloseQueryTab.Caption;
+  FTabCloseButton.ShowHint := True;
+  FTabCloseButton.OnCloseClick := TabCloseButtonClick;
+  FTabCloseHoverTimer := TTimer.Create(Self);
+  FTabCloseHoverTimer.Interval := 100;
+  FTabCloseHoverTimer.OnTimer := TabCloseHoverTimerTimer;
 end;
 
 
@@ -2933,7 +2998,7 @@ begin
     StatusBar.Panels[5].Width, ProgressBarStatus.Height);
 
   //lblDataTop.Width := pnlDataTop.Width - tlbDataButtons.Width - 10;
-  FixQueryTabCloseButtons;
+  UpdateTabCloseButton;
 
   // Right aligned button
   // Do not set ToolBar.Align to alRight. See issue #1967
@@ -3056,7 +3121,7 @@ begin
     m := QueryTabs.ActiveMemo
   end else if Sender = actClearQueryLog then begin
     m := SynMemoSQLLog;
-    //m.Gutter.LineNumberStart := m.Gutter.LineNumberStart + m.Lines.Count;
+    Inc(FLogLineNumberOffset, m.Lines.Count);
   end else begin
     m := SynMemoFilter;
     editFilterSearch.Clear;
@@ -3921,6 +3986,7 @@ var
   ContentStream: TMemoryStream;
   StrLen, ResultCol: Integer;
   Graphic: TGraphic;
+  BinData: TBytes;
 begin
   // Load BLOB contents into preview area
   Grid := ActiveGrid;
@@ -3940,13 +4006,26 @@ begin
     RowNum := Grid.GetNodeData(Grid.FocusedNode);
     Results.RecNo := RowNum^;
 
-    Content := AnsiString(Results.Col(ResultCol));
-    StrLen := Results.ColumnLengths(ResultCol);
+    // Prefer raw bytes. ColumnLengths() is the field's buffer size on some connections, see #846
+    Content := '';
+    BinData := nil;
+    try
+      if Results.GetColBinData(ResultCol, BinData) then begin
+        if Length(BinData) > 0 then
+          SetString(Content, PAnsiChar(@BinData[0]), Length(BinData));
+      end else
+        Content := AnsiString(Results.Col(ResultCol));
+    except
+      // Not implemented on this connection type
+      on E:EDbError do
+        Content := AnsiString(Results.Col(ResultCol));
+    end;
+    StrLen := Length(Content);
     ContentStream := TMemoryStream.Create;
-    ContentStream.Write(Content[1], StrLen);
+    if StrLen > 0 then
+      ContentStream.Write(Content[1], StrLen);
     ContentStream.Position := 0;
     Graphic := nil;
-    ContentStream.Position := 0;
     ImgType := 'UnknownType';
     Header := Copy(Content, 1, 50);
     if Copy(Header, 7, 4) = 'JFIF' then begin
@@ -3974,9 +4053,9 @@ begin
         on E:Exception do
           lblPreviewTitle.Caption := ImgType+': ' + E.Message + ' ('+E.ClassName+')';
       end;
-      FreeAndNil(ContentStream);
     end else
       lblPreviewTitle.Caption := f_('No image detected, %s', [FormatByteNumber(StrLen)]);
+    ContentStream.Free;
   finally
     lblPreviewTitle.Hint := lblPreviewTitle.Caption;
     ShowStatusMsg;
@@ -6005,98 +6084,97 @@ end;
 
 {**
   Add a SQL-command or comment to SynMemoSQLLog
+  Caution: may be called with Self=nil, before the main form is created
 }
 procedure TMainForm.LogSQL(Msg: String; Category: TDBLogCategory=lcInfo; Connection: TDBConnection=nil);
 var
-  snip, IsSQL: Boolean;
-  Len, i, MaxLineWidth: Integer;
+  LogIt, IsSQL: Boolean;
+  MaxLineWidth: Integer;
   Sess, OldSettingsPath: String;
-  LogIt: Boolean;
-  LogItem: TDBLogItem;
 begin
   OldSettingsPath := AppSettings.SessionPath;
-  LogItem := TDBLogItem.Create;
-  LogItem.Category := Category;
-  if AppSettings.ReadBool(asLogTimestamp) then
-    LogItem.LineText := '['+FormatDateTime('hh:nn:ss.zzz', Now)+'] '+ Msg
-  else
-    LogItem.LineText := Msg;
-  LogItem.Connection := Connection;
-  PostponedLogItems.Add(LogItem);
 
-  if not MainFormCreated then
-    Exit;
-  if csDestroying in ComponentState then
-    Exit;
+  // Log only wanted events
+  case Category of
+    lcError: LogIt := AppSettings.ReadBool(asLogErrors);
+    lcUserFiredSQL: LogIt := AppSettings.ReadBool(asLogUserSQL);
+    lcSQL: LogIt := AppSettings.ReadBool(asLogSQL);
+    lcScript: LogIt := AppSettings.ReadBool(asLogScript);
+    lcInfo: LogIt := AppSettings.ReadBool(asLogInfos);
+    lcDebug: LogIt := AppSettings.ReadBool(asLogDebug);
+    else LogIt := False;
+  end;
 
-  for LogItem in PostponedLogItems do begin
+  if LogIt then begin
+    if AppSettings.ReadBool(asLogTimestamp) then
+      Msg := '['+FormatDateTime('hh:nn:ss.zzz', Now)+'] ' + Msg;
+    // Shorten very long messages
+    IsSQL := Category in [lcSQL, lcUserFiredSQL];
+    MaxLineWidth := AppSettings.ReadInt(asLogsqlwidth);
+    if (MaxLineWidth > 0) and (Length(Msg) > MaxLineWidth) then
+      Msg := Copy(Msg, 1, MaxLineWidth) + '...'
+    else if IsSQL then
+      Msg := Msg + Delimiter;
+    if not IsSQL then
+      Msg := '/* ' + Msg + ' */';
 
-    // Log only wanted events
-    case LogItem.Category of
-      lcError: LogIt := AppSettings.ReadBool(asLogErrors);
-      lcUserFiredSQL: LogIt := AppSettings.ReadBool(asLogUserSQL);
-      lcSQL: LogIt := AppSettings.ReadBool(asLogSQL);
-      lcScript: LogIt := AppSettings.ReadBool(asLogScript);
-      lcInfo: LogIt := AppSettings.ReadBool(asLogInfos);
-      lcDebug: LogIt := AppSettings.ReadBool(asLogDebug);
-      else LogIt := False;
-    end;
-
-    if LogIt then begin
-      // Shorten very long messages
-      Msg := LogItem.LineText;
-      Len := Length(Msg);
-      MaxLineWidth := AppSettings.ReadInt(asLogsqlwidth);
-      snip := (MaxLineWidth > 0) and (Len > MaxLineWidth);
-      IsSQL := LogItem.Category in [lcSQL, lcUserFiredSQL];
-      if snip then begin
-        Msg := Copy(Msg, 1, MaxLineWidth) + '...';
-      end else if (not snip) and IsSQL then
-        Msg := Msg + Delimiter;
-      if not IsSQL then
-        Msg := '/* ' + Msg + ' */';
-
-      SynMemoSQLLog.Lines.Add(Msg);
-
-      // Delete first line(s) in SQL log and adjust LineNumberStart in gutter
-      i := 0;
-      while SynMemoSQLLog.Lines.Count > AppSettings.ReadInt(asLogsqlnum) do begin
-        SynMemoSQLLog.Lines.Delete(0);
-        Inc(i);
-      end;
-      // Increase first displayed number in gutter so it doesn't lie about the log entries
-      // Lazarus Synedit has no LineNumberStart
-      //if i > 0 then
-      //  SynMemoSQLLog.Gutter.LineNumberStart := SynMemoSQLLog.Gutter.LineNumberStart + i;
-
-      // Scroll to last line and repaint
-      SynMemoSQLLog.CaretY := SynMemoSQLLog.Lines.Count;
-      // Causes access violations on a reconnected session firing a user-query:
-      // SynMemoSQLLog.Repaint;
-      SynMemoSQLLog.Update; // Experimental: immediately shows new lines on heavy operations, enhancing user experience. Disable when crashes happen again!
-      // See TDBConnection.Log and TQueryThread.LogFromThread
-      // See https://github.com/HeidiSQL/HeidiSQL/issues/57
-
-      // Log to file?
-      if FLogToFile then
-      try
-        Sess := '';
-        if LogItem.Connection <> nil then
-          Sess := LogItem.Connection.Parameters.SessionPath;
-        WriteLn(FFileHandleSessionLog, Format('/* %s [%s] */ %s', [DateTimeToStr(Now), Sess, msg]));
-      except
-        on E:Exception do begin
-          LogToFile := False;
-          AppSettings.WriteBool(asLogToFile, False);
-          ErrorDialog(_('Error writing to session log file.'), E.Message+CRLF+_('Filename')+': '+FFileNameSessionLog+CRLF+CRLF+_('Logging is disabled now.'));
-        end;
-      end;
+    if not MainFormCreated then
+      PostponedLogLines.Add(Msg)
+    else if not (csDestroying in ComponentState) then begin
+      Sess := '';
+      if Connection <> nil then
+        Sess := Connection.Parameters.SessionPath;
+      AddLogLine(Msg, Sess);
     end;
   end;
-  PostponedLogItems.Clear;
 
   // Restore possibly overwritten session path
   AppSettings.SessionPath := OldSettingsPath;
+end;
+
+
+procedure TMainForm.AddLogLine(Line, SessionPath: String);
+var
+  LineNumberPart: TSynGutterLineNumber;
+begin
+  SynMemoSQLLog.Lines.Add(Line);
+
+  // Delete first line(s) in SQL log, and let the gutter continue counting
+  while SynMemoSQLLog.Lines.Count > AppSettings.ReadInt(asLogsqlnum) do begin
+    SynMemoSQLLog.Lines.Delete(0);
+    Inc(FLogLineNumberOffset);
+  end;
+  LineNumberPart := SynMemoSQLLog.Gutter.LineNumberPart;
+  if (FLogLineNumberOffset > 0) and Assigned(LineNumberPart) then
+    LineNumberPart.DigitCount := Length(IntToStr(FLogLineNumberOffset + SynMemoSQLLog.Lines.Count));
+
+  // Scroll to last line and repaint
+  SynMemoSQLLog.CaretY := SynMemoSQLLog.Lines.Count;
+  // Causes access violations on a reconnected session firing a user-query:
+  // SynMemoSQLLog.Repaint;
+  SynMemoSQLLog.Update; // Experimental: immediately shows new lines on heavy operations, enhancing user experience. Disable when crashes happen again!
+  // See TDBConnection.Log and TQueryThread.LogFromThread
+  // See https://github.com/HeidiSQL/HeidiSQL/issues/57
+
+  // Log to file?
+  if FLogToFile then
+  try
+    WriteLn(FFileHandleSessionLog, Format('/* %s [%s] */ %s', [DateTimeToStr(Now), SessionPath, Line]));
+  except
+    on E:Exception do begin
+      LogToFile := False;
+      AppSettings.WriteBool(asLogToFile, False);
+      ErrorDialog(_('Error writing to session log file.'), E.Message+CRLF+_('Filename')+': '+FFileNameSessionLog+CRLF+CRLF+_('Logging is disabled now.'));
+    end;
+  end;
+end;
+
+
+procedure TMainForm.SynMemoSQLLogFormatLineNumber(Sender: TSynGutterLineNumber; ALine: Integer; out AText: String;
+  const ALineInfo: TSynEditGutterLineInfo);
+begin
+  // Count log lines including those deleted from the top, so line numbers don't lie about the log entries
+  AText := Sender.FormatLineNumber(ALine + FLogLineNumberOffset, ALineInfo.ShowDot);
 end;
 
 
@@ -6508,7 +6586,11 @@ begin
           and (not IsKeyColumn) // We need full length of any key column, so DataGridLoadFullRow() has the chance to fetch the right row
           and ((ColMaxLen > GRIDMAXDATA) or (ColMaxLen = 0)) // No need to blow SQL with LEFT() if column is shorter anyway
           then begin
-            Select := Select + DBObj.Connection.SqlProvider.GetSql(qFuncLeft, [c.CastAsText, GRIDMAXDATA]) + ', ';
+            if DBObj.Connection.Parameters.IsAnyMSSQL and (c.DataType.Category = dtcBinary) then
+              // LEFT() returns VARCHAR for binary input on MSSQL, SUBSTRING() keeps VARBINARY, see #938
+              Select := Select + 'SUBSTRING(' + DBObj.Connection.QuoteIdent(c.Name) + ', 1, ' + IntToStr(GRIDMAXDATA) + '), '
+            else
+              Select := Select + DBObj.Connection.SqlProvider.GetSql(qFuncLeft, [c.CastAsText, GRIDMAXDATA]) + ', ';
           end else if DBObj.Connection.Parameters.IsAnyMSSQL and (c.DataType.Index=dbdtTimestamp) then begin
             Select := Select + ' CAST(' + DBObj.Connection.QuoteIdent(c.Name) + ' AS INT), ';
           end else if DBObj.Connection.Parameters.IsAnyMSSQL and (c.DataType.Index=dbdtHierarchyid) then begin
@@ -6872,7 +6954,7 @@ begin
 
   // Ensure controls are in a valid state
   ValidateControls(Sender);
-  FixQueryTabCloseButtons;
+  UpdateTabCloseButton;
 end;
 
 
@@ -7185,7 +7267,7 @@ begin
       cap := Copy(cap, 1, Length(cap)-1);
     if Tab.Memo.Modified then
       cap := cap + '*';
-    if Tab.TabSheet.Caption <> cap then
+    if TrimRight(Tab.TabSheet.Caption) <> cap then
       SetTabCaption(Tab.TabSheet.PageIndex, cap);
   end;
   InQueryTab := QueryTabs.HasActiveTab;
@@ -10990,7 +11072,7 @@ begin
   FTreeClickHistory[Length(FTreeClickHistory)-1] := Node;
 
   DBTree.InvalidateColumn(0);
-  FixQueryTabCloseButtons;
+  UpdateTabCloseButton;
   SetWindowCaption;
 end;
 
@@ -13920,7 +14002,7 @@ begin
   PageControlMain.Pages[PageIndex].Free;
   QueryTabs.Delete(PageIndex-tabQuery.PageIndex);
   PageControlMain.ActivePageIndex := NewPageIndex;
-  FixQueryTabCloseButtons;
+  UpdateTabCloseButton;
   //LockWindowUpdate(0);
   PageControlMain.OnChange(PageControlMain);
 end;
@@ -14124,29 +14206,172 @@ begin
 end;
 
 
-procedure TMainForm.CloseButtonOnMouseDown(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+{ TTabCloseButton }
+
+constructor TTabCloseButton.Create(AOwner: TComponent);
 begin
-  FLastMouseDownCloseButton := Sender;
+  inherited Create(AOwner);
+  ControlStyle := ControlStyle + [csCaptureMouse, csOpaque] - [csSetCaption];
+  FTabUid := '';
 end;
 
 
-procedure TMainForm.CloseButtonOnMouseUp(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+procedure TTabCloseButton.SetTab(const Uid: String; const ATabRect: TRect; Selected: Boolean);
 begin
-  // Click on "Close" button of Query tab
+  // ATabRect: bounds of the underlying tab, in our own client coordinates
+  if (Uid <> FTabUid) or (not EqualRect(ATabRect, FTabRect)) or (Selected <> FTabSelected) then begin
+    FTabUid := Uid;
+    FTabRect := ATabRect;
+    FTabSelected := Selected;
+    Invalidate;
+  end;
+end;
+
+
+procedure TTabCloseButton.HideButton;
+begin
+  // MouseLeave is not fired when hiding while hovered
+  FHot := False;
+  FPressed := False;
+  Visible := False;
+end;
+
+
+procedure TTabCloseButton.Paint;
+var
+  R: TRect;
+  CrossSize, Thickness, L, T, i: Integer;
+  {$IFDEF WINDOWS}
+  Details: TThemedElementDetails;
+  {$ENDIF}
+
+  procedure FillRoundedGradient(TopColor, BottomColor: TColor);
+  var
+    y, dy, Inset, Radius, Percent: Integer;
+    C1, C2: TColor;
+  begin
+    // Vertical gradient, row by row, with rounded corners. Avoids RoundRect, which
+    // paints the right and bottom edge differently depending on pen style and widgetset.
+    C1 := ColorToRGB(TopColor);
+    C2 := ColorToRGB(BottomColor);
+    Radius := Scale96ToForm(2);
+    Canvas.Pen.Style := psSolid;
+    Canvas.Pen.Width := 1;
+    for y:=0 to Height-1 do begin
+      Percent := IfThen(Height > 1, y * 100 div (Height-1), 0);
+      Canvas.Pen.Color := RGBToColor(
+        Red(C1) + (Red(C2) - Red(C1)) * Percent div 100,
+        Green(C1) + (Green(C2) - Green(C1)) * Percent div 100,
+        Blue(C1) + (Blue(C2) - Blue(C1)) * Percent div 100
+        );
+      dy := 0;
+      if y < Radius then
+        dy := Radius - y
+      else if y >= Height - Radius then
+        dy := y - (Height - Radius - 1);
+      Inset := 0;
+      if dy > 0 then
+        Inset := Radius - Round(Sqrt(Sqr(Radius) - Sqr(dy - 0.5)));
+      Canvas.Line(Inset, y, Width - Inset, y);
+    end;
+  end;
+
+begin
+  R := ClientRect;
+  // Background: paint the part of the tab we are covering, so the button blends in
+  {$IFDEF WINDOWS}
+  if ThemeServices.ThemesEnabled then begin
+    if FTabSelected then
+      Details := ThemeServices.GetElementDetails(ttTabItemSelected)
+    else
+      Details := ThemeServices.GetElementDetails(ttTabItemHot);
+    ThemeServices.DrawElement(Canvas.Handle, Details, FTabRect, @R);
+  end else
+  {$ENDIF}
+  begin
+    Canvas.Brush.Color := clBtnFace;
+    Canvas.FillRect(R);
+  end;
+
+  // Gray background, red gradient like a window close button when hovered, darker red when pressed
+  if FPressed then
+    FillRoundedGradient($1C0EC0, $140A90)
+  else if FHot then
+    FillRoundedGradient($5C52F2, $1E0FC8)
+  else
+    FillRoundedGradient(clBtnShadow, clBtnShadow);
+
+  // The "x", painted pixel by pixel instead of using LineTo, which places thicker
+  // pens asymmetrically. Button size and cross size are both even, so the margins
+  // between cross and button edges are equal on all sides.
+  CrossSize := Max(4, (Min(Width, Height) * 3 div 5) and not 1);
+  Thickness := Max(1, Scale96ToForm(1));
+  L := (Width - CrossSize) div 2;
+  T := (Height - CrossSize) div 2;
+  Canvas.Brush.Color := clWhite;
+  for i:=0 to CrossSize - Thickness do begin
+    // Top left to bottom right
+    Canvas.FillRect(Rect(L+i, T+i, L+i+Thickness, T+i+Thickness));
+    // Top right to bottom left
+    Canvas.FillRect(Rect(L+CrossSize-Thickness-i, T+i, L+CrossSize-i, T+i+Thickness));
+  end;
+end;
+
+
+procedure TTabCloseButton.MouseEnter;
+begin
+  inherited;
+  FHot := True;
+  Invalidate;
+end;
+
+
+procedure TTabCloseButton.MouseLeave;
+begin
+  inherited;
+  FHot := False;
+  FPressed := False;
+  Invalidate;
+end;
+
+
+procedure TTabCloseButton.MouseDown(Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+begin
+  inherited;
+  if Button = mbLeft then begin
+    FPressed := True;
+    Invalidate;
+  end;
+end;
+
+
+procedure TTabCloseButton.MouseUp(Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+var
+  WasPressed: Boolean;
+begin
+  inherited;
   if Button <> mbLeft then
     Exit;
-  // Between MousDown and MouseUp it is possible that the focused tab has switched. As we simulate a mouse-click
-  // here, we must check if also the MouseDown event was fired on this particular button. See issue #1469.
-  if (Sender <> FLastMouseDownCloseButton) then
-    Exit;
-  // Prevent EAccessViolation in TControl.GetClientWidth, see issue #1640
+  WasPressed := FPressed;
+  FPressed := False;
+  Invalidate;
+  if WasPressed and PtInRect(ClientRect, Point(X, Y)) and Assigned(FOnCloseClick) then
+    FOnCloseClick(Self);
+end;
+
+
+procedure TMainForm.TabCloseButtonClick(Sender: TObject);
+begin
+  // Close the tab asynchronously, as the button itself gets hidden.
+  // Also prevents EAccessViolation in TControl.GetClientWidth, see issue #1640
+  FTabCloseButton.HideButton;
   TimerCloseTabByButton.Enabled := True;
 end;
 
-procedure TMainForm.PageControlMainCloseTabClicked(Sender: TObject);
+
+procedure TMainForm.TabCloseHoverTimerTimer(Sender: TObject);
 begin
-  logsql('PageControlMainCloseTabClicked');
-  TimerCloseTabByButton.Enabled := True;
+  UpdateTabCloseButton;
 end;
 
 procedure TMainForm.popupListHeaderPopup(Sender: TObject);
@@ -14180,13 +14405,13 @@ procedure TMainForm.TimerCloseTabByButtonTimer(Sender: TObject);
 var
   i: Integer;
 begin
-  // Asynchronous timer for mousedown event on query tab close button
+  // Asynchronous timer for click event on query tab close button
   TimerCloseTabByButton.Enabled := False;
   for i:=0 to QueryTabs.Count-1 do begin
-    {if QueryTabs[i].CloseButton = FLastMouseDownCloseButton then begin
+    if (FTabCloseButton.TabUid <> '') and (QueryTabs[i].Uid = FTabCloseButton.TabUid) then begin
       CloseQueryTab(QueryTabs[i].TabSheet.PageIndex);
-      break;
-    end;}
+      Break;
+    end;
   end;
 end;
 
@@ -14239,36 +14464,86 @@ begin
 end;
 
 
-procedure TMainForm.FixQueryTabCloseButtons;
-{var
-  i, PageIndex, VisiblePageIndex: Integer;
-  Rect: TRect;
-  btn: TSpeedButton;}
+procedure TMainForm.UpdateTabCloseButton;
+var
+  CursorPos, ClientPos, ParentPos: TPoint;
+  PageIndex, Size, Margin: Integer;
+  TabR, BtnR, BtnScreenR: TRect;
+  Tab: TQueryTab;
+  HoverTab: TQueryTab;
 begin
-  // Fix positions of "Close" buttons on Query tabs
+  // Show the close button on the closable query tab below the mouse cursor, hide it otherwise.
+  // Called periodically by FTabCloseHoverTimer, and after tab changes.
   // Avoid AV on Startup, when Mainform.OnResize is called once or twice implicitely.
-  {if not Assigned(FBtnAddTab) then
+  if not Assigned(FTabCloseButton) then
     Exit;
-  for PageIndex:=tabQuery.PageIndex+1 to PageControlMain.PageCount-1 do begin
-    VisiblePageIndex := PageIndex;
-    for i:=0 to PageControlMain.PageCount-1 do begin
-      if (i<=VisiblePageIndex) and (not PageControlMain.Pages[i].TabVisible) then
-        Dec(VisiblePageIndex);
+  HoverTab := nil;
+  TabR := Rect(0, 0, 0, 0);
+  if Visible
+    and (WindowState <> wsMinimized)
+    and (Screen.ActiveForm = Self)
+    and PageControlMain.HandleAllocated
+    and PageControlMain.IsVisible
+    and Assigned(QueryTabs)
+    then begin
+    CursorPos := Mouse.CursorPos;
+    BtnScreenR := Rect(0, 0, 0, 0);
+    if FTabCloseButton.Visible then begin
+      BtnScreenR.TopLeft := FTabCloseButton.ClientToScreen(Point(0, 0));
+      BtnScreenR.BottomRight := FTabCloseButton.ClientToScreen(Point(FTabCloseButton.Width, FTabCloseButton.Height));
     end;
-    Rect := PageControlMain.TabRect(VisiblePageIndex);
-    btn := QueryTabs[PageIndex-tabQuery.PageIndex].CloseButton;
-    btn.Top := Rect.Top + 2;
-    btn.Left := Rect.Right - 19;
+    if PtInRect(BtnScreenR, CursorPos) then begin
+      // Mouse is over the button itself: keep the tab it belongs to
+      for Tab in QueryTabs do begin
+        if Tab.Uid = FTabCloseButton.TabUid then begin
+          HoverTab := Tab;
+          Break;
+        end;
+      end;
+    end else begin
+      ClientPos := PageControlMain.ScreenToClient(CursorPos);
+      PageIndex := PageControlMain.IndexOfPageAt(ClientPos);
+      if (PageIndex > -1) and IsQueryTab(PageIndex, False) then begin
+        for Tab in QueryTabs do begin
+          if Tab.TabSheet = PageControlMain.Pages[PageIndex] then begin
+            HoverTab := Tab;
+            Break;
+          end;
+        end;
+      end;
+    end;
+
+    if Assigned(HoverTab) and HoverTab.TabSheet.TabVisible then begin
+      TabR := PageControlMain.TabRect(PageControlMain.PageToTabIndex(HoverTab.TabSheet.PageIndex));
+      if TabR.IsEmpty then
+        HoverTab := nil;
+    end else
+      HoverTab := nil;
   end;
-  // Set position of "Add tab" button
-  VisiblePageIndex := PageControlMain.PageCount-1;
-  for i:=0 to PageControlMain.PageCount-1 do begin
-    if not PageControlMain.Pages[i].TabVisible then
-      Dec(VisiblePageIndex);
+
+  if not Assigned(HoverTab) then begin
+    if FTabCloseButton.Visible then
+      FTabCloseButton.HideButton;
+    Exit;
   end;
-  Rect := PageControlMain.TabRect(VisiblePageIndex);
-  FBtnAddTab.Top := Rect.Top;
-  FBtnAddTab.Left := Rect.Right + 5;}
+
+  // Translate tab rectangle from PageControl client coordinates to the button's parent
+  ParentPos := FTabCloseButton.Parent.ScreenToClient(PageControlMain.ClientToScreen(TabR.TopLeft));
+  Types.OffsetRect(TabR, ParentPos.X - TabR.Left, ParentPos.Y - TabR.Top);
+  Margin := Scale96ToForm(3);
+  // Even size, for a centered "x"
+  Size := Min(TabR.Height - 2*Margin, Scale96ToForm(12)) and not 1;
+  BtnR.Left := TabR.Right - Size - Margin;
+  BtnR.Top := TabR.Top + (TabR.Height - Size) div 2;
+  BtnR.Right := BtnR.Left + Size;
+  BtnR.Bottom := BtnR.Top + Size;
+  FTabCloseButton.BoundsRect := BtnR;
+  Types.OffsetRect(TabR, -BtnR.Left, -BtnR.Top);
+  FTabCloseButton.SetTab(HoverTab.Uid, TabR, HoverTab.TabSheet = PageControlMain.ActivePage);
+  if not FTabCloseButton.Visible then begin
+    FTabCloseButton.Visible := True;
+    FTabCloseButton.BringToFront;
+  end;
 end;
 
 
@@ -14423,11 +14698,11 @@ begin
         end;
       end;
     end;
-    // Leave space for close button on closable query tabs
-    //Text := Text + '      ';
+    // Leave space for the hover close button on closable query tabs
+    Text := Text + '     ';
   end;
   PageControlMain.Pages[PageIndex].Caption := Text;
-  FixQueryTabCloseButtons;
+  UpdateTabCloseButton;
 end;
 
 
@@ -14705,6 +14980,8 @@ begin
   if Assigned(LineNumberPart) then begin
     LineNumberPart.LeftOffset := 2;
     LineNumberPart.MarkupInfo.Foreground := clGrayText;
+    if Editor = SynMemoSQLLog then
+      LineNumberPart.OnFormatLineNumber := SynMemoSQLLogFormatLineNumber;
   end;
   Editor.BorderStyle := BaseEditor.BorderStyle;
   Editor.BookMarkOptions.BookmarkImages := ImageListSynBookMarks;
@@ -14728,8 +15005,10 @@ begin
   Editor.LineHighlightColor.Background := AppColorSchemes.First.ActiveLineBackground;
   Editor.Options := BaseEditor.Options;
   Editor.Options2 := BaseEditor.Options2;
-  if Editor = SynMemoSQLLog then
+  if Editor = SynMemoSQLLog then begin
     Editor.Options := Editor.Options + [eoRightMouseMovesCursor];
+    SynSQLSynUsed.SingleLineEditor := SynMemoSQLLog;
+  end;
   Editor.TabWidth := AppSettings.ReadInt(asTabWidth);
   Editor.RightEdge := BaseEditor.RightEdge;
   //Editor.MaxScrollWidth := BaseEditor.MaxScrollWidth;
@@ -16734,6 +17013,7 @@ begin
   Grid.TreeOptions := OrgGrid.TreeOptions;
   Grid.PopupMenu := OrgGrid.PopupMenu;
   Grid.LineStyle := OrgGrid.LineStyle;
+  Grid.TextMargin := OrgGrid.TextMargin;
   Grid.EditDelay := OrgGrid.EditDelay;
   Grid.Font.Assign(OrgGrid.Font);
   Grid.Header.Options := OrgGrid.Header.Options;
