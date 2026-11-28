@@ -308,6 +308,7 @@ type
       FPort, FSSHPort, FSSHLocalPort, FSSHTimeout, FCounter, FQueryTimeout, FKeepAlive, FSSLVerification: Integer;
       FSSHActive, FLoginPrompt, FCompressed, FLocalTimeZone, FFullTableStatus,
       FWindowsAuth, FWantSSL, FIsFolder, FCleartextPluginEnabled, FForceUnicode: Boolean;
+      FConvertedFromLegacyNetType: Boolean;
       FSessionColor: TColor;
       FLastConnect: TDateTime;
       FLogFileDdl: Boolean;
@@ -339,7 +340,10 @@ type
       function IsAnyOracle: Boolean;
       function IsAnySnowflake: Boolean;
       // Connected through an ODBC driver, see TOdbcConnection
+      // Oracle and Snowflake: dialects only available through ODBC
       function IsAnyOdbc: Boolean;
+      // Any net type connecting through an installed ODBC driver, including MS SQL (ODBC)
+      function UsesOdbcDriver: Boolean;
       function OdbcDriverHint: String;
       function IsMariaDB: Boolean;
       function IsMySQL(StrictDetect: Boolean): Boolean;
@@ -382,6 +386,9 @@ type
       property Password: String read FPassword write FPassword;
       property LoginPrompt: Boolean read FLoginPrompt write FLoginPrompt;
       property WindowsAuth: Boolean read FWindowsAuth write FWindowsAuth;
+      // MS SQL via named pipe, SPX, VINES or RPC from the Delphi version, now TCP/IP
+      procedure ConvertLegacyNetType;
+      property ConvertedFromLegacyNetType: Boolean read FConvertedFromLegacyNetType;
       property CleartextPluginEnabled: Boolean read FCleartextPluginEnabled write FCleartextPluginEnabled;
       property ForceUnicode: Boolean read FForceUnicode write FForceUnicode;
       property AllDatabasesStr: String read FAllDatabases write FAllDatabases;
@@ -527,6 +534,14 @@ type
       procedure PrefetchResults(SQL: String);
       procedure FreeResults(Results: TDBQuery);
       function IsTextDefault(Value: String; Tp: TDBDatatype): Boolean;
+      // MS SQL dictionary code, shared by TSqlSrvConnection (FreeTDS) and TMssqlOdbcConnection
+      procedure MssqlDetectServerInfo;
+      procedure MssqlDoAfterConnect;
+      function MssqlGetAllDatabases: TStringList;
+      procedure MssqlFetchDbObjects(db: String; var Cache: TDBObjectList);
+      function MssqlCompleteTableColumns(Table: TDBObject; Columns: TTableColumnList): TTableColumnList;
+      function MssqlGetTableKeys(Table: TDBObject): TTableKeyList;
+      function MssqlGetTableForeignKeys(Table: TDBObject): TForeignKeyList;
     public
       constructor Create(AOwner: TComponent); override;
       destructor Destroy; override;
@@ -875,12 +890,21 @@ type
       procedure SetRunningStmt(Stmt: TOdbcStmt);
       procedure FreeHandles;
     protected
+      // Seconds for SQL_ATTR_QUERY_TIMEOUT on each statement, 0 = no timeout
+      FStmtQueryTimeout: Integer;
+      // Execute all statements via Open, also those without result columns after SQLPrepare.
+      // MS SQL: stored procedures, and DML with an OUTPUT clause return rows.
+      FOpenAllStatements: Boolean;
       // Set driver specific connection string parameters
       procedure PrepareHandle(FinalHost: String; FinalPort: Integer); virtual; abstract;
       // Fetch server version etc., right after the handle got opened
       procedure AfterHandleOpened; virtual; abstract;
       function PingSQL: String; virtual; abstract;
+      // Additional hint for a failed connection attempt
+      function ConnectErrorHint(const Error: String): String; virtual;
     public
+      // Data type of a result column, in TOdbcQuery
+      function FieldDatatypeIndex(Field: TField): TDBDatatypeIndex; virtual;
       constructor Create(AOwner: TComponent); override;
       destructor Destroy; override;
       procedure Query(SQL: String; DoStoreResult: Boolean=False; LogCategory: TDBLogCategory=lcSQL); override;
@@ -906,6 +930,30 @@ type
     public
       constructor Create(AOwner: TComponent); override;
       function GetCreateCode(Obj: TDBObject): String; override;
+      function GetTableColumns(Table: TDBObject): TTableColumnList; override;
+      function GetTableKeys(Table: TDBObject): TTableKeyList; override;
+      function GetTableForeignKeys(Table: TDBObject): TForeignKeyList; override;
+      function GetGridColumnExpression(Col: TTableColumn): String; override;
+  end;
+
+  // MS SQL through Microsoft's ODBC driver, with encryption settings, which FreeTDS via
+  // dblib does not offer. SQL dialect and dictionary code are shared with TSqlSrvConnection.
+  TMssqlOdbcConnection = class(TOdbcConnection)
+    private
+      FIgnoredInstance: String;
+      FEncryptionRequested: Boolean;
+      function GetThreadId: Int64; override;
+      function GetAllDatabases: TStringList; override;
+      procedure FetchDbObjects(db: String; var Cache: TDBObjectList); override;
+    protected
+      procedure DoAfterConnect; override;
+      procedure PrepareHandle(FinalHost: String; FinalPort: Integer); override;
+      procedure AfterHandleOpened; override;
+      function PingSQL: String; override;
+      function ConnectErrorHint(const Error: String): String; override;
+    public
+      constructor Create(AOwner: TComponent); override;
+      function FieldDatatypeIndex(Field: TField): TDBDatatypeIndex; override;
       function GetTableColumns(Table: TDBObject): TTableColumnList; override;
       function GetTableKeys(Table: TDBObject): TTableKeyList; override;
       function GetTableForeignKeys(Table: TDBObject): TForeignKeyList; override;
@@ -1566,6 +1614,7 @@ begin
     FCleartextPluginEnabled := AppSettings.ReadBool(asCleartextPluginEnabled);
     FForceUnicode := AppSettings.ReadBool(asForceUnicode);
     FPort := MakeInt(AppSettings.ReadString(asPort));
+    ConvertLegacyNetType;
     FCompressed := AppSettings.ReadBool(asCompressed);
     FAllDatabases := AppSettings.ReadString(asDatabases);
     FLibraryOrProvider := AppSettings.ReadString(asLibrary);
@@ -1699,8 +1748,12 @@ begin
   case NetTypeGroup of
     ngMySQL:
       Result := TMySQLConnection.Create(AOwner);
-    ngMSSQL:
-      Result := TSqlSrvConnection.Create(AOwner);
+    ngMSSQL: begin
+      if FNetType = ntMSSQL_ODBC then
+        Result := TMssqlOdbcConnection.Create(AOwner)
+      else
+        Result := TSqlSrvConnection.Create(AOwner);
+    end;
     ngPgSQL:
       Result := TPgConnection.Create(AOwner);
     ngSQLite:
@@ -1725,8 +1778,12 @@ begin
   case NetTypeGroup of
     ngMySQL:
       Result := TMySQLQuery.Create(Connection);
-    ngMSSQL:
-      Result := TSqlSrvQuery.Create(Connection);
+    ngMSSQL: begin
+      if FNetType = ntMSSQL_ODBC then
+        Result := TOdbcQuery.Create(Connection)
+      else
+        Result := TSqlSrvQuery.Create(Connection);
+    end;
     ngPgSQL:
       Result := TPGQuery.Create(Connection);
     ngSQLite:
@@ -1788,6 +1845,7 @@ begin
       ntRedis_Cluster:          Result := 'Redis (Cluster, not yet implemented)';
       ntOracle_ODBC:            Result := PrefixOracle+' (ODBC, experimental)';
       ntSnowflake_ODBC:         Result := PrefixSnowflake+' (ODBC, experimental)';
+      ntMSSQL_ODBC:             Result := PrefixMssql+' (ODBC)';
     end;
   end
   else begin
@@ -1824,7 +1882,7 @@ begin
   case FNetType of
     ntMySQL_TCPIP, ntMySQL_NamedPipe, ntMySQL_SSHtunnel, ntMySQL_ProxySQLAdmin, ntMySQL_RDS, ntMySQL_ClickHouse:
       Result := ngMySQL;
-    ntMSSQL_NamedPipe, ntMSSQL_TCPIP, ntMSSQL_SPX, ntMSSQL_VINES, ntMSSQL_RPC:
+    ntMSSQL_NamedPipe, ntMSSQL_TCPIP, ntMSSQL_SPX, ntMSSQL_VINES, ntMSSQL_RPC, ntMSSQL_ODBC:
       Result := ngMSSQL;
     ntPgSQL_TCPIP, ntPgSQL_SSHtunnel:
       Result := ngPgSQL;
@@ -1850,7 +1908,7 @@ end;
 
 function TConnectionParameters.SshSupport: Boolean;
 begin
-  Result := FNetType in [ntMySQL_SSHtunnel, ntMySQL_RDS, ntPgSQL_SSHtunnel, ntMSSQL_TCPIP, ntRedis_SSHtunnel, ntOracle_ODBC];
+  Result := FNetType in [ntMySQL_SSHtunnel, ntMySQL_RDS, ntPgSQL_SSHtunnel, ntMSSQL_TCPIP, ntOracle_ODBC, ntMSSQL_ODBC, ntRedis_SSHtunnel];
 end;
 
 
@@ -1902,9 +1960,18 @@ begin
 end;
 
 
+function TConnectionParameters.UsesOdbcDriver: Boolean;
+begin
+  Result := IsAnyOdbc or (FNetType = ntMSSQL_ODBC);
+end;
+
+
 function TConnectionParameters.OdbcDriverHint: String;
 begin
   // Where to get the ODBC driver, which is installed by the user, not shipped with HeidiSQL
+  if FNetType = ntMSSQL_ODBC then
+    Exit(f_('Install the "Microsoft ODBC Driver for SQL Server" from %s.',
+      ['https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server']));
   case NetTypeGroup of
     ngOracle:
       Result := f_('Install the Oracle Instant Client packages "Basic" and "ODBC" from %s, and register the ODBC driver as described in its installation notes.',
@@ -2098,6 +2165,38 @@ begin
 end;
 
 
+procedure TConnectionParameters.ConvertLegacyNetType;
+var
+  rx: TRegExpr;
+  PipeName: String;
+begin
+  // ADO in the Delphi version supported more protocols than FreeTDS, which only has TCP/IP
+  if not (FNetType in [ntMSSQL_NamedPipe, ntMSSQL_SPX, ntMSSQL_VINES, ntMSSQL_RPC]) then
+    Exit;
+  FNetType := ntMSSQL_TCPIP;
+  FConvertedFromLegacyNetType := True;
+  FHostname := Trim(FHostname);
+  if FHostname.StartsWith('np:', True) then
+    Delete(FHostname, 1, 3);
+  rx := TRegExpr.Create;
+  rx.ModifierI := True;
+  // Pipe path: \\server\pipe\sql\query or \\server\pipe\MSSQL$instance\sql\query
+  rx.Expression := '^\\\\([^\\]+)\\pipe\\(.*)$';
+  if rx.Exec(FHostname) then begin
+    PipeName := rx.Match[2];
+    FHostname := rx.Match[1];
+    rx.Expression := '^MSSQL\$([^\\]+)\\';
+    if rx.Exec(PipeName) then
+      FHostname := FHostname + '\' + rx.Match[1];
+  end;
+  rx.Free;
+  if FHostname.IsEmpty then
+    FHostname := DefaultHost;
+  // The port was not used with these protocols and may hold anything. Without a port, FreeTDS
+  // connects to 1433, or finds a named instance through the SQL Server Browser.
+  FPort := DefaultPort;
+end;
+
 function TConnectionParameters.DefaultLibrary: String;
 var
   AllLibs: TStringList;
@@ -2151,7 +2250,7 @@ function TConnectionParameters.AdditionalParamsSupported: Boolean;
 begin
   // Client libraries with a key/value connection string, or an option file for MySQL.
   // MS SQL via FreeTDS has none.
-  Result := IsAnyMySQL or IsAnyPostgreSQL or IsAnyOdbc;
+  Result := IsAnyMySQL or IsAnyPostgreSQL or UsesOdbcDriver;
 end;
 
 
@@ -2217,6 +2316,24 @@ begin
 
   Result := ' ' + Implode(' ', Args);
   Args.Free;
+end;
+
+
+function MssqlOdbcDriverRank(const DriverName: String): Integer;
+begin
+  // "ODBC Driver 18 for SQL Server" > "ODBC Driver 17 ..." > "SQL Server Native Client 11.0" > "SQL Server"
+  Result := StrToIntDef(RegExprGetMatch('^ODBC Driver (\d+) for SQL Server', DriverName, 1), 0) * 10;
+  if (Result = 0) and ContainsText(DriverName, 'Native Client') then
+    Result := 2
+  else if Result = 0 then
+    Result := 1;
+end;
+
+function CompareMssqlOdbcDrivers(List: TStringList; Index1, Index2: Integer): Integer;
+begin
+  Result := MssqlOdbcDriverRank(List[Index2]) - MssqlOdbcDriverRank(List[Index1]);
+  if Result = 0 then
+    Result := CompareText(List[Index1], List[Index2]);
 end;
 
 
@@ -2298,7 +2415,14 @@ begin
           rx.Expression := '^(lib)?fbclient.*\.' + SharedSuffix;
         {$EndIf}
     end;
-    case NetTypeGroup of
+    if FNetType = ntMSSQL_ODBC then begin
+      // ODBC driver names, newest first: "ODBC Driver 18 for SQL Server", "ODBC Driver 17 ...",
+      // then the outdated "SQL Server Native Client 11.0" and "SQL Server" (Windows)
+      FoundLibs.Free;
+      FoundLibs := GetOdbcDriverNames('SQL Server');
+      FoundLibs.CustomSort(CompareMssqlOdbcDrivers);
+    end
+    else case NetTypeGroup of
       ngMySQL, ngMSSQL, ngPgSQL, ngSQLite, ngInterbase: begin
         {$if defined(LINUX) or defined(FREEBSD)}
         {$If defined(LINUX)}
@@ -2624,6 +2748,11 @@ end;
 
 procedure TOdbcConnection.SetRunningStmt(Stmt: TOdbcStmt);
 begin
+  // Called before the statement gets executed, so its timeout applies
+  if (Stmt <> OdbcNullStmt) and (FStmtQueryTimeout > 0) then begin
+    if not OdbcSetQueryTimeout(Stmt, FStmtQueryTimeout) then
+      Log(lcDebug, 'Could not set query timeout on ODBC statement');
+  end;
   // Must be reset before the statement handle gets freed
   EnterCriticalSection(FRunningStmtLock);
   try
@@ -2830,7 +2959,6 @@ var
   i: Integer;
   Status: TDBQuery;
   PasswordChangeDialog: TfrmPasswordChange;
-  {UserNameSize: DWORD;}
 begin
   if Value and (FHandle = nil) then begin
 
@@ -2905,13 +3033,12 @@ begin
 
     // User/Password
     if FParameters.WindowsAuth then begin
-      // Send Windows system user name and blank password, see #991
-      {UserNameSize := 1024;
-      SetLength(FinalUsername, UserNameSize);
-      if GetUserName(PChar(FinalUsername), UserNameSize) then
-        SetLength(FinalUsername, UserNameSize-1)
-      else
-        RaiseLastOSError;}
+      // Send the OS user name and a blank password, see #991
+      {$IFDEF WINDOWS}
+      FinalUsername := GetEnvironmentVariable('USERNAME');
+      {$ELSE}
+      FinalUsername := GetEnvironmentVariable('USER');
+      {$ENDIF}
       FinalPassword := '';
     end else begin
       // Normal mode, send user specified user/password
@@ -3127,23 +3254,78 @@ begin
 
 end;
 
+procedure TDBConnection.MssqlDetectServerInfo;
+var
+  ServerVersion: String;
+  rx: TRegExpr;
+begin
+  try
+    // Gracefully accept failure on MS Azure (SQL Server 11), which does not have a sysprocesses table
+    FServerUptime := StrToIntDef(GetVar('SELECT DATEDIFF(SECOND, '+QuoteIdent('login_time')+', CURRENT_TIMESTAMP) FROM '+QuoteIdent('master')+'.'+QuoteIdent('dbo')+'.'+QuoteIdent('sysprocesses')+' WHERE '+QuoteIdent('spid')+'=1'), -1);
+  except
+    FServerUptime := -1;
+  end;
+  FServerDateTimeOnStartup := GetVar('SELECT ' + FSqlProvider.GetSql(qFuncNow));
+  // Microsoft SQL Server 2008 R2 (RTM) - 10.50.1600.1 (Intel X86)
+  // Apr  2 2010 15:53:02
+  // Copyright (c) Microsoft Corporation
+  // Express Edition with Advanced Services on Windows NT 6.1 <X86> (Build 7600: )
+  FServerVersionUntouched := Trim(GetVar('SELECT @@VERSION'));
+  rx := TRegExpr.Create;
+  rx.ModifierI := False;
+  // Extract server OS
+  rx.Expression := '\s+on\s+([^\r\n]+)';
+  if rx.Exec(FServerVersionUntouched) then
+    FServerOS := rx.Match[1];
+  // Cut at first line break
+  rx.Expression := '^([^\r\n]+)';
+  if rx.Exec(FServerVersionUntouched) then
+    FServerVersionUntouched := rx.Match[1];
+  try
+    // Try to get more exact server version to avoid displaying "20.14" in some cases
+    ServerVersion := GetVar('SELECT SERVERPROPERTY('+EscapeString('ProductVersion')+')');
+    if ExecRegExpr('(\d+)\.(\d+)\.(\d+)\.(\d+)', ServerVersion) then
+      FServerVersionUntouched := Copy(FServerVersionUntouched, 1, Pos(' - ', FServerVersionUntouched)+2) + ServerVersion;
+  except
+    // Above query only works on SQL Server 2008 and newer
+    // Keep value from SELECT @@VERSION on older servers
+  end;
+  rx.Free;
+end;
+
 procedure TSqlSrvConnection.SetActive(Value: Boolean);
 var
-  Error, ServerVersion, ErrorHint: String;
-  FinalHost: String;
-  rx: TRegExpr;
-  FinalPort: Integer;
+  Error, ErrorHint: String;
+  FinalHost, IgnoredInstance, LocalAlias: String;
+  FinalPort, InstancePos: Integer;
 begin
   if Value then begin
-    if Parameters.NetType <> ntMSSQL_TCPIP then begin
-       raise EDbError.Create('No longer supported network type: '+Parameters.NetTypeName(True),
-           0,
-           'Please select the TCP/IP type for MS SQL instead');
-    end;
+    // Sessions from settings are converted when loaded, this catches command line parameters
+    Parameters.ConvertLegacyNetType;
 
     DoBeforeConnect;
+    if Parameters.ConvertedFromLegacyNetType then
+      Log(lcInfo, _('Named pipe and other legacy protocols are no longer supported, connecting via TCP/IP instead'));
     FinalHost := Parameters.Hostname;
     FinalPort := Parameters.Port;
+    // "server\instance": FreeTDS resolves the instance's port through the SQL Server Browser,
+    // but fails with an "unknown host" on "server\instance:port". As with ADO in the Delphi
+    // version, a given port takes precedence over the instance name.
+    InstancePos := Pos('\', FinalHost);
+    // ADO accepts "." and "(local)" for the local machine, FreeTDS reports an unknown host
+    LocalAlias := FinalHost;
+    if InstancePos > 0 then
+      LocalAlias := Copy(FinalHost, 1, InstancePos-1);
+    if (LocalAlias = '.') or SameText(LocalAlias, '(local)') then begin
+      FinalHost := '127.0.0.1' + Copy(FinalHost, Length(LocalAlias)+1, MaxInt);
+      InstancePos := Pos('\', FinalHost);
+    end;
+    IgnoredInstance := '';
+    if (InstancePos > 0) and (FinalPort > 0) then begin
+      IgnoredInstance := Copy(FinalHost, InstancePos+1, MaxInt);
+      FinalHost := Copy(FinalHost, 1, InstancePos-1);
+      Log(lcInfo, f_('Ignoring instance name "%s", connecting to port %d', [IgnoredInstance, FinalPort]));
+    end;
     StartSSHTunnel(FinalHost, FinalPort);
 
     FHandle := TFixedMSSQLConnection.Create(nil);
@@ -3157,10 +3339,19 @@ begin
     FTransaction.Database := FHandle;
 
     FHandle.Transaction := FTransaction;
-    FHandle.HostName := FinalHost + ':' + FinalPort.ToString;
-    //FHandle.Params.Values['Port'] := FinalPort;
-    FHandle.UserName := Parameters.Username;
-    FHandle.Password := Parameters.Password;
+    if FinalPort > 0 then
+      FHandle.HostName := FinalHost + ':' + FinalPort.ToString
+    else
+      FHandle.HostName := FinalHost;
+    if Parameters.WindowsAuth then begin
+      // An empty user name makes TMSSQLConnection call dbsetlsecure, so FreeTDS logs in
+      // with the current Windows account through SSPI
+      FHandle.UserName := '';
+      FHandle.Password := '';
+    end else begin
+      FHandle.UserName := Parameters.Username;
+      FHandle.Password := Parameters.Password;
+    end;
     FHandle.DatabaseName := 'master';
     FHandle.Params.Values['AutoCommit'] := 'true';
     FHandle.Params.Values['ApplicationName'] := AppClientName;
@@ -3176,38 +3367,7 @@ begin
       // CurCharset := CharacterSet;
       // Log(lcDebug, 'Characterset: '+CurCharset);
       //FHandle.CommandTimeout := Parameters.QueryTimeout;
-      try
-        // Gracefully accept failure on MS Azure (SQL Server 11), which does not have a sysprocesses table
-        FServerUptime := StrToIntDef(GetVar('SELECT DATEDIFF(SECOND, '+QuoteIdent('login_time')+', CURRENT_TIMESTAMP) FROM '+QuoteIdent('master')+'.'+QuoteIdent('dbo')+'.'+QuoteIdent('sysprocesses')+' WHERE '+QuoteIdent('spid')+'=1'), -1);
-      except
-        FServerUptime := -1;
-      end;
-      FServerDateTimeOnStartup := GetVar('SELECT ' + FSqlProvider.GetSql(qFuncNow));
-      // Microsoft SQL Server 2008 R2 (RTM) - 10.50.1600.1 (Intel X86)
-      // Apr  2 2010 15:53:02
-      // Copyright (c) Microsoft Corporation
-      // Express Edition with Advanced Services on Windows NT 6.1 <X86> (Build 7600: )
-      FServerVersionUntouched := Trim(GetVar('SELECT @@VERSION'));
-      rx := TRegExpr.Create;
-      rx.ModifierI := False;
-      // Extract server OS
-      rx.Expression := '\s+on\s+([^\r\n]+)';
-      if rx.Exec(FServerVersionUntouched) then
-        FServerOS := rx.Match[1];
-      // Cut at first line break
-      rx.Expression := '^([^\r\n]+)';
-      if rx.Exec(FServerVersionUntouched) then
-        FServerVersionUntouched := rx.Match[1];
-      try
-        // Try to get more exact server version to avoid displaying "20.14" in some cases
-        ServerVersion := GetVar('SELECT SERVERPROPERTY('+EscapeString('ProductVersion')+')');
-        if ExecRegExpr('(\d+)\.(\d+)\.(\d+)\.(\d+)', ServerVersion) then
-          FServerVersionUntouched := Copy(FServerVersionUntouched, 1, Pos(' - ', FServerVersionUntouched)+2) + ServerVersion;
-      except
-        // Above query only works on SQL Server 2008 and newer
-        // Keep value from SELECT @@VERSION on older servers
-      end;
-      rx.Free;
+      MssqlDetectServerInfo;
       FRealHostname := Parameters.Hostname;
 
       // Triggers OnDatabaseChange event for <no db>
@@ -3231,6 +3391,19 @@ begin
             );
         end else begin
           ErrorHint := '';
+        end;
+        if IgnoredInstance <> '' then begin
+          if not ErrorHint.IsEmpty then
+            ErrorHint := ErrorHint + sLineBreak + sLineBreak;
+          ErrorHint := ErrorHint + f_('The instance name "%s" was ignored, as port %d is set. Set the port to 0 to find the instance through the SQL Server Browser service.',
+            [IgnoredInstance, FinalPort]);
+        end;
+        if Parameters.ConvertedFromLegacyNetType then begin
+          if not ErrorHint.IsEmpty then
+            ErrorHint := ErrorHint + sLineBreak + sLineBreak;
+          ErrorHint := ErrorHint + _('This session was converted from named pipe or another legacy protocol to TCP/IP. '+
+            'Make sure TCP/IP is enabled for the server in the SQL Server Configuration Manager, under "Protocols for <instance>", and restart the server service. '+
+            'For a named instance without a fixed port, the SQL Server Browser service must be running.');
         end;
         raise EDbError.Create(Error, LastErrorCode, ErrorHint);
       end;
@@ -3648,6 +3821,47 @@ begin
     FLastErrorCode := ESQLDatabaseError(E).ErrorCode
   else
     FLastErrorCode := 0;
+  // SQLSTATE HYT00: SQL_ATTR_QUERY_TIMEOUT expired, see SetRunningStmt
+  if (FStmtQueryTimeout > 0) and (Pos('SqlState: HYT00', E.Message) > 0) then begin
+    FLastError := f_('Query cancelled after the timeout of %d seconds. You can change the timeout in the session settings.',
+      [FStmtQueryTimeout]);
+    FLastErrorCode := 0;
+  end;
+end;
+
+
+function TOdbcConnection.ConnectErrorHint(const Error: String): String;
+begin
+  Result := '';
+end;
+
+
+function TOdbcConnection.FieldDatatypeIndex(Field: TField): TDBDatatypeIndex;
+begin
+  case Field.DataType of
+    ftSmallint, ftWord, ftInteger, ftLargeint, ftAutoInc, ftBCD, ftFMTBcd, ftCurrency:
+      Result := dbdtNumeric;
+    ftBoolean:
+      Result := dbdtBool;
+    ftFloat:
+      Result := dbdtDouble;
+    ftFixedChar, ftFixedWideChar:
+      Result := dbdtChar;
+    ftString, ftWideString, ftGuid:
+      Result := dbdtVarchar;
+    ftMemo, ftWideMemo:
+      Result := dbdtText;
+    ftBytes, ftVarBytes:
+      Result := dbdtVarbinary;
+    ftBlob:
+      Result := dbdtBlob;
+    ftDate, ftDateTime:
+      Result := dbdtDatetime;
+    ftTimeStamp:
+      Result := dbdtTimestamp;
+    else
+      Result := dbdtUnknown;
+  end;
 end;
 
 
@@ -3727,6 +3941,8 @@ begin
               + ' ' + Parameters.OdbcDriverHint;
           InstalledDrivers.Free;
         end;
+        if ErrorHint.IsEmpty then
+          ErrorHint := ConnectErrorHint(Error);
         raise EDbError.Create(Error, LastErrorCode, ErrorHint);
       end;
     end;
@@ -4157,6 +4373,11 @@ end;
 procedure TSqlSrvConnection.DoAfterConnect;
 begin
   inherited;
+  MssqlDoAfterConnect;
+end;
+
+procedure TDBConnection.MssqlDoAfterConnect;
+begin
   // List of known IS tables
   FInformationSchemaObjects.CommaText := 'CHECK_CONSTRAINTS,'+
     'COLUMN_DOMAIN_USAGE,'+
@@ -4479,6 +4700,7 @@ begin
   TimerStart := GetTickCount64;
   FLastRawResults.Clear;
   QueryResult := nil;
+  FHandle.SetQueryTimeout(Parameters.QueryTimeout);
   FHandle.BeginResults;
   try
     try
@@ -4520,6 +4742,9 @@ begin
     finally
       FHandle.EndResults;
     end;
+    // A timeout while fetching rows may end the result set early without an error
+    if FHandle.TimedOut then
+      raise EDatabaseError.Create('');
     FLastQueryDuration := GetTickCount64 - TimerStart;
     FLastQueryNetworkDuration := 0;
 
@@ -4772,7 +4997,7 @@ begin
     if (ColCount > 0) and ExecRegExprI('^\s*(INSERT|UPDATE|DELETE|MERGE)\b', TSQLBatch.GetSQLWithoutComments(SQL)) then
       ColCount := 0;
     SetRunningStmt(OdbcCursorStmt(TSQLQueryAccess(QueryResult).Cursor));
-    if ColCount > 0 then begin
+    if (ColCount > 0) or FOpenAllStatements then begin
       try
         QueryResult.Open;
         SetRunningStmt(OdbcNullStmt);
@@ -4783,11 +5008,17 @@ begin
           SetRunningStmt(OdbcNullStmt);
           // Snowflake describes USE and other commands with a status column on SQLPrepare, but
           // returns no result set after SQLExecute. SQLDB then raises "Cannot open a non-select
-          // statement", after the statement was executed successfully.
+          // statement", after the statement was executed successfully. Same with all statements
+          // without result on FOpenAllStatements.
           if (TSQLQueryAccess(QueryResult).Cursor = nil)
             or TSQLQueryAccess(QueryResult).Cursor.FSelectable then
             raise;
           HasRows := False;
+          if FOpenAllStatements then try
+            Inc(FRowsAffected, Max(QueryResult.RowsAffected, 0));
+          except
+            on E2:EDatabaseError do;
+          end;
           if FTransaction.Active then
             FTransaction.Commit;
         end;
@@ -6005,7 +6236,11 @@ procedure TSqlSrvConnection.SetLastError(E: Exception);
 begin
   // Prefer the server's error number and text over DB-Library's generic
   // "Error 20018 : General SQL Server error: Check messages from the SQL Server"
-  if Assigned(FHandle) and (FHandle.ServerErrorText <> '') then begin
+  if Assigned(FHandle) and FHandle.TimedOut then begin
+    FLastError := f_('Query cancelled after the timeout of %d seconds. You can change the timeout in the session settings.',
+      [Parameters.QueryTimeout]);
+    FLastErrorCode := 0;
+  end else if Assigned(FHandle) and (FHandle.ServerErrorText <> '') then begin
     FLastError := FHandle.ServerErrorText;
     FLastErrorCode := FHandle.ServerErrorNo;
   end else begin
@@ -6335,15 +6570,19 @@ end;
 function TSqlSrvConnection.GetAllDatabases: TStringList;
 begin
   Result := inherited;
-  if not Assigned(Result) then begin
-    try
-      FAllDatabases := GetCol('SELECT '+QuoteIdent('name')+' FROM '+FSqlProvider.GetSql(qDatabaseTable)+' ORDER BY '+QuoteIdent('name'));
-    except on E:EDbError do
-      FAllDatabases := TStringList.Create;
-    end;
-    ApplyIgnoreDatabasePattern(FAllDatabases);
-    Result := FAllDatabases;
+  if not Assigned(Result) then
+    Result := MssqlGetAllDatabases;
+end;
+
+function TDBConnection.MssqlGetAllDatabases: TStringList;
+begin
+  try
+    FAllDatabases := GetCol('SELECT '+QuoteIdent('name')+' FROM '+FSqlProvider.GetSql(qDatabaseTable)+' ORDER BY '+QuoteIdent('name'));
+  except on E:EDbError do
+    FAllDatabases := TStringList.Create;
   end;
+  ApplyIgnoreDatabasePattern(FAllDatabases);
+  Result := FAllDatabases;
 end;
 
 function TPGConnection.GetAllDatabases: TStringList;
@@ -7503,13 +7742,18 @@ begin
 end;
 
 function TSqlSrvConnection.GetTableColumns(Table: TDBObject): TTableColumnList;
+begin
+  // Parent method is sufficient for most things
+  Result := MssqlCompleteTableColumns(Table, inherited GetTableColumns(Table));
+end;
+
+function TDBConnection.MssqlCompleteTableColumns(Table: TDBObject; Columns: TTableColumnList): TTableColumnList;
 var
   Comments: TDBQuery;
   TableCol: TTableColumn;
   Identities: TStringList;
 begin
-  // Parent method is sufficient for most things
-  Result := inherited;
+  Result := Columns;
 
   // Remove surrounding parentheses from default value. See #721
   for TableCol in Result do begin
@@ -7896,6 +8140,11 @@ begin
 end;
 
 function TSqlSrvConnection.GetTableKeys(Table: TDBObject): TTableKeyList;
+begin
+  Result := MssqlGetTableKeys(Table);
+end;
+
+function TDBConnection.MssqlGetTableKeys(Table: TDBObject): TTableKeyList;
 var
   KeyQuery: TDBQuery;
   NewKey: TTableKey;
@@ -8137,6 +8386,11 @@ begin
 end;
 
 function TSqlSrvConnection.GetTableForeignKeys(Table: TDBObject): TForeignKeyList;
+begin
+  Result := MssqlGetTableForeignKeys(Table);
+end;
+
+function TDBConnection.MssqlGetTableForeignKeys(Table: TDBObject): TForeignKeyList;
 var
   ForeignQuery: TDBQuery;
   ForeignKey: TForeignKey;
@@ -8817,8 +9071,12 @@ begin
   case Parameters.NetTypeGroup of
     ngMySQL:
       Result := Length(TMySQLConnection(Self).LastRawResults);
-    ngMSSQL:
-      Result := TSqlSrvConnection(Self).LastRawResults.Count;
+    ngMSSQL: begin
+      if Self is TOdbcConnection then
+        Result := TOdbcConnection(Self).LastRawResults.Count
+      else
+        Result := TSqlSrvConnection(Self).LastRawResults.Count;
+    end;
     ngPgSQL:
       Result := Length(TPGConnection(Self).LastRawResults);
     ngSQLite:
@@ -9324,6 +9582,11 @@ begin
 end;
 
 procedure TSqlSrvConnection.FetchDbObjects(db: String; var Cache: TDBObjectList);
+begin
+  MssqlFetchDbObjects(db, Cache);
+end;
+
+procedure TDBConnection.MssqlFetchDbObjects(db: String; var Cache: TDBObjectList);
 var
   obj: TDBObject;
   Results: TDBQuery;
@@ -10188,6 +10451,231 @@ begin
   else
     ObjType := UpperCase(Obj.ObjType);
   Query('DROP '+ObjType+' '+Obj.QuotedDbAndTableName);
+end;
+
+
+{ TMssqlOdbcConnection }
+
+constructor TMssqlOdbcConnection.Create(AOwner: TComponent);
+begin
+  inherited;
+  FDatatypes := Copy(MSSQLDatatypes);
+  FInfSch := 'INFORMATION_SCHEMA';
+  FMaxRowsPerInsert := 1000;
+  // SQLNumResultCols after SQLPrepare reports no columns for EXEC and for DML with an
+  // OUTPUT clause, though these return rows
+  FOpenAllStatements := True;
+end;
+
+
+procedure TMssqlOdbcConnection.PrepareHandle(FinalHost: String; FinalPort: Integer);
+var
+  InstancePos: Integer;
+  Server, LocalAlias: String;
+begin
+  // Set after connecting, so a login timeout (also SQLSTATE HYT00) is not reported as query timeout
+  FStmtQueryTimeout := 0;
+  FIgnoredInstance := '';
+  // "server\instance": the driver finds the instance's port through the SQL Server Browser.
+  // As with FreeTDS and ADO, a given port takes precedence over the instance name.
+  Server := FinalHost;
+  InstancePos := Pos('\', Server);
+  if (InstancePos > 0) and (FinalPort > 0) then begin
+    FIgnoredInstance := Copy(Server, InstancePos+1, MaxInt);
+    Server := Copy(Server, 1, InstancePos-1);
+    Log(lcInfo, f_('Ignoring instance name "%s", connecting to port %d', [FIgnoredInstance, FinalPort]));
+  end;
+  // Windows authentication to a loopback IP fails in the driver with "Cannot generate SSPI
+  // context" (also in sqlcmd), "localhost" works via NTLM
+  InstancePos := Pos('\', Server);
+  if InstancePos > 0 then
+    LocalAlias := Copy(Server, 1, InstancePos-1)
+  else
+    LocalAlias := Server;
+  if Parameters.WindowsAuth and ((LocalAlias = '127.0.0.1') or (LocalAlias = '::1') or (LocalAlias = '[::1]')) then begin
+    Server := 'localhost' + Copy(Server, Length(LocalAlias)+1, MaxInt);
+    LocalAlias := 'localhost';
+  end;
+  if FinalPort > 0 then begin
+    // "." and "(local)" are the local machine, but connect via shared memory, without a port
+    if (LocalAlias = '.') or SameText(LocalAlias, '(local)') then
+      Server := 'localhost';
+    Server := Server + ',' + FinalPort.ToString;
+  end;
+  FHandle.Params.Values['Server'] := Server;
+  FHandle.Params.Values['Database'] := 'master';
+  FHandle.Params.Values['APP'] := AppClientName;
+  // Statements are not wrapped in transactions, as with FreeTDS. CREATE DATABASE and others
+  // fail in a transaction, and BEGIN TRAN / COMMIT in a query tab work as expected.
+  FHandle.AutoCommit := True;
+  // Not prepared: a #temp table created in a prepared statement is gone afterwards
+  FHandle.ExecDirect := True;
+  if Parameters.WindowsAuth then begin
+    // Current Windows account
+    FHandle.UserName := '';
+    FHandle.Password := '';
+    FHandle.Params.Values['Trusted_Connection'] := 'yes';
+  end;
+  // Encryption settings from the SSL tab. Driver 18 encrypts and validates the server
+  // certificate by default, which fails on servers with a self-signed certificate, so
+  // encryption is switched off explicitly without SSL activated, as with driver 17.
+  // The driver has no mode for verifying the CA without the host name, so that one verifies both.
+  FEncryptionRequested := Parameters.WantSSL;
+  if FEncryptionRequested then begin
+    FHandle.Params.Values['Encrypt'] := 'yes';
+    FHandle.Params.Values['TrustServerCertificate'] := IfThen(Parameters.SSLVerification = 0, 'yes', 'no');
+  end
+  else
+    FHandle.Params.Values['Encrypt'] := 'no';
+  FHandle.Float38AsDecimal := False;
+end;
+
+
+procedure TMssqlOdbcConnection.AfterHandleOpened;
+begin
+  MssqlDetectServerInfo;
+  try
+    FIsSSL := SameText(GetVar('SELECT '+QuoteIdent('encrypt_option')+' FROM '+QuoteIdent('sys')+'.'+QuoteIdent('dm_exec_connections')+' WHERE '+QuoteIdent('session_id')+'=@@SPID'), 'TRUE');
+  except
+    // Missing VIEW SERVER STATE permission, or SQL Server 2000. With encryption requested,
+    // the driver fails to connect if it cannot encrypt.
+    on E:EDbError do
+      FIsSSL := FEncryptionRequested;
+  end;
+  FStmtQueryTimeout := Parameters.QueryTimeout;
+end;
+
+
+function TMssqlOdbcConnection.PingSQL: String;
+begin
+  Result := 'SELECT 1';
+end;
+
+
+function TMssqlOdbcConnection.ConnectErrorHint(const Error: String): String;
+begin
+  Result := '';
+  if ContainsText(Error, 'SSL Provider') and not (Parameters.WantSSL and (Parameters.SSLVerification = 0)) then begin
+    // Self-signed or otherwise unverifiable server certificate
+    Result := _('Install the server certificate as a trusted certificate on this computer, or activate SSL with "No verification" in your session settings (insecure).');
+  end;
+  if ContainsText(Error, 'SSPI') and Parameters.WindowsAuth then begin
+    // Kerberos needs the server's host name, not an IP address
+    if not Result.IsEmpty then
+      Result := Result + sLineBreak + sLineBreak;
+    Result := Result + _('Windows authentication needs the server''s host name, not its IP address. For a domain account, the server also needs a registered service principal name (SPN).');
+  end;
+  if FIgnoredInstance <> '' then begin
+    if not Result.IsEmpty then
+      Result := Result + sLineBreak + sLineBreak;
+    Result := Result + f_('The instance name "%s" was ignored, as port %d is set. Set the port to 0 to find the instance through the SQL Server Browser service.',
+      [FIgnoredInstance, Parameters.Port]);
+  end;
+end;
+
+
+procedure TMssqlOdbcConnection.DoAfterConnect;
+begin
+  inherited;
+  MssqlDoAfterConnect;
+end;
+
+
+function TMssqlOdbcConnection.GetThreadId: Int64;
+begin
+  if FThreadId = 0 then begin
+    Ping(False);
+    if FActive then
+      FThreadID := StrToInt64Def(GetVar('SELECT @@SPID'), 0);
+  end;
+  Result := FThreadID;
+end;
+
+
+function TMssqlOdbcConnection.GetAllDatabases: TStringList;
+begin
+  Result := inherited;
+  if not Assigned(Result) then
+    Result := MssqlGetAllDatabases;
+end;
+
+
+procedure TMssqlOdbcConnection.FetchDbObjects(db: String; var Cache: TDBObjectList);
+begin
+  MssqlFetchDbObjects(db, Cache);
+end;
+
+
+function TMssqlOdbcConnection.GetTableColumns(Table: TDBObject): TTableColumnList;
+begin
+  Result := MssqlCompleteTableColumns(Table, inherited GetTableColumns(Table));
+end;
+
+
+function TMssqlOdbcConnection.GetTableKeys(Table: TDBObject): TTableKeyList;
+begin
+  Result := MssqlGetTableKeys(Table);
+end;
+
+
+function TMssqlOdbcConnection.GetTableForeignKeys(Table: TDBObject): TForeignKeyList;
+begin
+  Result := MssqlGetTableForeignKeys(Table);
+end;
+
+
+function TMssqlOdbcConnection.GetGridColumnExpression(Col: TTableColumn): String;
+begin
+  // CLR types like geography and geometry arrive as raw bytes (SQL_SS_UDT, see odbcfixed).
+  // As text, e.g. "POINT (-122.34 47.65)", they are readable and editable.
+  Result := '';
+  if Col.DataType.Index = dbdtUnknown then
+    Result := 'CAST(' + QuoteIdent(Col.Name) + ' AS NVARCHAR(MAX))';
+end;
+
+
+function TMssqlOdbcConnection.FieldDatatypeIndex(Field: TField): TDBDatatypeIndex;
+begin
+  case Field.DataType of
+    ftSmallint, ftWord:
+      Result := dbdtSmallint;
+    ftInteger, ftAutoInc:
+      Result := dbdtInt;
+    ftLargeint:
+      Result := dbdtBigint;
+    ftBCD, ftFMTBcd:
+      Result := dbdtDecimal;
+    ftCurrency:
+      Result := dbdtMoney;
+    ftFloat:
+      Result := dbdtFloat;
+    ftBoolean:
+      Result := dbdtBit;
+    ftFixedChar:
+      Result := dbdtChar;
+    ftFixedWideChar:
+      Result := dbdtNchar;
+    ftString:
+      Result := dbdtVarchar;
+    ftWideString:
+      Result := dbdtNvarchar;
+    ftGuid:
+      Result := dbdtUniqueidentifier;
+    ftMemo, ftWideMemo:
+      Result := dbdtText;
+    ftBytes:
+      Result := dbdtBinary;
+    ftVarBytes, ftBlob:
+      Result := dbdtVarbinary;
+    ftDate:
+      Result := dbdtDate;
+    ftTime:
+      Result := dbdtTime;
+    ftDateTime, ftTimeStamp:
+      Result := dbdtDatetime;
+    else
+      Result := dbdtUnknown;
+  end;
 end;
 
 
@@ -12918,30 +13406,10 @@ begin
       for i:=0 to NumFields-1 do begin
         FColumnNames.Add(LastResult.Fields[i].FieldName);
         FColumnOrgNames.Add(FColumnNames[i]);
-        case LastResult.Fields[i].DataType of
-          ftSmallint, ftWord, ftInteger, ftLargeint, ftAutoInc, ftBCD, ftFMTBcd, ftCurrency:
-            TypeIndex := dbdtNumeric;
-          ftBoolean:
-            TypeIndex := dbdtBool;
-          ftFloat:
-            TypeIndex := dbdtDouble;
-          ftFixedChar, ftFixedWideChar:
-            TypeIndex := dbdtChar;
-          ftString, ftWideString, ftGuid:
-            TypeIndex := dbdtVarchar;
-          ftMemo, ftWideMemo:
-            TypeIndex := dbdtText;
-          ftBytes, ftVarBytes:
-            TypeIndex := dbdtVarbinary;
-          ftBlob:
-            TypeIndex := dbdtBlob;
-          ftDate, ftDateTime:
-            TypeIndex := dbdtDatetime;
-          ftTimeStamp:
-            TypeIndex := dbdtTimestamp;
-          else
-            TypeIndex := dbdtUnknown;
-        end;
+        TypeIndex := FConnection.FieldDatatypeIndex(LastResult.Fields[i]);
+        // IDENTITY column, for the grid's INSERT
+        if (LastResult.Fields[i].DataType = ftAutoInc) and FConnection.Parameters.IsAnyMSSQL then
+          FAutoIncrementColumn := i;
         FColumnTypes[i] := FConnection.GetDatatypeByIndex(TypeIndex);
       end;
       FRecNo := -1;
@@ -13082,6 +13550,15 @@ begin
           end;
           ftFloat, ftCurrency:
             Result := FloatToStr(Field.AsFloat, FFormatSettings);
+          ftBoolean: begin
+            // MS SQL BIT: 0 and 1 in the grid, as on FreeTDS. "True" would fail in UPDATE.
+            if Field.IsNull then
+              Result := ''
+            else if FConnection.Parameters.IsAnyMSSQL then
+              Result := IfThen(Field.AsBoolean, '1', '0')
+            else
+              Result := Field.AsString;
+          end;
           ftBlob, ftBytes, ftVarBytes: begin
             // Raw bytes, without any codepage conversion, see GetColBinData and EscapeBin
             Result := '';

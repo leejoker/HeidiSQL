@@ -243,6 +243,7 @@ type
     procedure RefreshSessions(ParentNode: PVirtualNode);
     procedure UpdateV12ImportControls;
     procedure ShowImportStatus(Status: String);
+    procedure OfferV12Import(Data: PtrInt);
     function SelectedSessionPath: String;
     function CurrentParams: TConnectionParameters;
     procedure FinalizeModifications(var CanProceed: Boolean);
@@ -315,6 +316,9 @@ begin
   Params := TConnectionParameters.Create;
   NetTypes := TStringList.Create;
   for nt:=Low(nt) to High(nt) do begin
+    // Converted to TCP/IP when loaded, see TConnectionParameters.ConvertLegacyNetType
+    if nt in [ntMSSQL_NamedPipe, ntMSSQL_SPX, ntMSSQL_VINES, ntMSSQL_RPC] then
+      Continue;
     Params.NetType := nt;
     NetTypes.AddObject(Params.NetTypeName(True), TObject(NativeInt(Ord(nt))));
   end;
@@ -453,6 +457,10 @@ begin
 
   // Init sessions tree
   RefreshSessions(nil);
+
+  // First start after an upgrade: no sessions yet, but some in the previous version
+  if btnImportV12.Visible and (ListSessions.RootNodeCount = 0) then
+    Application.QueueAsyncCall(OfferV12Import, 0);
 
   // Focus last session
   SelectNode(ListSessions, nil);
@@ -672,6 +680,17 @@ begin
   // Live feedback from the import routines, see TAppSettings.OnImportStatus
   lblImportStatus.Caption := Status;
   lblImportStatus.Repaint;
+end;
+
+procedure Tconnform.OfferV12Import(Data: PtrInt);
+begin
+  // Asked once per show of an empty session manager. Declining keeps the import button.
+  if not btnImportV12.Visible then
+    Exit;
+  if MessageDialog(_('Import settings from previous version?'),
+    _('A previous version of HeidiSQL stored settings and sessions on this computer. Do you want to import them now?'),
+    mtConfirmation, [mbYes, mbNo]) = mrYes then
+    btnImportV12.Click;
 end;
 
 procedure Tconnform.btnImportV12Click(Sender: TObject);
@@ -1736,7 +1755,7 @@ end;
 
 procedure Tconnform.ValidateControls;
 var
-  SessionFocused, FolderFocused: Boolean;
+  SessionFocused, FolderFocused, SSLActive, SSLFilesActive: Boolean;
   Params: TConnectionParameters;
 begin
   SessionFocused := False;
@@ -1753,12 +1772,12 @@ begin
       lblPassword.Caption := _('Password:');
       lblDatabase.Caption := _('Databases')+':';
       editDatabases.TextHint := _('Separated by semicolon');
-      if Params.IsAnyOdbc then
+      if Params.UsesOdbcDriver then
         lblLibrary.Caption := _('ODBC driver:')
       else
         lblLibrary.Caption := _('Library:');
       // Hint on where to get the driver, if none is installed
-      if Params.IsAnyOdbc and (comboLibrary.Items.Count = 0) then begin
+      if Params.UsesOdbcDriver and (comboLibrary.Items.Count = 0) then begin
         comboLibrary.TextHint := _('No ODBC driver found');
         comboLibrary.Hint := Params.OdbcDriverHint;
         comboLibrary.ShowHint := True;
@@ -1806,7 +1825,7 @@ begin
       editUsername.Button.Enabled := Params.NetType = ntSQLiteEncrypted;
       lblPassword.Enabled := lblUsername.Enabled;
       editPassword.Enabled := lblUsername.Enabled;
-      lblPort.Enabled := Params.NetType in [ntMySQL_TCPIP, ntMySQL_SSHtunnel, ntMySQL_ProxySQLAdmin, ntMySQL_ClickHouse, ntMySQL_RDS, ntMSSQL_TCPIP, ntPgSQL_TCPIP, ntPgSQL_SSHtunnel, ntInterbase_TCPIP, ntFirebird_TCPIP, ntOracle_ODBC, ntSnowflake_ODBC, ntRedis_TCPIP, ntRedis_SSHtunnel, ntRedis_TLS];
+      lblPort.Enabled := Params.NetType in [ntMySQL_TCPIP, ntMySQL_SSHtunnel, ntMySQL_ProxySQLAdmin, ntMySQL_ClickHouse, ntMySQL_RDS, ntMSSQL_TCPIP, ntPgSQL_TCPIP, ntPgSQL_SSHtunnel, ntInterbase_TCPIP, ntFirebird_TCPIP, ntOracle_ODBC, ntSnowflake_ODBC, ntMSSQL_ODBC, ntRedis_TCPIP, ntRedis_SSHtunnel, ntRedis_TLS];
       spinPort.Enabled := lblPort.Enabled;
       chkCompressed.Enabled := Params.IsAnyMySQL;
       lblDatabase.Enabled := Params.NetTypeGroup in [ngMySQL, ngMSSQL, ngPgSQL, ngInterbase, ngRedis, ngOracle, ngSnowflake];
@@ -1850,17 +1869,20 @@ begin
       lblAdditionalParams.Enabled := Params.AdditionalParamsSupported;
       editAdditionalParams.Enabled := lblAdditionalParams.Enabled;
       // SSL tab:
-      chkWantSSL.Enabled := Params.NetType in [ntMySQL_TCPIP, ntMySQL_SSHtunnel, ntMySQL_ProxySQLAdmin, ntMySQL_ClickHouse, ntMySQL_RDS, ntPgSQL_TCPIP, ntPgSQL_SSHtunnel, ntRedis_TLS];
-      lblSSLPrivateKey.Enabled := Params.WantSSL;
-      editSSLPrivateKey.Enabled := Params.WantSSL;
-      lblSSLCACertificate.Enabled := Params.WantSSL;
-      editSSLCACertificate.Enabled := Params.WantSSL;
-      lblSSLCertificate.Enabled := Params.WantSSL;
-      editSSLCertificate.Enabled := Params.WantSSL;
-      lblSSLcipher.Enabled := Params.WantSSL;
-      editSSLcipher.Enabled := Params.WantSSL;
-      lblSSLVerification.Enabled := Params.WantSSL;
-      comboSSLVerification.Enabled := Params.WantSSL;
+      chkWantSSL.Enabled := Params.NetType in [ntMySQL_TCPIP, ntMySQL_SSHtunnel, ntMySQL_ProxySQLAdmin, ntMySQL_ClickHouse, ntMySQL_RDS, ntPgSQL_TCPIP, ntPgSQL_SSHtunnel, ntMSSQL_ODBC, ntRedis_TLS];
+      SSLActive := chkWantSSL.Enabled and Params.WantSSL;
+      // The ODBC driver for MS SQL has no client key, certificate, CA or cipher options
+      SSLFilesActive := SSLActive and (not Params.IsAnyMSSQL);
+      lblSSLPrivateKey.Enabled := SSLFilesActive;
+      editSSLPrivateKey.Enabled := SSLFilesActive;
+      lblSSLCACertificate.Enabled := SSLFilesActive;
+      editSSLCACertificate.Enabled := SSLFilesActive;
+      lblSSLCertificate.Enabled := SSLFilesActive;
+      editSSLCertificate.Enabled := SSLFilesActive;
+      lblSSLcipher.Enabled := SSLFilesActive;
+      editSSLcipher.Enabled := SSLFilesActive;
+      lblSSLVerification.Enabled := SSLActive;
+      comboSSLVerification.Enabled := SSLActive;
 
       Params.Free;
     end;

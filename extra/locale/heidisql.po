@@ -4880,6 +4880,21 @@ msgstr "unknown"
 msgid "You could try the default library %s in your session settings. (Current: %s)"
 msgstr "You could try the default library %s in your session settings. (Current: %s)"
 
+msgid "Ignoring instance name \"%s\", connecting to port %d"
+msgstr "Ignoring instance name \"%s\", connecting to port %d"
+
+msgid "The instance name \"%s\" was ignored, as port %d is set. Set the port to 0 to find the instance through the SQL Server Browser service."
+msgstr "The instance name \"%s\" was ignored, as port %d is set. Set the port to 0 to find the instance through the SQL Server Browser service."
+
+msgid "Query cancelled after the timeout of %d seconds. You can change the timeout in the session settings."
+msgstr "Query cancelled after the timeout of %d seconds. You can change the timeout in the session settings."
+
+msgid "Named pipe and other legacy protocols are no longer supported, connecting via TCP/IP instead"
+msgstr "Named pipe and other legacy protocols are no longer supported, connecting via TCP/IP instead"
+
+msgid "This session was converted from named pipe or another legacy protocol to TCP/IP. Make sure TCP/IP is enabled for the server in the SQL Server Configuration Manager, under \"Protocols for <instance>\", and restart the server service. For a named instance without a fixed port, the SQL Server Browser service must be running."
+msgstr "This session was converted from named pipe or another legacy protocol to TCP/IP. Make sure TCP/IP is enabled for the server in the SQL Server Configuration Manager, under \"Protocols for <instance>\", and restart the server service. For a named instance without a fixed port, the SQL Server Browser service must be running."
+
 msgid "This is a known issue with older libraries. Try a newer %s in the session settings."
 msgstr "This is a known issue with older libraries. Try a newer %s in the session settings."
 
@@ -5855,6 +5870,12 @@ msgstr "Importing file: %s"
 #. Session manager > Start tab
 msgid "Imported settings, sessions and files from a previous version."
 msgstr "Imported settings, sessions and files from a previous version."
+
+msgid "Import settings from previous version?"
+msgstr "Import settings from previous version?"
+
+msgid "A previous version of HeidiSQL stored settings and sessions on this computer. Do you want to import them now?"
+msgstr "A previous version of HeidiSQL stored settings and sessions on this computer. Do you want to import them now?"
 
 #. MessageDialog()
 msgid "Missing \"No\" button in %() call"
@@ -7627,6 +7648,18 @@ msgstr "Install the Oracle Instant Client packages \"Basic\" and \"ODBC\" from %
 #: dbconnection.pas
 msgid "Install the Snowflake ODBC driver from %s."
 msgstr "Install the Snowflake ODBC driver from %s."
+
+#: dbconnection.pas
+msgid "Install the \"Microsoft ODBC Driver for SQL Server\" from %s."
+msgstr "Install the \"Microsoft ODBC Driver for SQL Server\" from %s."
+
+#: dbconnection.pas
+msgid "Install the server certificate as a trusted certificate on this computer, or activate SSL with \"No verification\" in your session settings (insecure)."
+msgstr "Install the server certificate as a trusted certificate on this computer, or activate SSL with \"No verification\" in your session settings (insecure)."
+
+#: dbconnection.pas
+msgid "Windows authentication needs the server's host name, not its IP address. For a domain account, the server also needs a registered service principal name (SPN)."
+msgstr "Windows authentication needs the server's host name, not its IP address. For a domain account, the server also needs a registered service principal name (SPN)."
 
 #: dbconnection.pas
 msgid "The ODBC driver \"%s\" is not installed."

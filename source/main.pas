@@ -1198,7 +1198,7 @@ type
     procedure menuAutoExpandClick(Sender: TObject);
     procedure pnlLeftResize(Sender: TObject);
     procedure editDatabaseTableFilterChange(Sender: TObject);
-    procedure editDatabaseTableFilterLeftButtonClick(Sender: TObject);
+    procedure editFilterButtonClick(Sender: TObject);
     procedure editDatabaseTableFilterMenuClick(Sender: TObject);
     procedure editDatabaseTableFilterExit(Sender: TObject);
     procedure menuClearDataTabFilterClick(Sender: TObject);
@@ -1301,6 +1301,10 @@ type
     FLastMouseUpOnPageControl: Cardinal;
     FLastTabNumberOnMouseUp: Integer;
     FTabCloseButton: TTabCloseButton;
+    FTabAddButton: TTabAddButton;
+    {$IFDEF LCLWin32}
+    FPageControlMainWndProc: TWndMethod;
+    {$ENDIF}
     FLastMouseButtonUpOnGrid: TMouseButton;
     //FJumpList: TJumpList;
     // Filter text per tab for filter panel
@@ -1325,7 +1329,6 @@ type
     FOperatingGrid: TBaseVirtualTree;
     FActiveDbObj: TDBObject;
     FActiveObjectGroup: TListNodeType;
-    //FBtnAddTab: TSpeedButton;
     FDBObjectsMaxSize: Int64;
     FDBObjectsMaxRows: Int64;
     FSearchReplaceDialog: TfrmSearchReplace;
@@ -1381,6 +1384,8 @@ type
     function ConfirmTabClose(PageIndex: Integer; AppIsClosing: Boolean): Boolean;
     function ConfirmTabClear(PageIndex: Integer; AppIsClosing: Boolean): Boolean;
     procedure UpdateFilterPanel(Sender: TObject);
+    procedure UpdateFilterEditButton(Edit: TEditButton);
+    procedure ShowFilterHistoryMenu(Edit: TEditButton);
     procedure ConnectionReady(Connection: TDBConnection; Database: String);
     procedure DatabaseChanged(Connection: TDBConnection; Database: String);
     procedure ObjectnamesChanged(Connection: TDBConnection; Database: String);
@@ -1405,6 +1410,9 @@ type
     procedure GlobalSynEditStatusChange(Sender: TObject; Changes: TSynStatusChanges);
     procedure ColorSchemeMenuClick(Sender: TObject);
     procedure AsyncErrorDialog(Data: PtrInt);
+    {$IFDEF LCLWin32}
+    procedure PageControlMainWindowProc(var Message: TLMessage);
+    {$ENDIF}
   public
     QueryTabs: TQueryTabList;
     ActiveObjectEditor: TDBObjectEditor;
@@ -1864,6 +1872,10 @@ procedure TMainForm.FormDestroy(Sender: TObject);
 begin
   // Discard a possibly queued AsyncRepaintGrid call
   Application.RemoveAsyncCalls(Self);
+  {$IFDEF LCLWin32}
+  if Assigned(FPageControlMainWndProc) then
+    PageControlMain.WindowProc := FPageControlMainWndProc;
+  {$ENDIF}
 
   {$IFDEF DARWIN}
   // Work around a SynEdit bug which crashes the app on every shutdown on Cocoa:
@@ -2312,7 +2324,39 @@ begin
   FTabCloseButton.Hint := actCloseQueryTab.Caption;
   FTabCloseButton.OnIsClosable := TabCloseButtonIsClosable;
   FTabCloseButton.OnCloseTab := TabCloseButtonCloseTab;
+  // "+" button after the last tab
+  FTabAddButton := TTabAddButton.Create(Self, PageControlMain);
+  FTabAddButton.Hint := actNewQueryTab.Hint;
+  FTabAddButton.OnClick := actNewQueryTabExecute;
+  {$IFDEF LCLWin32}
+  FPageControlMainWndProc := PageControlMain.WindowProc;
+  PageControlMain.WindowProc := PageControlMainWindowProc;
+  {$ENDIF}
 end;
+
+
+{$IFDEF LCLWin32}
+procedure TMainForm.PageControlMainWindowProc(var Message: TLMessage);
+var
+  P: TPoint;
+  TabR: TRect;
+begin
+  FPageControlMainWndProc(Message);
+  // The native tab control returns HTTRANSPARENT for the empty area of the tab strip, so right
+  // clicks there reach the parent panel instead of the PageControl and its popup menu.
+  // Other widgetsets deliver these clicks to the PageControl natively.
+  if (Message.Msg = LM_NCHITTEST)
+    and (Message.Result = HTTRANSPARENT)
+    and Assigned(PageControlMain.ActivePage)
+    then begin
+    P := PageControlMain.ScreenToClient(Point(SmallInt(LoWord(Message.LParam)), SmallInt(HiWord(Message.LParam))));
+    // The row of the active tab is the bottom row, also with multiple tab rows
+    TabR := PageControlMain.TabRect(PageControlMain.PageToTabIndex(PageControlMain.ActivePageIndex));
+    if P.Y < TabR.Bottom then
+      Message.Result := HTCLIENT;
+  end;
+end;
+{$ENDIF}
 
 
 {**
@@ -6923,7 +6967,7 @@ begin
   ValidateControls(Sender);
   // Background of the close button follows the active tab
   if Assigned(FTabCloseButton) then
-    FTabCloseButton.UpdateHover;
+    FTabCloseButton.UpdatePosition;
 end;
 
 
@@ -10040,7 +10084,7 @@ begin
   // Reset typing timer
   TimerFilterVT.Enabled := False;
   TimerFilterVT.Enabled := True;
-  //editFilterVT.RightButton.Visible := editFilterVT.Text <> '';
+  UpdateFilterEditButton(editFilterVT);
 end;
 
 
@@ -13978,7 +14022,7 @@ begin
   PageControlMain.ActivePageIndex := NewPageIndex;
   // Neighbour tab may now be below the mouse cursor
   if Assigned(FTabCloseButton) then
-    FTabCloseButton.UpdateHover;
+    FTabCloseButton.UpdatePosition;
   //LockWindowUpdate(0);
   PageControlMain.OnChange(PageControlMain);
 end;
@@ -14061,22 +14105,43 @@ begin
   rxdb.Free;
   rxtable.Free;
 
-  //editDatabaseFilter.RightButton.Visible := editDatabaseFilter.Text <> '';
-  //editTableFilter.RightButton.Visible := editTableFilter.Text <> '';
+  UpdateFilterEditButton(editDatabaseFilter);
+  UpdateFilterEditButton(editTableFilter);
 end;
 
 
-procedure TMainForm.editDatabaseTableFilterLeftButtonClick(Sender: TObject);
+procedure TMainForm.UpdateFilterEditButton(Edit: TEditButton);
+begin
+  // Single button with two functions, as TEditButton has no second button:
+  // clear icon when text is entered, history icon when empty
+  if Edit.Text <> '' then
+    Edit.ImageIndex := 193
+  else if Edit = editDatabaseFilter then
+    Edit.ImageIndex := 191
+  else
+    Edit.ImageIndex := 192;
+end;
+
+
+procedure TMainForm.editFilterButtonClick(Sender: TObject);
+begin
+  // Clear filter if not empty, otherwise show filter history menu
+  if TEditButton(Sender).Text <> '' then
+    buttonedEditClear(Sender)
+  else
+    ShowFilterHistoryMenu(TEditButton(Sender));
+end;
+
+
+procedure TMainForm.ShowFilterHistoryMenu(Edit: TEditButton);
 var
   Menu: TPopupMenu;
   Item: TMenuItem;
-  Edit: TEditButton;
   History: TStringList;
   ItemText: String;
   Setting: TAppSettingIndex;
 begin
   // Create right menu with filter history
-  Edit := Sender as TEditButton;
   Menu := TPopupMenu.Create(Edit);
   //Menu.AutoHotkeys := maManual;
   Menu.Images := ImageListMain;
@@ -14088,7 +14153,7 @@ begin
   else if Edit = editFilterVT then
     Setting := asFilterVT
   else
-    raise Exception.CreateFmt(MsgUnhandledControl, ['editDatabaseTableFilterLeftButtonClick']);
+    raise Exception.CreateFmt(MsgUnhandledControl, ['ShowFilterHistoryMenu']);
   History := TStringList.Create;
   History.Text := AppSettings.ReadString(Setting);
   for ItemText in History do begin
